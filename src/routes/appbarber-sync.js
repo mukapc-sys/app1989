@@ -108,17 +108,11 @@ async function resolverCliente(m, unidadeId, cacheTel) {
   return { cliente_id: novo.id, criado: true }
 }
 
-// Sincroniza UMA unidade para UM dia.
-async function sincronizarUnidade(unidadeId, cookie, dia) {
-  // 1) IDs dos profissionais (vêm do de-para já carregado nas tabelas)
+// Processa uma LISTA de agendamentos crus (já buscados) -> casa, cria cliente, grava.
+async function processarAgendamentos(unidadeId, bruto) {
+  if (!Array.isArray(bruto)) bruto = []
   const { profMap, servMap } = await carregarDeParas(unidadeId)
-  const profIds = Object.keys(profMap)
-  if (!profIds.length) throw new Error('Unidade sem profissionais no de-para')
 
-  // 2) lê a agenda do AppBarber
-  const bruto = await buscarAgenda(cookie, dia, profIds)
-
-  // 3) processa cada item
   const cacheTel = {}
   const registros = []
   let novosClientes = 0, pendentes = 0, agendamentos = 0, bloqueios = 0
@@ -138,7 +132,7 @@ async function sincronizarUnidade(unidadeId, cookie, dia) {
     registros.push(reg)
   }
 
-  // 4) grava tudo (upsert por appbarber_id -> não duplica)
+  // grava em lotes (upsert por appbarber_id -> não duplica)
   if (registros.length) {
     const { error } = await supabaseAdmin
       .from('agenda_appbarber')
@@ -147,8 +141,6 @@ async function sincronizarUnidade(unidadeId, cookie, dia) {
   }
 
   return {
-    unidade_id: unidadeId,
-    dia: dia,
     total: bruto.length,
     agendamentos,
     bloqueios,
@@ -158,4 +150,14 @@ async function sincronizarUnidade(unidadeId, cookie, dia) {
   }
 }
 
-module.exports = { sincronizarUnidade, construirRegistro, normalizarTelefone, carregarDeParas }
+// Sincroniza UMA unidade para UM dia (servidor busca — usado se o cookie valer no IP do servidor).
+async function sincronizarUnidade(unidadeId, cookie, dia) {
+  const { profMap } = await carregarDeParas(unidadeId)
+  const profIds = Object.keys(profMap)
+  if (!profIds.length) throw new Error('Unidade sem profissionais no de-para')
+  const bruto = await buscarAgenda(cookie, dia, profIds)
+  const r = await processarAgendamentos(unidadeId, bruto)
+  return { unidade_id: unidadeId, dia, ...r }
+}
+
+module.exports = { sincronizarUnidade, processarAgendamentos, construirRegistro, normalizarTelefone, carregarDeParas }

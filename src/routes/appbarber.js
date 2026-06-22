@@ -2,7 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
-const { sincronizarUnidade } = require('./appbarber-sync')
+const { sincronizarUnidade, processarAgendamentos } = require('./appbarber-sync')
 
 const ADM = ['proprietario', 'gerente']
 
@@ -184,6 +184,31 @@ router.get('/sessoes', autenticar, exigirPerfil(...ADM), async (req, res) => {
   } catch (err) {
     console.error('[appbarber/sessoes]', err.message)
     return res.status(500).json({ erro: 'Erro ao listar conexões' })
+  }
+})
+
+// ============================================================
+// POST /appbarber/importar   (chamado pela EXTENSÃO)
+// Recebe os agendamentos JÁ LIDOS no navegador do usuário e processa.
+// Protegido por uma senha secreta (header x-ext-segredo), pois a
+// extensão não tem o login do sistema.
+// body: { unidade_id, agendamentos: [ ...itens crus do AppBarber... ] }
+// ============================================================
+router.post('/importar', async (req, res) => {
+  try {
+    const segredo = req.headers['x-ext-segredo'] || (req.body && req.body.segredo)
+    if (!process.env.APPBARBER_EXT_SECRET || segredo !== process.env.APPBARBER_EXT_SECRET) {
+      return res.status(401).json({ ok: false, motivo: 'SEGREDO_INVALIDO' })
+    }
+    const { unidade_id, agendamentos } = req.body || {}
+    if (!unidade_id || !Array.isArray(agendamentos)) {
+      return res.status(400).json({ ok: false, erro: 'Envie unidade_id e agendamentos[]' })
+    }
+    const resumo = await processarAgendamentos(unidade_id, agendamentos)
+    return res.json({ ok: true, resumo: { unidade_id, ...resumo } })
+  } catch (err) {
+    console.error('[appbarber/importar]', err.message)
+    return res.status(200).json({ ok: false, motivo: 'ERRO', detalhe: err.message })
   }
 })
 
