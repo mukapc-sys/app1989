@@ -115,11 +115,10 @@ router.post('/ler/:unidade', autenticar, exigirPerfil(...ADM), async (req, res) 
     const resumo = await sincronizarUnidade(unidadeId, cookie, dia)
     return res.json({ ok: true, resumo })
   } catch (err) {
-    if (err.message === 'SESSAO_EXPIRADA') {
-      return res.status(401).json({ erro: 'SESSAO_EXPIRADA', detalhe: 'O cookie do AppBarber expirou. Faça login de novo.' })
-    }
     console.error('[appbarber/ler]', err.message)
-    return res.status(500).json({ erro: 'Erro ao ler a agenda', detalhe: err.message })
+    const motivo = err.message === 'SESSAO_EXPIRADA' ? 'SESSAO_EXPIRADA' : 'ERRO'
+    // devolve 200 com ok:false p/ o front conseguir ler o motivo (em vez de quebrar)
+    return res.status(200).json({ ok: false, motivo, detalhe: err.message })
   }
 })
 
