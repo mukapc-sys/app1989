@@ -212,4 +212,83 @@ router.post('/importar', async (req, res) => {
   }
 })
 
+// ============================================================
+// POST /appbarber/finalizar/:id   (chamado pela TELA, caixa logado)
+// Finaliza um agendamento importado, de 2 formas:
+//   onde='novo'      -> cria agendamento concluído + comanda finalizada (entra no caixa)
+//   onde='appbarber' -> só marca como concluído (NÃO entra no caixa)
+// body: { onde, forma_pgto?, valor? }
+// ============================================================
+router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
+  try {
+    const { onde = 'novo', forma_pgto, valor } = req.body || {}
+
+    // 1) carrega o importado
+    const { data: ab, error: e0 } = await supabaseAdmin
+      .from('agenda_appbarber').select('*').eq('id', req.params.id).single()
+    if (e0 || !ab) return res.status(404).json({ erro: 'Agendamento importado não encontrado' })
+    if (ab.finalizado) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
+
+    const valorFinal = (valor !== undefined && valor !== null && valor !== '') ? Number(valor) : Number(ab.valor || 0)
+    const ondeFinal = (onde === 'appbarber') ? 'appbarber' : 'novo'
+
+    // ===== SEMPRE cria o agendamento concluído =====
+    // (alimenta faturamento do dashboard, relatórios e COMISSÕES — nos dois casos)
+    const { data: ag, error: e1 } = await supabaseAdmin.from('agendamentos').insert({
+      data_hora_ini: ab.inicio,
+      data_hora_fim: ab.fim,
+      status:        'concluido',
+      valor:         valorFinal,
+      observacao:    ab.observacao || null,
+      canal_origem:  'appbarber',
+      colaborador_id: ab.colaborador_id,
+      unidade_id:    ab.unidade_id,
+      cliente_id:    ab.cliente_id,
+      servico_id:    ab.servico_id,
+      criado_por:    req.usuario.id,
+    }).select().single()
+    if (e1) throw e1
+
+    // ===== Comanda SÓ no caminho "novo" =====
+    // (a comanda é o que entra no FECHAMENTO DE CAIXA; no caminho "appbarber"
+    //  o dinheiro já foi recebido lá, então não criamos comanda)
+    let comandaId = null
+    if (ondeFinal === 'novo') {
+      const { data: cm, error: e2 } = await supabaseAdmin.from('comandas').insert({
+        agendamento_id: ag.id,
+        cliente_id:     ab.cliente_id,
+        colaborador_id: ab.colaborador_id,
+        unidade_id:     ab.unidade_id,
+        status:         'finalizada',
+        forma_pgto:     forma_pgto || 'dinheiro',
+        subtotal:       valorFinal,
+        desconto:       0,
+        total:          valorFinal,
+        finalizada_em:  new Date().toISOString(),
+        criado_por:     req.usuario.id,
+        observacao:     'Importado do AppBarber',
+      }).select().single()
+      if (e2) throw e2
+      comandaId = cm.id
+    }
+
+    // ===== marca o importado como finalizado e liga aos criados =====
+    const { error: e3 } = await supabaseAdmin.from('agenda_appbarber')
+      .update({
+        finalizado: true,
+        finalizado_em: new Date().toISOString(),
+        finalizado_onde: ondeFinal,
+        agendamento_id: ag.id,
+        comanda_id: comandaId,
+      })
+      .eq('id', ab.id)
+    if (e3) throw e3
+
+    return res.json({ ok: true, onde: ondeFinal, agendamento_id: ag.id, comanda_id: comandaId })
+  } catch (err) {
+    console.error('[appbarber/finalizar]', err.message)
+    return res.status(500).json({ erro: 'Erro ao finalizar', detalhe: err.message })
+  }
+})
+
 module.exports = router
