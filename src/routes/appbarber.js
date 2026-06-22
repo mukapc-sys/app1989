@@ -123,4 +123,69 @@ router.post('/ler/:unidade', autenticar, exigirPerfil(...ADM), async (req, res) 
   }
 })
 
+// ============================================================
+// POST /appbarber/sessao   body: { unidade_id, cookie }
+// Salva/atualiza o cookie de uma unidade (validade 24h).
+// Chamado pela página de captura (atalho/bookmarklet).
+// ============================================================
+router.post('/sessao', autenticar, exigirPerfil(...ADM), async (req, res) => {
+  try {
+    const { unidade_id, cookie } = req.body || {}
+    if (!unidade_id || !cookie) {
+      return res.status(400).json({ erro: 'Informe unidade_id e cookie' })
+    }
+    const expira_em = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+    const { error } = await supabaseAdmin
+      .from('appbarber_sessoes')
+      .upsert({
+        unidade_id, cookie, expira_em,
+        status: 'conectado',
+        atualizado_em: new Date().toISOString(),
+      }, { onConflict: 'unidade_id' })
+    if (error) throw error
+    return res.json({ ok: true, expira_em })
+  } catch (err) {
+    console.error('[appbarber/sessao]', err.message)
+    return res.status(500).json({ erro: 'Erro ao salvar a conexão' })
+  }
+})
+
+// ============================================================
+// GET /appbarber/sessoes
+// Lista o status de conexão de cada unidade (p/ a tela).
+// ============================================================
+router.get('/sessoes', autenticar, exigirPerfil(...ADM), async (req, res) => {
+  try {
+    const [unidades, sessoes] = await Promise.all([
+      supabaseAdmin.from('unidades').select('id, nome').order('nome'),
+      supabaseAdmin.from('appbarber_sessoes').select('unidade_id, status, expira_em, atualizado_em'),
+    ])
+    if (unidades.error) throw unidades.error
+    if (sessoes.error) throw sessoes.error
+
+    const porUnidade = {}
+    for (const s of sessoes.data) porUnidade[s.unidade_id] = s
+    const agora = Date.now()
+
+    const lista = unidades.data.map((u) => {
+      const s = porUnidade[u.id]
+      let status = 'desconectado'
+      if (s && s.expira_em) {
+        status = new Date(s.expira_em).getTime() > agora ? 'conectado' : 'expirado'
+      }
+      return {
+        unidade_id: u.id,
+        nome: u.nome,
+        status,
+        expira_em: s ? s.expira_em : null,
+        atualizado_em: s ? s.atualizado_em : null,
+      }
+    })
+    return res.json({ sessoes: lista })
+  } catch (err) {
+    console.error('[appbarber/sessoes]', err.message)
+    return res.status(500).json({ erro: 'Erro ao listar conexões' })
+  }
+})
+
 module.exports = router
