@@ -2,8 +2,17 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { sincronizarUnidade } = require('./appbarber-sync')
 
 const ADM = ['proprietario', 'gerente']
+
+// dd/mm/aaaa de hoje (fuso de São Paulo)
+function diaDeHojeBR() {
+  const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+  const dd = String(agora.getDate()).padStart(2, '0')
+  const mm = String(agora.getMonth() + 1).padStart(2, '0')
+  return `${dd}/${mm}/${agora.getFullYear()}`
+}
 
 // ============================================================
 // GET /appbarber/depara
@@ -79,6 +88,38 @@ router.put('/depara/servico/:id', autenticar, exigirPerfil(...ADM), async (req, 
   } catch (err) {
     console.error('[appbarber/depara serv PUT]', err.message)
     return res.status(500).json({ erro: 'Erro ao salvar vínculo de serviço' })
+  }
+})
+
+// ============================================================
+// POST /appbarber/ler/:unidade   body opcional: { cookie, dia }
+// Dispara UMA leitura da agenda daquela unidade e grava no sistema.
+// - cookie: se não vier no body, usa o salvo em appbarber_sessoes
+// - dia: 'dd/mm/aaaa' ou 'aaaa-mm-dd'; se não vier, usa hoje
+// ============================================================
+router.post('/ler/:unidade', autenticar, exigirPerfil(...ADM), async (req, res) => {
+  try {
+    const unidadeId = req.params.unidade
+    let cookie = req.body && req.body.cookie
+
+    if (!cookie) {
+      const { data: sessao } = await supabaseAdmin
+        .from('appbarber_sessoes').select('cookie').eq('unidade_id', unidadeId).single()
+      cookie = sessao && sessao.cookie
+    }
+    if (!cookie) {
+      return res.status(400).json({ erro: 'Sem cookie para esta unidade. Faça a conexão primeiro.' })
+    }
+
+    const dia = (req.body && req.body.dia) || diaDeHojeBR()
+    const resumo = await sincronizarUnidade(unidadeId, cookie, dia)
+    return res.json({ ok: true, resumo })
+  } catch (err) {
+    if (err.message === 'SESSAO_EXPIRADA') {
+      return res.status(401).json({ erro: 'SESSAO_EXPIRADA', detalhe: 'O cookie do AppBarber expirou. Faça login de novo.' })
+    }
+    console.error('[appbarber/ler]', err.message)
+    return res.status(500).json({ erro: 'Erro ao ler a agenda', detalhe: err.message })
   }
 })
 
