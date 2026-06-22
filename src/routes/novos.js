@@ -505,8 +505,8 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
     const { data: colab } = await supabaseAdmin
       .from('colaboradores').select('id,perfil,unidade_id').eq('user_id', req.usuario.id).single()
 
-    let q = supabaseAdmin.from('agendamentos')
-      .select('id,data_hora_ini,data_hora_fim,status,valor,colaborador_id,unidade_id,clientes(nome),servicos(nome,duracao_min)')
+    let q = supabaseAdmin.from('vw_agenda_dia')
+      .select('id,data_hora_ini,data_hora_fim,status,valor,colaborador_id,colaborador_nome,unidade_id,unidade_nome,cliente_nome,servico_nome,duracao_min,canal_origem')
       .gte('data_hora_ini', dia + 'T00:00:00-03:00')
       .lte('data_hora_ini', dia + 'T23:59:59-03:00')
       .not('status', 'eq', 'cancelado')
@@ -518,15 +518,6 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
     const { data: agenda, error } = await q
     if(error) throw error
 
-    // Busca nomes dos colaboradores separado
-    const colaboradorIds = [...new Set((agenda||[]).map(a=>a.colaborador_id).filter(Boolean))]
-    let colabMap = {}
-    if(colaboradorIds.length) {
-      const { data: colabs } = await supabaseAdmin.from('colaboradores')
-        .select('id,nome,unidade_id,unidades(nome)').in('id', colaboradorIds)
-      ;(colabs||[]).forEach(c => { colabMap[c.id] = c })
-    }
-
     const flat = (agenda || []).map(a => ({
       id:               a.id,
       data_hora_ini:    a.data_hora_ini,
@@ -534,11 +525,12 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       status:           a.status,
       valor:            a.valor,
       colaborador_id:   a.colaborador_id,
-      colaborador_nome: colabMap[a.colaborador_id]?.nome || null,
-      unidade_nome:     colabMap[a.colaborador_id]?.unidades?.nome || null,
-      cliente_nome:     a.clientes?.nome || null,
-      servico_nome:     a.servicos?.nome || null,
-      duracao_min:      a.servicos?.duracao_min || 30
+      colaborador_nome: a.colaborador_nome || null,
+      unidade_nome:     a.unidade_nome || null,
+      cliente_nome:     a.cliente_nome || null,
+      servico_nome:     a.servico_nome || null,
+      duracao_min:      a.duracao_min || 30,
+      canal_origem:     a.canal_origem || null
     }))
 
     return res.json(flat)
@@ -572,7 +564,7 @@ router.get('/produtos', autenticar, async (req, res) => {
 
 router.get('/colaboradores-todos', autenticar, TODOS, async (req, res) => {
   try {
-    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
+    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
     return res.json(data || [])
   } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
 })
