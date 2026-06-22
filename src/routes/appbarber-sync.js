@@ -132,11 +132,18 @@ async function processarAgendamentos(unidadeId, bruto) {
     registros.push(reg)
   }
 
+  // remove duplicatas de appbarber_id no MESMO lote (o AppBarber às vezes
+  // repete o mesmo item entre dias) — senão o upsert dá
+  // "ON CONFLICT cannot affect row a second time". Fica com a última ocorrência.
+  const porId = new Map()
+  for (const r of registros) porId.set(r.appbarber_id, r)
+  const registrosUnicos = Array.from(porId.values())
+
   // grava em lotes (upsert por appbarber_id -> não duplica)
-  if (registros.length) {
+  if (registrosUnicos.length) {
     const { error } = await supabaseAdmin
       .from('agenda_appbarber')
-      .upsert(registros, { onConflict: 'appbarber_id' })
+      .upsert(registrosUnicos, { onConflict: 'appbarber_id' })
     if (error) throw error
   }
 
@@ -146,7 +153,7 @@ async function processarAgendamentos(unidadeId, bruto) {
     bloqueios,
     novos_clientes: novosClientes,
     pendentes_de_vinculo: pendentes,
-    gravados: registros.length,
+    gravados: registrosUnicos.length,
   }
 }
 
