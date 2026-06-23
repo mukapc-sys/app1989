@@ -60,7 +60,26 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       const finalizados = agends?.filter(a => a.status === 'concluido').length || 0
       const pendentes   = agends?.filter(a => ['agendado','confirmado'].includes(a.status)).length || 0
       const faturamento = agends?.filter(a => a.status === 'concluido').reduce((s,a) => s + (parseFloat(a.valor)||0), 0) || 0
-      const ticket      = finalizados > 0 ? faturamento / finalizados : 0
+
+      // ---- Importados do AppBarber que AINDA NÃO viraram agendamento de verdade ----
+      // (agendamento_id IS NULL evita contar 2x quando já foi finalizado no sistema)
+      let qAB = supabaseAdmin.from('agenda_appbarber')
+        .select('status, valor, inicio')
+        .eq('tipo', 'agendamento')
+        .is('agendamento_id', null)
+        .gte('inicio', inicioHoje).lte('inicio', fimHoje)
+      if (uid) qAB = qAB.eq('unidade_id', uid)
+      const { data: abrows } = await qAB
+      const abValidos     = (abrows || []).filter(a => ['agendado','realizado'].includes(a.status))
+      const abFinalizados = abValidos.filter(a => a.status === 'realizado').length
+      const abPendentes   = abValidos.filter(a => a.status === 'agendado').length
+      const abFaturamento = abValidos.filter(a => a.status === 'realizado').reduce((s,a) => s + (parseFloat(a.valor)||0), 0)
+
+      const totalAll       = total + abValidos.length
+      const finalizadosAll = finalizados + abFinalizados
+      const pendentesAll   = pendentes + abPendentes
+      const faturamentoAll = faturamento + abFaturamento
+      const ticket         = finalizadosAll > 0 ? faturamentoAll / finalizadosAll : 0
 
       // Clientes a reativar (sem visita há +15 dias)
       let qReativar = supabaseAdmin.from('clientes').select('id', { count: 'exact', head: true })
@@ -68,7 +87,15 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       if (uid) qReativar = qReativar.eq('unidade_pref', uid)
       const { count: reativar } = await qReativar
 
-      return { total, finalizados, pendentes, faturamento: faturamento.toFixed(2), ticket: ticket.toFixed(2), reativar: reativar || 0 }
+      return {
+        total: totalAll,
+        finalizados: finalizadosAll,
+        pendentes: pendentesAll,
+        faturamento: faturamentoAll.toFixed(2),
+        faturamento_appbarber: abFaturamento.toFixed(2), // sinal: parte já paga no AppBarber (não entra no caixa do sistema)
+        ticket: ticket.toFixed(2),
+        reativar: reativar || 0
+      }
     }
 
     if (perfil === 'proprietario') {
@@ -161,7 +188,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
 
     // ---- Top clientes do mês ----
     let qTop = supabaseAdmin.from('agendamentos')
-      .select('cliente_id, valor, clientes(nome), colaboradores(nome), unidades(nome)')
+      .select('cliente_id, clientes(nome), colaboradores(nome), unidades(nome)')
       .gte('data_hora_ini', inicioMes)
       .eq('status', 'concluido')
     if (perfil === 'colaborador') qTop = qTop.eq('colaborador_id', colab.id)
@@ -171,15 +198,10 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     const topMap = {}
     for (const a of (topAgends||[])) {
       const id = a.cliente_id
-      if (!id) continue
-      if (!topMap[id]) topMap[id] = { nome: a.clientes?.nome, barbeiro: a.colaboradores?.nome, unidade: a.unidades?.nome, visitas: 0, gasto: 0 }
+      if (!topMap[id]) topMap[id] = { nome: a.clientes?.nome, barbeiro: a.colaboradores?.nome, unidade: a.unidades?.nome, visitas: 0 }
       topMap[id].visitas++
-      topMap[id].gasto += parseFloat(a.valor) || 0
     }
-    result.top_clientes = Object.values(topMap)
-      .map(c => ({ ...c, gasto: Math.round(c.gasto*100)/100 }))
-      .sort((a,b) => b.gasto - a.gasto)
-      .slice(0,10)
+    result.top_clientes = Object.values(topMap).sort((a,b)=>b.visitas-a.visitas).slice(0,10)
 
     return res.json(result)
   } catch (err) {
