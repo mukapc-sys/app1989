@@ -19,6 +19,11 @@ function horarioFuncionamento(dataStr, ehFeriado) {
   if (ehFeriado || dow === 6) return { abre: 9 * 60, fecha: 18 * 60 } // Sábado/feriado
   return { abre: 10 * 60, fecha: 20 * 60 }                     // Seg-Sex
 }
+// Converte 'HH:MM' em minutos desde 00:00 (ex.: '09:30' -> 570)
+function hmToMin(hm) {
+  const p = String(hm || '').split(':'); const h = parseInt(p[0], 10) || 0; const m = parseInt(p[1], 10) || 0
+  return h * 60 + m
+}
 
 function tokenCliente(c) {
   return jwt.sign({ id: c.id, tipo: 'cliente', nome: c.nome }, process.env.JWT_SECRET, { expiresIn: '30d' })
@@ -159,12 +164,19 @@ router.get('/horarios', async (req, res) => {
         .eq('finalizado', false)
         .gte('inicio', ini).lte('inicio', fim),
       // feriados cadastrados nessa data (afetam o horário de funcionamento)
-      supabaseAdmin.from('feriados').select('data').eq('data', data),
+      supabaseAdmin.from('feriados').select('*').eq('data', data),
     ])
 
-    // Horário de funcionamento do dia (respeita dia da semana e feriados)
-    const ehFeriado = (feriados || []).length > 0
-    const hf = horarioFuncionamento(data, ehFeriado)
+    // Horário de funcionamento do dia (feriado manda; senão, dia da semana)
+    const fer = (feriados || [])[0]
+    let hf
+    if (fer) {
+      if (fer.fechado) hf = null                                              // feriado fechado
+      else if (fer.hora_abre && fer.hora_fecha) hf = { abre: hmToMin(fer.hora_abre), fecha: hmToMin(fer.hora_fecha) } // personalizado
+      else hf = { abre: 9 * 60, fecha: 18 * 60 }                              // feriado padrão 9h-18h
+    } else {
+      hf = horarioFuncionamento(data, false)
+    }
     const inicio = hf ? hf.abre : 0
     const fimDia = hf ? hf.fecha : 0   // fechado -> inicio=fimDia=0 -> não gera nenhum slot
     const passo = 15
@@ -234,8 +246,16 @@ router.post('/agendar', async (req, res) => {
     const dataBR = `${_p.year}-${_p.month}-${_p.day}`
     let _hh = parseInt(_p.hour); if (_hh === 24) _hh = 0
     const minDia = _hh * 60 + parseInt(_p.minute)
-    const { data: ferAg } = await supabaseAdmin.from('feriados').select('data').eq('data', dataBR)
-    const hfAg = horarioFuncionamento(dataBR, (ferAg || []).length > 0)
+    const { data: ferAg } = await supabaseAdmin.from('feriados').select('*').eq('data', dataBR)
+    const _fa = (ferAg || [])[0]
+    let hfAg
+    if (_fa) {
+      if (_fa.fechado) hfAg = null
+      else if (_fa.hora_abre && _fa.hora_fecha) hfAg = { abre: hmToMin(_fa.hora_abre), fecha: hmToMin(_fa.hora_fecha) }
+      else hfAg = { abre: 9 * 60, fecha: 18 * 60 }
+    } else {
+      hfAg = horarioFuncionamento(dataBR, false)
+    }
     const durAg = sv.duracao_min || 30
     if (!hfAg || minDia < hfAg.abre || minDia + durAg > hfAg.fecha) {
       return res.status(400).json({ erro: 'Esse horário está fora do funcionamento da barbearia' })
