@@ -5,7 +5,27 @@
 // ============================================================
 const express = require('express')
 const router = express.Router()
+const bcrypt = require('bcryptjs')
+const jwt = require('jsonwebtoken')
 const { supabaseAdmin } = require('../config/supabase')
+
+// ---- Token do cliente (mesmo JWT_SECRET do sistema) ----
+function tokenCliente(c) {
+  return jwt.sign({ id: c.id, tipo: 'cliente', nome: c.nome }, process.env.JWT_SECRET, { expiresIn: '30d' })
+}
+function autenticarCliente(req, res, next) {
+  try {
+    const h = req.headers.authorization || ''
+    const t = h.replace('Bearer ', '').trim()
+    if (!t) return res.status(401).json({ erro: 'Faça login' })
+    const d = jwt.verify(t, process.env.JWT_SECRET)
+    if (d.tipo !== 'cliente') return res.status(401).json({ erro: 'Token inválido' })
+    req.cliente = { id: d.id, nome: d.nome }
+    next()
+  } catch (e) {
+    return res.status(401).json({ erro: 'Sessão expirada. Entre de novo.' })
+  }
+}
 
 // ---- WhatsApp: pronto para a Evolution API (no-op se não configurada) ----
 async function enviarWhatsApp(numero, texto) {
@@ -220,20 +240,34 @@ router.post('/agendar', async (req, res) => {
 })
 
 // ============================================================
-// GET /publico/meus-agendamentos?whatsapp= — agendamentos do cliente
+// GET /publico/meus-agendamentos — agendamentos do cliente
+// Usa o login (token) se houver; senão aceita ?whatsapp=
 // ============================================================
 router.get('/meus-agendamentos', async (req, res) => {
   try {
-    const tel = String(req.query.whatsapp || '').replace(/\D/g, '')
-    if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
-
-    const { data: cli } = await supabaseAdmin.from('clientes')
-      .select('id').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
-    if (!cli || !cli.length) return res.json([])
+    let cliente_id = null
+    // tenta pelo token (cliente logado)
+    const h = req.headers.authorization || ''
+    const t = h.replace('Bearer ', '').trim()
+    if (t) {
+      try {
+        const d = jwt.verify(t, process.env.JWT_SECRET)
+        if (d.tipo === 'cliente') cliente_id = d.id
+      } catch (_) { /* token inválido -> tenta whatsapp */ }
+    }
+    // senão, pelo WhatsApp
+    if (!cliente_id) {
+      const tel = String(req.query.whatsapp || '').replace(/\D/g, '')
+      if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
+      const { data: cli } = await supabaseAdmin.from('clientes')
+        .select('id').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
+      if (!cli || !cli.length) return res.json([])
+      cliente_id = cli[0].id
+    }
 
     const { data, error } = await supabaseAdmin.from('agendamentos')
       .select('id,data_hora_ini,data_hora_fim,status,valor,servicos(nome),colaboradores(nome),unidades(nome)')
-      .eq('cliente_id', cli[0].id)
+      .eq('cliente_id', cliente_id)
       .order('data_hora_ini', { ascending: false })
       .limit(30)
     if (error) throw error
@@ -241,6 +275,141 @@ router.get('/meus-agendamentos', async (req, res) => {
   } catch (e) {
     console.error('[publico/meus-agendamentos]', e.message)
     return res.status(500).json({ erro: 'Erro ao buscar agendamentos' })
+  }
+})
+
+// ============================================================
+// POST /publico/registrar — cria conta do cliente (nome, whatsapp, senha)
+// ============================================================
+router.post('/registrar', async (req, res) => {
+  try {
+    const { nome, whatsapp, senha } = req.body || {}
+    if (!nome || !whatsapp || !senha) return res.status(400).json({ erro: 'Preencha nome, WhatsApp e senha' })
+    if (String(senha).length < 4) return res.status(400).json({ erro: 'A senha precisa de pelo menos 4 caracteres' })
+    const tel = String(whatsapp).replace(/\D/g, '')
+    if (tel.length < 10) return res.status(400).json({ erro: 'WhatsApp inválido (use DDD + número)' })
+
+    const hash = bcrypt.hashSync(String(senha), 10)
+
+    // já existe um cliente com esse WhatsApp?
+    const { data: achados } = await supabaseAdmin.from('clientes')
+      .select('id,nome,whatsapp,senha_hash').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
+
+    let cli
+    if (achados && achados.length) {
+      cli = achados[0]
+      if (cli.senha_hash) return res.status(409).json({ erro: 'Já existe uma conta com esse WhatsApp. Faça login.' })
+      // cliente já existia (criou agendando antes) e ainda não tinha senha -> define agora
+      const { data: up, error: eu } = await supabaseAdmin.from('clientes')
+        .update({ nome: String(nome).trim(), senha_hash: hash }).eq('id', cli.id)
+        .select('id,nome,whatsapp').single()
+      if (eu) throw eu
+      cli = up
+    } else {
+      const { data: novo, error: en } = await supabaseAdmin.from('clientes')
+        .insert({ nome: String(nome).trim(), whatsapp: tel, senha_hash: hash, origem: 'app', ativo: true })
+        .select('id,nome,whatsapp').single()
+      if (en) throw en
+      cli = novo
+    }
+    return res.json({ token: tokenCliente(cli), cliente: { id: cli.id, nome: cli.nome, whatsapp: cli.whatsapp } })
+  } catch (e) {
+    console.error('[publico/registrar]', e.message)
+    return res.status(500).json({ erro: 'Erro ao criar conta' })
+  }
+})
+
+// ============================================================
+// POST /publico/login — entra com WhatsApp + senha
+// ============================================================
+router.post('/login', async (req, res) => {
+  try {
+    const { whatsapp, senha } = req.body || {}
+    if (!whatsapp || !senha) return res.status(400).json({ erro: 'Informe WhatsApp e senha' })
+    const tel = String(whatsapp).replace(/\D/g, '')
+    if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
+
+    const { data: achados } = await supabaseAdmin.from('clientes')
+      .select('id,nome,whatsapp,senha_hash,ativo').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
+    const cli = achados && achados[0]
+    if (!cli || !cli.senha_hash) return res.status(401).json({ erro: 'Conta não encontrada. Crie uma conta.' })
+    if (cli.ativo === false) return res.status(401).json({ erro: 'Conta inativa. Fale com a barbearia.' })
+    if (!bcrypt.compareSync(String(senha), cli.senha_hash)) return res.status(401).json({ erro: 'WhatsApp ou senha incorretos' })
+
+    return res.json({ token: tokenCliente(cli), cliente: { id: cli.id, nome: cli.nome, whatsapp: cli.whatsapp } })
+  } catch (e) {
+    console.error('[publico/login]', e.message)
+    return res.status(500).json({ erro: 'Erro ao entrar' })
+  }
+})
+
+// ============================================================
+// GET /publico/eu — dados do cliente logado (perfil)
+// ============================================================
+router.get('/eu', autenticarCliente, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('clientes')
+      .select('id,nome,whatsapp,foto_url').eq('id', req.cliente.id).single()
+    if (error) throw error
+    return res.json(data)
+  } catch (e) {
+    console.error('[publico/eu]', e.message)
+    return res.status(500).json({ erro: 'Erro ao carregar perfil' })
+  }
+})
+
+// ============================================================
+// PUT /publico/eu — atualiza o nome do cliente
+// ============================================================
+router.put('/eu', autenticarCliente, async (req, res) => {
+  try {
+    const { nome } = req.body || {}
+    if (!nome || !String(nome).trim()) return res.status(400).json({ erro: 'Informe o nome' })
+    const { data, error } = await supabaseAdmin.from('clientes')
+      .update({ nome: String(nome).trim() }).eq('id', req.cliente.id)
+      .select('id,nome,whatsapp,foto_url').single()
+    if (error) throw error
+    return res.json(data)
+  } catch (e) {
+    console.error('[publico/eu PUT]', e.message)
+    return res.status(500).json({ erro: 'Erro ao salvar' })
+  }
+})
+
+// ============================================================
+// GET /publico/meu-plano — assinatura ativa do cliente + uso do mês
+// ============================================================
+router.get('/meu-plano', autenticarCliente, async (req, res) => {
+  try {
+    const { data: assin } = await supabaseAdmin.from('assinaturas')
+      .select('*, planos(id,nome,valor_mensal)').eq('cliente_id', req.cliente.id)
+      .eq('status', 'ativa').limit(1)
+    if (!assin || !assin.length) return res.json({ ativo: false })
+    const a = assin[0]
+    const plano = a.planos || {}
+
+    // serviços incluídos no plano + limite
+    const { data: ps } = await supabaseAdmin.from('plano_servicos')
+      .select('servico_id, limite_mes, servicos(nome)').eq('plano_id', plano.id)
+
+    // uso do mês (agendamentos concluídos deste cliente neste mês)
+    const agora = new Date()
+    const ini = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
+    const { data: usados } = await supabaseAdmin.from('agendamentos')
+      .select('servico_id').eq('cliente_id', req.cliente.id)
+      .eq('status', 'concluido').gte('data_hora_ini', ini)
+    const cont = {}
+    ;(usados || []).forEach(u => { cont[u.servico_id] = (cont[u.servico_id] || 0) + 1 })
+
+    const servicos = (ps || []).map(x => ({
+      nome: (x.servicos && x.servicos.nome) || 'Serviço',
+      limite_mes: x.limite_mes,
+      usado: cont[x.servico_id] || 0,
+    }))
+    return res.json({ ativo: true, plano: { nome: plano.nome, valor_mensal: plano.valor_mensal }, servicos })
+  } catch (e) {
+    console.error('[publico/meu-plano]', e.message)
+    return res.status(500).json({ erro: 'Erro ao carregar plano' })
   }
 })
 
