@@ -115,8 +115,8 @@ router.get('/horarios', async (req, res) => {
     if (!colaborador_id || !data) {
       return res.status(400).json({ erro: 'colaborador_id e data são obrigatórios' })
     }
-    const ini = new Date(data + 'T00:00:00').toISOString()
-    const fim = new Date(data + 'T23:59:59').toISOString()
+    const ini = new Date(data + 'T00:00:00-03:00').toISOString()
+    const fim = new Date(data + 'T23:59:59-03:00').toISOString()
 
     const [{ data: ocupados }, { data: bloqueios }] = await Promise.all([
       supabaseAdmin.from('agendamentos')
@@ -136,10 +136,10 @@ router.get('/horarios', async (req, res) => {
     const dur = parseInt(duracao) || 30
 
     for (let min = inicio; min + dur <= fimDia; min += passo) {
-      const slotIni = new Date(data + 'T00:00:00')
-      slotIni.setMinutes(slotIni.getMinutes() + min)
-      const slotFim = new Date(slotIni)
-      slotFim.setMinutes(slotFim.getMinutes() + dur)
+      const hh = String(Math.floor(min / 60)).padStart(2, '0')
+      const mm = String(min % 60).padStart(2, '0')
+      const slotIni = new Date(`${data}T${hh}:${mm}:00-03:00`)
+      const slotFim = new Date(slotIni.getTime() + dur * 60000)
 
       const ocupado = (ocupados || []).some(a => {
         const i = new Date(a.data_hora_ini), f = new Date(a.data_hora_fim)
@@ -151,7 +151,7 @@ router.get('/horarios', async (req, res) => {
       })
       const passou = slotIni < agora
 
-      const hora = `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`
+      const hora = `${hh}:${mm}`
       slots.push({ hora, disponivel: !ocupado && !bloqueado && !passou, data_hora: slotIni.toISOString() })
     }
     return res.json(slots)
