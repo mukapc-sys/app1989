@@ -27,6 +27,20 @@ function autenticarCliente(req, res, next) {
   }
 }
 
+// ---- Realtime: avisa "agenda mudou" (broadcast, SEM dados de cliente) ----
+async function pingAgenda(unidade_id) {
+  try {
+    const url = process.env.SUPABASE_URL
+    const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
+    if (!url || !key) return
+    await fetch(`${url}/realtime/v1/api/broadcast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': key, 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({ messages: [{ topic: 'agenda', event: 'mudou', payload: { unidade_id: unidade_id || null, at: Date.now() } }] }),
+    })
+  } catch (e) { console.error('[ping agenda]', e.message) }
+}
+
 // ---- WhatsApp: pronto para a Evolution API (no-op se não configurada) ----
 async function enviarWhatsApp(numero, texto) {
   try {
@@ -226,6 +240,9 @@ router.post('/agendar', async (req, res) => {
       servico_id,
     }).select('id').single()
     if (ea) throw ea
+
+    // avisa as agendas abertas (Realtime) que algo mudou
+    pingAgenda(col.unidade_id)
 
     // confirmação no WhatsApp (pronto p/ Evolution; não quebra se não tiver)
     const quando = ini.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' })
