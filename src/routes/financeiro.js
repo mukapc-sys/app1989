@@ -730,4 +730,96 @@ router.get('/ranking-clientes', autenticar, SEM_ACESSO, async (req, res) => {
   }
 })
 
+// GET /financeiro/frequencia-clientes?status=todos[&unidade_id=xxx]
+// Calcula a cadência de cada cliente e lista os ATRASADOS/SUMIDOS (para reativação).
+router.get('/frequencia-clientes', autenticar, SEM_ACESSO, async (req, res) => {
+  try {
+    const u = req.usuario
+    const uid = u.perfil === 'gerente' ? u.unidade_id : (req.query.unidade_id || null)
+    const filtro = req.query.status || 'todos'
+
+    const agora = new Date()
+    const ini = new Date(agora); ini.setMonth(ini.getMonth() - 12)
+    const iniISO = ini.toISOString()
+    const fimISO = agora.toISOString()
+
+    // Busca paginada (passa do limite de 1000 do Supabase)
+    async function fetchAll(table, select, applyFilters) {
+      const pageSize = 1000; let from = 0; let all = []
+      while (true) {
+        let q = supabaseAdmin.from(table).select(select)
+        q = applyFilters(q)
+        const { data, error } = await q.range(from, from + pageSize - 1)
+        if (error || !data) break
+        all = all.concat(data)
+        if (data.length < pageSize) break
+        from += pageSize
+        if (from > 60000) break
+      }
+      return all
+    }
+
+    const cmds = await fetchAll('comandas', 'cliente_id, finalizada_em, clientes(nome, whatsapp)', q => {
+      q = q.eq('status', 'finalizada').gte('finalizada_em', iniISO).lte('finalizada_em', fimISO).not('cliente_id', 'is', null)
+      if (uid) q = q.eq('unidade_id', uid)
+      return q
+    })
+    const abs = await fetchAll('agenda_appbarber', 'cliente_id, cliente_nome, inicio', q => {
+      q = q.eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado').gte('inicio', iniISO).lte('inicio', fimISO).not('cliente_id', 'is', null)
+      if (uid) q = q.eq('unidade_id', uid)
+      return q
+    })
+
+    const map = {}
+    const add = (cid, nome, whats, dataISO) => {
+      if (!cid || !dataISO) return
+      if (!map[cid]) map[cid] = { cliente_id: cid, nome: nome || null, whatsapp: whats || null, datas: [] }
+      if (nome && !map[cid].nome) map[cid].nome = nome
+      if (whats && !map[cid].whatsapp) map[cid].whatsapp = whats
+      map[cid].datas.push(dataISO)
+    }
+    cmds.forEach(c => add(c.cliente_id, c.clientes?.nome, c.clientes?.whatsapp, c.finalizada_em))
+    abs.forEach(a => add(a.cliente_id, a.cliente_nome, null, a.inicio))
+
+    const semNome = Object.values(map).filter(r => !r.nome).map(r => r.cliente_id)
+    if (semNome.length) {
+      const { data: cls } = await supabaseAdmin.from('clientes').select('id, nome, whatsapp').in('id', semNome)
+      ;(cls || []).forEach(c => { if (map[c.id]) { map[c.id].nome = c.nome || 'Cliente'; map[c.id].whatsapp = map[c.id].whatsapp || c.whatsapp } })
+    }
+
+    const diaMs = 86400000
+    const lista = []
+    Object.values(map).forEach(r => {
+      const datas = r.datas.map(d => new Date(d)).sort((a, b) => a - b)
+      const visitas = datas.length
+      const ultima = datas[visitas - 1]
+      const diasDesde = Math.floor((agora - ultima) / diaMs)
+      let cadencia = null, status = 'em_dia'
+      if (visitas >= 2) {
+        let soma = 0
+        for (let i = 1; i < visitas; i++) soma += (datas[i] - datas[i - 1]) / diaMs
+        cadencia = Math.max(1, Math.round(soma / (visitas - 1)))
+        if (diasDesde >= cadencia * 2) status = 'sumido'
+        else if (diasDesde >= cadencia) status = 'atrasado'
+      } else {
+        if (diasDesde > 45) status = 'sumido'
+      }
+      lista.push({
+        nome: r.nome || 'Cliente', whatsapp: r.whatsapp || null,
+        visitas, cadencia, ultima: ultima.toISOString(), dias_desde: diasDesde, status
+      })
+    })
+
+    let resultado = lista.filter(c => c.status === 'atrasado' || c.status === 'sumido')
+    if (filtro === 'atrasado') resultado = resultado.filter(c => c.status === 'atrasado')
+    else if (filtro === 'sumido') resultado = resultado.filter(c => c.status === 'sumido')
+    resultado.sort((a, b) => b.dias_desde - a.dias_desde)
+
+    return res.json({ total: resultado.length, clientes: resultado.slice(0, 200) })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ erro: 'Erro ao calcular frequência' })
+  }
+})
+
 module.exports = router
