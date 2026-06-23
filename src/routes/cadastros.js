@@ -333,4 +333,43 @@ router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
   }
 })
 
+// ============ FERIADOS ============
+// Horário especial 09h-18h (igual sábado). Cadastrados por gerente/proprietário.
+
+router.get('/feriados', autenticar, ADMIN, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('feriados').select('*').order('data', { ascending: true })
+    if (error) throw error
+    return res.json(data || [])
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao listar feriados' })
+  }
+})
+
+router.post('/feriados', autenticar, ADMIN, async (req, res) => {
+  try {
+    const { data, descricao } = req.body || {}
+    if (!data) return res.status(400).json({ erro: 'Informe a data do feriado' })
+    const { data: novo, error } = await supabaseAdmin
+      .from('feriados')
+      .upsert({ data, descricao: (descricao || '').trim() || null, criado_por: req.usuario.id }, { onConflict: 'data' })
+      .select().single()
+    if (error) throw error
+    return res.status(201).json(novo)
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao salvar feriado' })
+  }
+})
+
+router.delete('/feriados/:id', autenticar, ADMIN, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin.from('feriados').delete().eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao excluir feriado' })
+  }
+})
+
 module.exports = router
