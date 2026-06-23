@@ -316,6 +316,13 @@ router.post('/agendar', async (req, res) => {
     const primeiro = String(nome).trim().split(' ')[0]
     enviarWhatsApp(tel, `Olá ${primeiro}! Seu horário na Barbearia 1989 está marcado: ${sv.nome} com ${col.nome} em ${quando}. Até já! ✂️`)
 
+    // confirmação por push (se o cliente tiver notificações ativas no app)
+    enviarPushParaCliente(cliente_id, {
+      title: 'Agendamento confirmado ✂️',
+      body: `${sv.nome} com ${col.nome} — ${quando}`,
+      url: 'https://barbearia1989.com.br'
+    }).catch(() => {})
+
     return res.json({ ok: true, agendamento_id: ag.id })
   } catch (e) {
     console.error('[publico/agendar]', e.message)
