@@ -132,16 +132,22 @@ router.get('/horarios', async (req, res) => {
     const ini = new Date(data + 'T00:00:00-03:00').toISOString()
     const fim = new Date(data + 'T23:59:59-03:00').toISOString()
 
-    const [{ data: ocupados }, { data: bloqueios }] = await Promise.all([
+    const [{ data: ocupados }, { data: bloqueios }, { data: importados }] = await Promise.all([
       supabaseAdmin.from('agendamentos')
         .select('data_hora_ini, data_hora_fim')
         .eq('colaborador_id', colaborador_id)
-        .in('status', ['agendado', 'confirmado', 'andamento'])
+        .in('status', ['agendado', 'confirmado', 'andamento', 'bloqueado'])
         .gte('data_hora_ini', ini).lte('data_hora_ini', fim),
       supabaseAdmin.from('bloqueios')
         .select('data_ini, data_fim')
         .eq('colaborador_id', colaborador_id)
         .gte('data_ini', ini).lte('data_ini', fim),
+      // importados do AppBarber ainda não finalizados (agendamentos E bloqueios ocupam o horário)
+      supabaseAdmin.from('agenda_appbarber')
+        .select('inicio, fim')
+        .eq('colaborador_id', colaborador_id)
+        .eq('finalizado', false)
+        .gte('inicio', ini).lte('inicio', fim),
     ])
 
     const slots = []
@@ -163,10 +169,14 @@ router.get('/horarios', async (req, res) => {
         const i = new Date(b.data_ini), f = new Date(b.data_fim)
         return slotIni < f && slotFim > i
       })
+      const importadoOcupa = (importados || []).some(a => {
+        const i = new Date(a.inicio), f = new Date(a.fim)
+        return slotIni < f && slotFim > i
+      })
       const passou = slotIni < agora
 
       const hora = `${hh}:${mm}`
-      slots.push({ hora, disponivel: !ocupado && !bloqueado && !passou, data_hora: slotIni.toISOString() })
+      slots.push({ hora, disponivel: !ocupado && !bloqueado && !importadoOcupa && !passou, data_hora: slotIni.toISOString() })
     }
     return res.json(slots)
   } catch (e) {
@@ -202,12 +212,18 @@ router.post('/agendar', async (req, res) => {
     const fim = new Date(ini)
     fim.setMinutes(fim.getMinutes() + (sv.duracao_min || 30))
 
-    // evita dois clientes no mesmo horário do mesmo barbeiro
-    const { data: conflito } = await supabaseAdmin.from('agendamentos')
-      .select('id').eq('colaborador_id', colaborador_id)
-      .in('status', ['agendado', 'confirmado', 'andamento'])
-      .lt('data_hora_ini', fim.toISOString()).gt('data_hora_fim', ini.toISOString())
-    if (conflito && conflito.length) {
+    // evita dois clientes no mesmo horário do mesmo barbeiro (inclui bloqueios e importados)
+    const [{ data: conflito }, { data: confImport }] = await Promise.all([
+      supabaseAdmin.from('agendamentos')
+        .select('id').eq('colaborador_id', colaborador_id)
+        .in('status', ['agendado', 'confirmado', 'andamento', 'bloqueado'])
+        .lt('data_hora_ini', fim.toISOString()).gt('data_hora_fim', ini.toISOString()),
+      supabaseAdmin.from('agenda_appbarber')
+        .select('id').eq('colaborador_id', colaborador_id)
+        .eq('finalizado', false)
+        .lt('inicio', fim.toISOString()).gt('fim', ini.toISOString()),
+    ])
+    if ((conflito && conflito.length) || (confImport && confImport.length)) {
       return res.status(409).json({ erro: 'Esse horário acabou de ser ocupado. Escolha outro, por favor.' })
     }
 
