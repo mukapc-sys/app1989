@@ -399,4 +399,133 @@ async function appbarberRealizados(ini, fim, uid) {
   return data || []
 }
 
+// GET /financeiro/comparativo?mes1=2026-03&mes2=2026-04[&unidade_id=xxx]
+// Comparativo mês x mês por BARBEIRO e por UNIDADE.
+// Métricas: atendimentos, produtos (qtd), serviços (R$), produtos/bar (R$), geral (R$), ticket médio.
+// Fonte: comandas finalizadas + AppBarber realizado (igual ao restante do Financeiro).
+router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
+  try {
+    const u = req.usuario
+    const hoje = new Date()
+    const ym = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
+    const mesAtual = ym(hoje)
+    const mesAnterior = ym(new Date(hoje.getFullYear(), hoje.getMonth()-1, 1))
+    const mes1 = req.query.mes1 || mesAnterior
+    const mes2 = req.query.mes2 || mesAtual
+    const uidFiltro = u.perfil === 'gerente' ? u.unidade_id : (req.query.unidade_id || null)
+
+    const rangeMes = (mes) => {
+      const [y,m] = mes.split('-').map(Number)
+      const prox = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`
+      return { ini: `${mes}-01T00:00:00-03:00`, fim: `${prox}-01T00:00:00-03:00` }
+    }
+
+    let qCol = supabaseAdmin.from('colaboradores').select('id, nome, unidade_id')
+    if (uidFiltro) qCol = qCol.eq('unidade_id', uidFiltro)
+    const { data: colabs } = await qCol
+    let qUni = supabaseAdmin.from('unidades').select('id, nome')
+    if (uidFiltro) qUni = qUni.eq('id', uidFiltro)
+    const { data: unids } = await qUni
+
+    const vazio = () => ({ atend:0, prod_qtd:0, valor_serv:0, valor_prod:0 })
+
+    async function metricasMes(mes) {
+      const { ini, fim } = rangeMes(mes)
+      const porColab = {}, porUni = {}
+      const eC = (id) => (porColab[id] = porColab[id] || vazio())
+      const eU = (id) => (porUni[id]   = porUni[id]   || vazio())
+
+      // Comandas finalizadas → atendimentos
+      let qc = supabaseAdmin.from('comandas')
+        .select('colaborador_id, unidade_id')
+        .eq('status','finalizada').gte('finalizada_em', ini).lt('finalizada_em', fim)
+      if (uidFiltro) qc = qc.eq('unidade_id', uidFiltro)
+      const { data: cmds } = await qc
+      for (const c of (cmds||[])) {
+        if (c.colaborador_id) eC(c.colaborador_id).atend++
+        if (c.unidade_id)     eU(c.unidade_id).atend++
+      }
+
+      // Itens (serviço x produto)
+      const { data: itens } = await supabaseAdmin.from('itens_comanda')
+        .select('tipo, valor_total, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
+      for (const i of (itens||[])) {
+        const c = i.comandas
+        if (!c || c.status !== 'finalizada') continue
+        if (!(c.finalizada_em >= ini && c.finalizada_em < fim)) continue
+        if (uidFiltro && c.unidade_id !== uidFiltro) continue
+        const v = parseFloat(i.valor_total) || 0
+        const q = parseInt(i.quantidade) || 0
+        if (i.tipo === 'produto') {
+          if (c.colaborador_id){ const x=eC(c.colaborador_id); x.valor_prod+=v; x.prod_qtd+=q }
+          if (c.unidade_id)    { const y=eU(c.unidade_id);     y.valor_prod+=v; y.prod_qtd+=q }
+        } else {
+          if (c.colaborador_id) eC(c.colaborador_id).valor_serv += v
+          if (c.unidade_id)     eU(c.unidade_id).valor_serv += v
+        }
+      }
+
+      // AppBarber realizado (pago fora) → serviço + atendimento
+      const ab = await appbarberRealizados(ini, fim, uidFiltro)
+      for (const a of ab) {
+        const v = parseFloat(a.valor) || 0
+        if (a.colaborador_id){ const x=eC(a.colaborador_id); x.valor_serv+=v; x.atend++ }
+        if (a.unidade_id)    { const y=eU(a.unidade_id);     y.valor_serv+=v; y.atend++ }
+      }
+
+      return { porColab, porUni }
+    }
+
+    const M1 = await metricasMes(mes1)
+    const M2 = await metricasMes(mes2)
+
+    const finaliza = (m) => ({
+      atend: m.atend, prod_qtd: m.prod_qtd,
+      valor_serv: m.valor_serv, valor_prod: m.valor_prod,
+      geral: m.valor_serv + m.valor_prod,
+      ticket: m.atend > 0 ? m.valor_serv / m.atend : 0
+    })
+
+    const nomeUni = {}; (unids||[]).forEach(x => nomeUni[x.id] = x.nome)
+
+    // BARBEIROS (só os que tiveram movimento em algum dos meses)
+    const idsColab = new Set([...Object.keys(M1.porColab), ...Object.keys(M2.porColab)])
+    const barbeiros = (colabs||[])
+      .filter(col => idsColab.has(col.id))
+      .map(col => ({
+        id: col.id, nome: col.nome,
+        unidade_id: col.unidade_id, unidade_nome: nomeUni[col.unidade_id] || '—',
+        m1: finaliza(M1.porColab[col.id] || vazio()),
+        m2: finaliza(M2.porColab[col.id] || vazio())
+      }))
+      .sort((a,b) => (a.unidade_nome||'').localeCompare(b.unidade_nome||'') || b.m2.geral - a.m2.geral)
+
+    // UNIDADES
+    const idsUni = new Set([...Object.keys(M1.porUni), ...Object.keys(M2.porUni), ...(unids||[]).map(x=>x.id)])
+    const unidades = [...idsUni]
+      .filter(uid => !uidFiltro || uid === uidFiltro)
+      .map(uid => ({
+        id: uid, nome: nomeUni[uid] || '—',
+        m1: finaliza(M1.porUni[uid] || vazio()),
+        m2: finaliza(M2.porUni[uid] || vazio())
+      }))
+      .sort((a,b) => b.m2.geral - a.m2.geral)
+
+    const somar = (lista, chave) => {
+      const t = { atend:0, prod_qtd:0, valor_serv:0, valor_prod:0, geral:0 }
+      lista.forEach(r => { t.atend+=r[chave].atend; t.prod_qtd+=r[chave].prod_qtd; t.valor_serv+=r[chave].valor_serv; t.valor_prod+=r[chave].valor_prod; t.geral+=r[chave].geral })
+      t.ticket = t.atend > 0 ? t.valor_serv / t.atend : 0
+      return t
+    }
+
+    return res.json({
+      mes1, mes2, barbeiros, unidades,
+      totais: { m1: somar(unidades,'m1'), m2: somar(unidades,'m2') }
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ erro: 'Erro ao gerar comparativo' })
+  }
+})
+
 module.exports = router
