@@ -477,4 +477,120 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
   }
 })
 
+// ============================================================
+//  PUSH NOTIFICATIONS — Fase 1 (base)
+//  Rotas: /publico/push/chave, /push/inscrever, /push/remover, /push/teste
+//  web-push é carregado com proteção: se ainda não estiver instalado,
+//  o app NÃO quebra — as rotas de push só respondem que está indisponível.
+// ============================================================
+let webpush = null
+try {
+  webpush = require('web-push')
+  if (process.env.VAPID_PUBLIC && process.env.VAPID_PRIVATE) {
+    webpush.setVapidDetails(
+      process.env.VAPID_SUBJECT || 'mailto:contato@barbearia1989.com.br',
+      process.env.VAPID_PUBLIC,
+      process.env.VAPID_PRIVATE
+    )
+    console.log('[push] web-push configurado')
+  } else {
+    console.warn('[push] VAPID_PUBLIC/PRIVATE não definidos — push desligado')
+  }
+} catch (e) {
+  console.warn('[push] biblioteca web-push ainda não instalada:', e.message)
+}
+
+// Envia um push para TODOS os aparelhos ativos de um cliente.
+// Reutilizado nas próximas fases (lembretes automáticos e massa).
+async function enviarPushParaCliente(cliente_id, payload) {
+  if (!webpush || !process.env.VAPID_PUBLIC) return { enviados: 0, falhas: 0 }
+  const { data: subs } = await supabaseAdmin
+    .from('push_inscricoes').select('*')
+    .eq('cliente_id', cliente_id).eq('ativo', true)
+  let enviados = 0, falhas = 0
+  for (const s of (subs || [])) {
+    try {
+      await webpush.sendNotification(
+        { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+        JSON.stringify(payload)
+      )
+      enviados++
+      await supabaseAdmin.from('push_inscricoes')
+        .update({ ultimo_envio: new Date().toISOString() }).eq('endpoint', s.endpoint)
+    } catch (err) {
+      falhas++
+      // 404/410 = aparelho não aceita mais -> desativa para não tentar de novo
+      if (err && (err.statusCode === 404 || err.statusCode === 410)) {
+        await supabaseAdmin.from('push_inscricoes')
+          .update({ ativo: false }).eq('endpoint', s.endpoint)
+      }
+    }
+  }
+  return { enviados, falhas }
+}
+
+// Chave pública — o app usa pra se inscrever (não é segredo)
+router.get('/push/chave', (_req, res) => {
+  if (!process.env.VAPID_PUBLIC) return res.status(503).json({ erro: 'Push não configurado' })
+  res.json({ publicKey: process.env.VAPID_PUBLIC })
+})
+
+// Salva (ou atualiza) a inscrição do aparelho do cliente logado
+router.post('/push/inscrever', autenticarCliente, async (req, res) => {
+  try {
+    const sub = (req.body && req.body.subscription) ? req.body.subscription : req.body
+    if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+      return res.status(400).json({ erro: 'Inscrição inválida' })
+    }
+    const { error } = await supabaseAdmin.from('push_inscricoes').upsert({
+      cliente_id: req.cliente.id,
+      endpoint:   sub.endpoint,
+      p256dh:     sub.keys.p256dh,
+      auth:       sub.keys.auth,
+      user_agent: String(req.headers['user-agent'] || '').slice(0, 300),
+      ativo:      true,
+    }, { onConflict: 'endpoint' })
+    if (error) throw error
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[push/inscrever]', e.message)
+    res.status(500).json({ erro: 'Erro ao salvar inscrição' })
+  }
+})
+
+// Remove/desativa a inscrição (quando o cliente desliga as notificações)
+router.post('/push/remover', autenticarCliente, async (req, res) => {
+  try {
+    const endpoint = req.body && req.body.endpoint
+    if (endpoint) {
+      await supabaseAdmin.from('push_inscricoes')
+        .update({ ativo: false }).eq('endpoint', endpoint).eq('cliente_id', req.cliente.id)
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[push/remover]', e.message)
+    res.status(500).json({ erro: 'Erro ao remover' })
+  }
+})
+
+// Envia um push de TESTE para o próprio cliente (confere se está tudo certo)
+router.post('/push/teste', autenticarCliente, async (req, res) => {
+  try {
+    if (!webpush || !process.env.VAPID_PUBLIC) {
+      return res.status(503).json({ erro: 'Push não configurado no servidor' })
+    }
+    const r = await enviarPushParaCliente(req.cliente.id, {
+      titulo: 'Barbearia 1989 ✂️',
+      corpo:  'Notificações ativadas! Você vai receber lembretes dos seus horários por aqui.',
+      url:    '/'
+    })
+    if (r.enviados === 0) return res.status(404).json({ erro: 'Nenhum aparelho inscrito ainda. Ative as notificações primeiro.' })
+    res.json({ ok: true, enviados: r.enviados, falhas: r.falhas })
+  } catch (e) {
+    console.error('[push/teste]', e.message)
+    res.status(500).json({ erro: 'Erro ao enviar teste' })
+  }
+})
+
 module.exports = router
+module.exports.enviarPushParaCliente = enviarPushParaCliente
