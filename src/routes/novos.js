@@ -564,7 +564,7 @@ router.get('/produtos', autenticar, async (req, res) => {
 
 router.get('/colaboradores-todos', autenticar, TODOS, async (req, res) => {
   try {
-    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
+    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
     return res.json(data || [])
   } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
 })
@@ -637,7 +637,7 @@ router.get('/agenda/folgas-hoje', autenticar, async (req, res) => {
 
 router.get('/colaboradores-todos', autenticar, TODOS, async (req, res) => {
   try {
-    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,saldo_vales_pix,foto_url,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
+    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,saldo_vales_pix,foto_url,foto_url_2,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
     return res.json(data || [])
   } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
 })
