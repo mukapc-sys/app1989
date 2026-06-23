@@ -156,36 +156,57 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
 
     result.alertas = alertas
 
-    // ---- Comissões do dia ----
+    // ---- Comissões do dia (mesma fonte do Financeiro: comandas finalizadas + AppBarber realizado) ----
     if (['proprietario','gerente'].includes(perfil)) {
-      let qCom = supabaseAdmin.from('agendamentos')
-        .select('valor, colaborador_id, colaboradores(id, nome, comissao_pct)')
-        .gte('data_hora_ini', inicioHoje)
-        .lte('data_hora_ini', fimHoje)
-        .eq('status', 'concluido')
-      if (perfil === 'gerente') qCom = qCom.eq('unidade_id', unidade_id)
-      const { data: comAgends } = await qCom
+      const { data: colsCom } = await supabaseAdmin
+        .from('colaboradores').select('id, nome, comissao_pct')
+
+      // Comandas finalizadas hoje
+      let qCmd = supabaseAdmin.from('comandas')
+        .select('total, colaborador_id')
+        .eq('status', 'finalizada')
+        .gte('finalizada_em', inicioHoje).lte('finalizada_em', fimHoje)
+      if (perfil === 'gerente') qCmd = qCmd.eq('unidade_id', unidade_id)
+      const { data: cmds } = await qCmd
+
+      // AppBarber finalizado FORA do sistema, hoje (não virou comanda)
+      let qAB = supabaseAdmin.from('agenda_appbarber')
+        .select('valor, colaborador_id')
+        .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+        .gte('inicio', inicioHoje).lte('inicio', fimHoje)
+      if (perfil === 'gerente') qAB = qAB.eq('unidade_id', unidade_id)
+      const { data: abs } = await qAB
 
       const comMap = {}
-      for (const a of (comAgends || [])) {
-        const id   = a.colaborador_id
-        const nome = a.colaboradores?.nome || 'Desconhecido'
-        const pct  = (a.colaboradores?.comissao_pct != null ? a.colaboradores.comissao_pct : 40) / 100
-        if (!comMap[id]) comMap[id] = { nome, total: 0, atendimentos: 0 }
-        comMap[id].total       += (parseFloat(a.valor)||0) * pct
-        comMap[id].atendimentos += 1
+      const addCom = (cid, valor) => {
+        const col = (colsCom || []).find(x => x.id === cid)
+        if (!col) return
+        const pct = (col.comissao_pct != null ? col.comissao_pct : 40) / 100
+        if (!comMap[col.id]) comMap[col.id] = { nome: col.nome, total: 0, atendimentos: 0 }
+        comMap[col.id].total       += (parseFloat(valor)||0) * pct
+        comMap[col.id].atendimentos += 1
       }
+      ;(cmds || []).forEach(c => addCom(c.colaborador_id, c.total))
+      ;(abs  || []).forEach(a => addCom(a.colaborador_id, a.valor))
       result.comissoes = Object.values(comMap).sort((a,b) => b.total - a.total)
     } else if (perfil === 'colaborador') {
-      const { data: minhasComandas } = await supabaseAdmin.from('agendamentos')
-        .select('valor, data_hora_ini')
-        .eq('colaborador_id', colab.id)
-        .eq('status', 'concluido')
-        .gte('data_hora_ini', inicioMes)
       const pct = (colab.comissao_pct != null ? colab.comissao_pct : 40) / 100
-      const hoje_val  = (minhasComandas||[]).filter(a => a.data_hora_ini >= inicioHoje).reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
-      const mes_val   = (minhasComandas||[]).reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
-      result.comissoes = { hoje: hoje_val.toFixed(2), mes: mes_val.toFixed(2), atendimentos_mes: (minhasComandas||[]).length }
+      const { data: minhasCmds } = await supabaseAdmin.from('comandas')
+        .select('total, finalizada_em')
+        .eq('colaborador_id', colab.id).eq('status', 'finalizada')
+        .gte('finalizada_em', inicioMes)
+      const { data: meusAB } = await supabaseAdmin.from('agenda_appbarber')
+        .select('valor, inicio')
+        .eq('colaborador_id', colab.id)
+        .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+        .gte('inicio', inicioMes)
+      const linhas = [].concat(
+        (minhasCmds || []).map(x => ({ valor: x.total, quando: x.finalizada_em })),
+        (meusAB     || []).map(x => ({ valor: x.valor, quando: x.inicio }))
+      )
+      const hoje_val = linhas.filter(a => a.quando >= inicioHoje).reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
+      const mes_val  = linhas.reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
+      result.comissoes = { hoje: hoje_val.toFixed(2), mes: mes_val.toFixed(2), atendimentos_mes: linhas.length }
     }
 
     // ---- Top clientes do mês ----
