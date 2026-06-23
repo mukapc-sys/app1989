@@ -160,6 +160,46 @@ router.get('/clientes/meu', autenticar, exigirPerfil('cliente'), async (req, res
   }
 })
 
+// GET /clientes/:id/plano — assinatura ativa de um cliente (para o atendimento/comanda)
+router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const cliente_id = req.params.id
+    const { data: assin } = await supabaseAdmin.from('assinaturas')
+      .select('*, planos(id,nome,valor_mensal)').eq('cliente_id', cliente_id)
+      .eq('status', 'ativa').limit(1)
+    if (!assin || !assin.length) return res.json({ ativo: false })
+    const a = assin[0]
+    const plano = a.planos || {}
+
+    const { data: ps } = await supabaseAdmin.from('plano_servicos')
+      .select('servico_id, limite_mes, servicos(nome)').eq('plano_id', plano.id)
+
+    const agora = new Date()
+    const ini = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
+    const { data: usados } = await supabaseAdmin.from('agendamentos')
+      .select('servico_id').eq('cliente_id', cliente_id)
+      .eq('status', 'concluido').gte('data_hora_ini', ini)
+    const cont = {}
+    ;(usados || []).forEach(u => { cont[u.servico_id] = (cont[u.servico_id] || 0) + 1 })
+
+    const servicos = (ps || []).map(x => ({
+      nome: (x.servicos && x.servicos.nome) || 'Serviço',
+      limite_mes: x.limite_mes,
+      usado: cont[x.servico_id] || 0
+    }))
+    return res.json({
+      ativo: true,
+      plano: { nome: plano.nome, valor_mensal: plano.valor_mensal },
+      credito_saldo: a.credito_saldo != null ? a.credito_saldo : null,
+      data_renovacao: a.data_renovacao || null,
+      servicos
+    })
+  } catch (e) {
+    console.error('[clientes/plano]', e.message)
+    return res.status(500).json({ erro: 'Erro ao carregar plano do cliente' })
+  }
+})
+
 router.put('/clientes/:id', autenticar, async (req, res) => {
   try {
     const u = req.usuario
