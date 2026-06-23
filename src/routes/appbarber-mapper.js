@@ -12,6 +12,18 @@ function parseValorBR(v) {
   return isNaN(n) ? 0 : n
 }
 
+// AppBarber manda a hora LOCAL (Brasília) sem fuso (formato FullCalendar).
+// Marcamos como -03:00 para o banco guardar o instante correto — senão fica 3h deslocado.
+function horaBR(s) {
+  if (!s) return s
+  s = String(s).trim()
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s)) return s          // não é data-hora -> não mexe
+  if (/[Zz]$|[+\-]\d{2}:?\d{2}$/.test(s)) return s.replace(' ', 'T')  // já tem fuso -> mantém
+  s = s.replace(' ', 'T')
+  if (/T\d{2}:\d{2}$/.test(s)) s += ':00'                             // sem segundos -> completa
+  return s + '-03:00'
+}
+
 // codStatus do AppBarber -> rótulo do nosso sistema
 const STATUS_MAP = {
   1: 'agendado',
@@ -57,8 +69,8 @@ function mapearAgendamento(raw, ctx = {}) {
     profissional_nome: profNome,
 
     // quando
-    inicio: raw.start || null,
-    fim: raw.end || null,
+    inicio: horaBR(raw.start),
+    fim: horaBR(raw.end),
 
     // o quê
     servico: (raw.servico || '').trim() || null,
