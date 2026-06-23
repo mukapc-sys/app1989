@@ -10,6 +10,16 @@ const jwt = require('jsonwebtoken')
 const { supabaseAdmin } = require('../config/supabase')
 
 // ---- Token do cliente (mesmo JWT_SECRET do sistema) ----
+// Horário de funcionamento da barbearia (minutos desde 00:00). Retorna null se fechado.
+//  Seg-Sex: 10h-20h · Sábado e feriados: 9h-18h · Domingo: fechado
+function horarioFuncionamento(dataStr, ehFeriado) {
+  const partes = String(dataStr).split('-').map(Number)
+  const dow = new Date(Date.UTC(partes[0], partes[1] - 1, partes[2])).getUTCDay() // 0=Dom ... 6=Sáb
+  if (dow === 0) return null                                   // Domingo fechado
+  if (ehFeriado || dow === 6) return { abre: 9 * 60, fecha: 18 * 60 } // Sábado/feriado
+  return { abre: 10 * 60, fecha: 20 * 60 }                     // Seg-Sex
+}
+
 function tokenCliente(c) {
   return jwt.sign({ id: c.id, tipo: 'cliente', nome: c.nome }, process.env.JWT_SECRET, { expiresIn: '30d' })
 }
@@ -132,7 +142,7 @@ router.get('/horarios', async (req, res) => {
     const ini = new Date(data + 'T00:00:00-03:00').toISOString()
     const fim = new Date(data + 'T23:59:59-03:00').toISOString()
 
-    const [{ data: ocupados }, { data: bloqueios }, { data: importados }] = await Promise.all([
+    const [{ data: ocupados }, { data: bloqueios }, { data: importados }, { data: feriados }] = await Promise.all([
       supabaseAdmin.from('agendamentos')
         .select('data_hora_ini, data_hora_fim')
         .eq('colaborador_id', colaborador_id)
@@ -148,13 +158,20 @@ router.get('/horarios', async (req, res) => {
         .eq('colaborador_id', colaborador_id)
         .eq('finalizado', false)
         .gte('inicio', ini).lte('inicio', fim),
+      // feriados cadastrados nessa data (afetam o horário de funcionamento)
+      supabaseAdmin.from('feriados').select('data').eq('data', data),
     ])
 
-    const slots = []
-    const inicio = 8 * 60, fimDia = 20 * 60, passo = 15
+    // Horário de funcionamento do dia (respeita dia da semana e feriados)
+    const ehFeriado = (feriados || []).length > 0
+    const hf = horarioFuncionamento(data, ehFeriado)
+    const inicio = hf ? hf.abre : 0
+    const fimDia = hf ? hf.fecha : 0   // fechado -> inicio=fimDia=0 -> não gera nenhum slot
+    const passo = 15
     const agora = new Date()
     const dur = parseInt(duracao) || 30
 
+    const slots = []
     for (let min = inicio; min + dur <= fimDia; min += passo) {
       const hh = String(Math.floor(min / 60)).padStart(2, '0')
       const mm = String(min % 60).padStart(2, '0')
@@ -209,6 +226,20 @@ router.post('/agendar', async (req, res) => {
     const ini = new Date(data_hora)
     if (isNaN(ini.getTime())) return res.status(400).json({ erro: 'Horário inválido' })
     if (ini < new Date()) return res.status(400).json({ erro: 'Esse horário já passou' })
+
+    // valida o horário de funcionamento (dia da semana + feriado), em horário de Brasília
+    const _p = {}
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+      .formatToParts(ini).forEach(p => { _p[p.type] = p.value })
+    const dataBR = `${_p.year}-${_p.month}-${_p.day}`
+    let _hh = parseInt(_p.hour); if (_hh === 24) _hh = 0
+    const minDia = _hh * 60 + parseInt(_p.minute)
+    const { data: ferAg } = await supabaseAdmin.from('feriados').select('data').eq('data', dataBR)
+    const hfAg = horarioFuncionamento(dataBR, (ferAg || []).length > 0)
+    const durAg = sv.duracao_min || 30
+    if (!hfAg || minDia < hfAg.abre || minDia + durAg > hfAg.fecha) {
+      return res.status(400).json({ erro: 'Esse horário está fora do funcionamento da barbearia' })
+    }
     const fim = new Date(ini)
     fim.setMinutes(fim.getMinutes() + (sv.duracao_min || 30))
 
