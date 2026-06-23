@@ -82,7 +82,7 @@ router.get('/colaboradores', autenticar, async (req, res) => {
 
 router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
-    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, servico_ids, senha_temp } = req.body
+    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, servico_ids, senha_temp, foto_url } = req.body
 
     // Cria user no Auth
     const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
@@ -92,7 +92,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (r
 
     const { data: colab, error } = await supabaseAdmin
       .from('colaboradores')
-      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct })
+      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, foto_url })
       .select().single()
     if (error) throw error
 
@@ -129,26 +129,20 @@ router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario'), async
 
 // ============ CLIENTES ============
 
-router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
-    const termo = (req.query.q || req.query.busca || '').trim()
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100)
-
+    const { busca, unidade_id } = req.query
     let query = supabaseAdmin
       .from('clientes')
       .select('id, nome, email, whatsapp, cpf, ativo, criado_em, colaborador_pref, unidade_pref')
-      .eq('ativo', true).order('nome').limit(limit)
+      .eq('ativo', true).order('nome').limit(100)
 
-    if (termo.length >= 2) {
-      query = query.or(`nome.ilike.%${termo}%,whatsapp.ilike.%${termo}%,cpf.ilike.%${termo}%`)
-    }
+    if (busca) query = query.or(`nome.ilike.%${busca}%,whatsapp.ilike.%${busca}%,cpf.ilike.%${busca}%`)
 
     const { data, error } = await query
     if (error) throw error
-    console.log('[clientes] termo=', termo, 'limit=', limit, 'retornou', (data||[]).length)
     return res.json(data)
   } catch (err) {
-    console.error('[clientes]', err.message)
     return res.status(500).json({ erro: 'Erro ao buscar clientes' })
   }
 })
