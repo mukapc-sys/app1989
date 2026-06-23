@@ -664,4 +664,70 @@ router.post('/dre/salvar', autenticar, SEM_ACESSO, async (req, res) => {
   }
 })
 
+// GET /financeiro/ranking-clientes?periodo=12m[&unidade_id=xxx&limit=50]
+// Ranking de clientes por VALOR gasto (comandas finalizadas + AppBarber realizado).
+router.get('/ranking-clientes', autenticar, SEM_ACESSO, async (req, res) => {
+  try {
+    const u = req.usuario
+    const periodo = req.query.periodo || '12m'
+    const uid = u.perfil === 'gerente' ? u.unidade_id : (req.query.unidade_id || null)
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200)
+
+    const agora = new Date()
+    let ini
+    if (periodo === 'mes')      ini = new Date(agora.getFullYear(), agora.getMonth(), 1)
+    else if (periodo === 'ano') ini = new Date(agora.getFullYear(), 0, 1)
+    else if (periodo === 'tudo')ini = new Date(2000, 0, 1)
+    else { ini = new Date(agora); ini.setMonth(ini.getMonth() - 12) } // 12m
+    const iniISO = ini.toISOString()
+    const fimISO = new Date().toISOString()
+
+    const map = {}
+    const add = (cid, nome, whats, valor, quando) => {
+      if (!cid) return
+      if (!map[cid]) map[cid] = { cliente_id: cid, nome: nome || null, whatsapp: whats || null, total: 0, atendimentos: 0, ultima: null }
+      if (nome && !map[cid].nome) map[cid].nome = nome
+      if (whats && !map[cid].whatsapp) map[cid].whatsapp = whats
+      map[cid].total += parseFloat(valor) || 0
+      map[cid].atendimentos += 1
+      if (!map[cid].ultima || quando > map[cid].ultima) map[cid].ultima = quando
+    }
+
+    // Comandas finalizadas com cliente
+    let qc = supabaseAdmin.from('comandas')
+      .select('cliente_id, total, finalizada_em, clientes(nome, whatsapp)')
+      .eq('status', 'finalizada').gte('finalizada_em', iniISO).lte('finalizada_em', fimISO)
+      .not('cliente_id', 'is', null)
+    if (uid) qc = qc.eq('unidade_id', uid)
+    const { data: cmds } = await qc
+    for (const c of (cmds || [])) add(c.cliente_id, c.clientes?.nome, c.clientes?.whatsapp, c.total, c.finalizada_em)
+
+    // AppBarber realizado (fora) com cliente
+    let qa = supabaseAdmin.from('agenda_appbarber')
+      .select('cliente_id, valor, inicio')
+      .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+      .gte('inicio', iniISO).lte('inicio', fimISO).not('cliente_id', 'is', null)
+    if (uid) qa = qa.eq('unidade_id', uid)
+    const { data: abs } = await qa
+    for (const a of (abs || [])) add(a.cliente_id, null, null, a.valor, a.inicio)
+
+    // Resolve nomes que faltaram (clientes só do AppBarber)
+    const semNome = Object.values(map).filter(r => !r.nome).map(r => r.cliente_id)
+    if (semNome.length) {
+      const { data: cls } = await supabaseAdmin.from('clientes').select('id, nome, whatsapp').in('id', semNome)
+      ;(cls || []).forEach(c => { if (map[c.id]) { map[c.id].nome = c.nome || 'Cliente'; map[c.id].whatsapp = map[c.id].whatsapp || c.whatsapp } })
+    }
+
+    const ranking = Object.values(map)
+      .map(r => ({ ...r, nome: r.nome || 'Cliente', total: round(r.total), ticket: r.atendimentos > 0 ? round(r.total / r.atendimentos) : 0 }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, limit)
+
+    return res.json({ periodo, total_clientes: Object.keys(map).length, ranking })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ erro: 'Erro ao gerar ranking de clientes' })
+  }
+})
+
 module.exports = router
