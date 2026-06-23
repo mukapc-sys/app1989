@@ -151,7 +151,7 @@ router.get('/horarios', async (req, res) => {
     ])
 
     const slots = []
-    const inicio = 8 * 60, fimDia = 20 * 60, passo = 30
+    const inicio = 8 * 60, fimDia = 20 * 60, passo = 15
     const agora = new Date()
     const dur = parseInt(duracao) || 30
 
