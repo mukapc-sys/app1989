@@ -528,4 +528,140 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
   }
 })
 
+// ===================== DRE / BALANCETE =====================
+// Categorias de despesa padrão (COMISSÃO é calculada à parte, automática)
+const DRE_CATEGORIAS = ['ATENDENTE','GERENTE','ADMINISTRADOR','LIMPEZA','EXTRA','ALUGUEL','MERCADO','GIRO','LF','INSUMOS','MARKETING','CONTADOR','IMPOSTOS','PRODUTOS','LUZ','AGUA','INTERNET/SPOTIFY','SEGURANÇA','DIV/BAR']
+const DRE_FORMAS = [['Dinheiro','dinheiro'],['Débito','debito'],['Crédito','credito'],['Pix','pix'],['AppBarber','appbarber'],['Outros','outros']]
+
+function rangeMesDre(mes) {
+  const [y,m] = mes.split('-').map(Number)
+  const prox = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`
+  return { ini: `${mes}-01T00:00:00-03:00`, fim: `${prox}-01T00:00:00-03:00` }
+}
+
+// Entrada (por forma) e comissão calculadas automaticamente do sistema
+async function autoDre(ini, fim, uid) {
+  let qc = supabaseAdmin.from('comandas').select('total, forma_pgto, colaborador_id')
+    .eq('status','finalizada').gte('finalizada_em', ini).lt('finalizada_em', fim)
+  if (uid) qc = qc.eq('unidade_id', uid)
+  const { data: cmds } = await qc
+
+  const { data: cols } = await supabaseAdmin.from('colaboradores').select('id, comissao_pct')
+  const pctMap = {}; (cols||[]).forEach(c => pctMap[c.id] = (c.comissao_pct != null ? c.comissao_pct : 40) / 100)
+
+  const entrada = { dinheiro:0, debito:0, credito:0, pix:0, appbarber:0, outros:0 }
+  let comissao = 0
+  for (const c of (cmds||[])) {
+    const f = ['dinheiro','debito','credito','pix'].includes(c.forma_pgto) ? c.forma_pgto : 'outros'
+    const v = parseFloat(c.total)||0
+    entrada[f] += v
+    comissao += v * (pctMap[c.colaborador_id] || 0.4)
+  }
+  const ab = await appbarberRealizados(ini, fim, uid)
+  for (const a of ab) {
+    const v = parseFloat(a.valor)||0
+    entrada.appbarber += v
+    comissao += v * (pctMap[a.colaborador_id] || 0.4)
+  }
+  return { entrada, comissao }
+}
+
+// Monta o DRE de UMA unidade (mistura automático com o que foi salvo)
+async function montarDre(uid, mes) {
+  const { ini, fim } = rangeMesDre(mes)
+  const { entrada: autoEnt, comissao: comAuto } = await autoDre(ini, fim, uid)
+
+  const { data: linhas } = await supabaseAdmin.from('dre_lancamentos')
+    .select('tipo, categoria, valor').eq('unidade_id', uid).eq('mes', mes)
+  const savedEnt = {}, savedDesp = {}
+  ;(linhas||[]).forEach(l => { (l.tipo==='entrada'?savedEnt:savedDesp)[l.categoria] = parseFloat(l.valor)||0 })
+  const salvo = (linhas||[]).length > 0
+
+  const entrada = DRE_FORMAS.map(([label,key]) => ({
+    categoria: label,
+    auto: round(autoEnt[key]||0),
+    valor: savedEnt[label] != null ? savedEnt[label] : round(autoEnt[key]||0)
+  }))
+
+  const despesas = []
+  despesas.push({ categoria:'COMISSÃO', comissao:true, auto: round(comAuto),
+    valor: savedDesp['COMISSÃO'] != null ? savedDesp['COMISSÃO'] : round(comAuto) })
+  DRE_CATEGORIAS.forEach(cat => despesas.push({ categoria:cat, valor: savedDesp[cat] != null ? savedDesp[cat] : 0 }))
+  Object.keys(savedDesp).forEach(cat => {
+    if (cat !== 'COMISSÃO' && !DRE_CATEGORIAS.includes(cat)) despesas.push({ categoria:cat, valor: savedDesp[cat], custom:true })
+  })
+
+  return { entrada, despesas, salvo }
+}
+
+function finalizaDre(mes, unidade_id, dre, consolidado) {
+  const total_entrada = dre.entrada.reduce((s,e)=>s+(parseFloat(e.valor)||0),0)
+  const total_despesa = dre.despesas.reduce((s,d)=>s+(parseFloat(d.valor)||0),0)
+  return {
+    mes, unidade_id, consolidado, salvo: dre.salvo,
+    entrada: dre.entrada.map(e => ({ ...e, valor: round(e.valor) })),
+    despesas: dre.despesas.map(d => ({ ...d, valor: round(d.valor) })),
+    total_entrada: round(total_entrada),
+    total_despesa: round(total_despesa),
+    saldo: round(total_entrada - total_despesa)
+  }
+}
+
+// GET /financeiro/dre?mes=2026-06[&unidade_id=xxx]  (sem unidade = consolidado de todas)
+router.get('/dre', autenticar, SEM_ACESSO, async (req, res) => {
+  try {
+    const u = req.usuario
+    const mes = req.query.mes || new Date().toISOString().slice(0,7)
+    const uid = u.perfil === 'gerente' ? u.unidade_id : (req.query.unidade_id || '')
+
+    if (uid) {
+      const dre = await montarDre(uid, mes)
+      return res.json(finalizaDre(mes, uid, dre, false))
+    }
+
+    // Consolidado: soma de todas as unidades
+    const { data: unidades } = await supabaseAdmin.from('unidades').select('id')
+    const aggEnt = {}, aggDesp = {}; let algumSalvo = false
+    for (const un of (unidades||[])) {
+      const p = await montarDre(un.id, mes)
+      if (p.salvo) algumSalvo = true
+      p.entrada.forEach(e => {
+        aggEnt[e.categoria] = aggEnt[e.categoria] || { categoria:e.categoria, auto:0, valor:0 }
+        aggEnt[e.categoria].auto += e.auto || 0; aggEnt[e.categoria].valor += e.valor || 0
+      })
+      p.despesas.forEach(d => {
+        aggDesp[d.categoria] = aggDesp[d.categoria] || { categoria:d.categoria, auto:0, valor:0, comissao:d.comissao, custom:d.custom }
+        aggDesp[d.categoria].auto += d.auto || 0; aggDesp[d.categoria].valor += d.valor || 0
+      })
+    }
+    const dre = { entrada: Object.values(aggEnt), despesas: Object.values(aggDesp), salvo: algumSalvo }
+    return res.json(finalizaDre(mes, '', dre, true))
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ erro: 'Erro ao montar DRE' })
+  }
+})
+
+// POST /financeiro/dre/salvar  { unidade_id, mes, entrada:[{categoria,valor}], despesas:[{categoria,valor}] }
+router.post('/dre/salvar', autenticar, SEM_ACESSO, async (req, res) => {
+  try {
+    const u = req.usuario
+    const { mes, entrada = [], despesas = [] } = req.body
+    const unidade_id = u.perfil === 'gerente' ? u.unidade_id : req.body.unidade_id
+    if (!unidade_id || !mes) return res.status(400).json({ erro: 'unidade_id e mes são obrigatórios' })
+
+    await supabaseAdmin.from('dre_lancamentos').delete().eq('unidade_id', unidade_id).eq('mes', mes)
+
+    const linhas = []
+    entrada.forEach((e,i) => { if (e && e.categoria) linhas.push({ unidade_id, mes, tipo:'entrada', categoria:String(e.categoria).slice(0,60), valor: parseFloat(e.valor)||0, ordem:i }) })
+    despesas.forEach((d,i) => { if (d && d.categoria) linhas.push({ unidade_id, mes, tipo:'despesa', categoria:String(d.categoria).slice(0,60), valor: parseFloat(d.valor)||0, ordem:i }) })
+    if (linhas.length) { const { error } = await supabaseAdmin.from('dre_lancamentos').insert(linhas); if (error) throw error }
+
+    return res.json({ ok: true, salvos: linhas.length })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ erro: 'Erro ao salvar DRE' })
+  }
+})
+
 module.exports = router
