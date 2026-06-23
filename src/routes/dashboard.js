@@ -209,21 +209,34 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       result.comissoes = { hoje: hoje_val.toFixed(2), mes: mes_val.toFixed(2), atendimentos_mes: linhas.length }
     }
 
-    // ---- Top clientes do mês ----
-    let qTop = supabaseAdmin.from('agendamentos')
-      .select('cliente_id, clientes(nome), colaboradores(nome), unidades(nome)')
-      .gte('data_hora_ini', inicioMes)
-      .eq('status', 'concluido')
-    if (perfil === 'colaborador') qTop = qTop.eq('colaborador_id', colab.id)
-    else if (perfil === 'gerente') qTop = qTop.eq('unidade_id', unidade_id)
-    const { data: topAgends } = await qTop
-
+    // ---- Top clientes do mês (comandas finalizadas + AppBarber realizado) ----
     const topMap = {}
-    for (const a of (topAgends||[])) {
-      const id = a.cliente_id
-      if (!topMap[id]) topMap[id] = { nome: a.clientes?.nome, barbeiro: a.colaboradores?.nome, unidade: a.unidades?.nome, visitas: 0 }
-      topMap[id].visitas++
+    const addTop = (key, nome, unidade, barbeiro) => {
+      if (!key) return
+      if (!topMap[key]) topMap[key] = { nome: nome || 'Cliente', unidade: unidade || null, barbeiro: barbeiro || null, visitas: 0 }
+      if (nome && (!topMap[key].nome || topMap[key].nome === 'Cliente')) topMap[key].nome = nome
+      if (unidade && !topMap[key].unidade) topMap[key].unidade = unidade
+      if (barbeiro && !topMap[key].barbeiro) topMap[key].barbeiro = barbeiro
+      topMap[key].visitas++
     }
+
+    let qTopC = supabaseAdmin.from('comandas')
+      .select('cliente_id, clientes(nome), colaboradores(nome), unidades(nome)')
+      .eq('status', 'finalizada').gte('finalizada_em', inicioMes).not('cliente_id', 'is', null)
+    if (perfil === 'colaborador') qTopC = qTopC.eq('colaborador_id', colab.id)
+    else if (perfil === 'gerente') qTopC = qTopC.eq('unidade_id', unidade_id)
+    const { data: topCmds } = await qTopC
+    for (const c of (topCmds || [])) addTop(c.cliente_id, c.clientes?.nome, c.unidades?.nome, c.colaboradores?.nome)
+
+    let qTopAB = supabaseAdmin.from('agenda_appbarber')
+      .select('cliente_id, cliente_nome')
+      .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+      .gte('inicio', inicioMes)
+    if (perfil === 'colaborador') qTopAB = qTopAB.eq('colaborador_id', colab.id)
+    else if (perfil === 'gerente') qTopAB = qTopAB.eq('unidade_id', unidade_id)
+    const { data: topAB } = await qTopAB
+    for (const a of (topAB || [])) addTop(a.cliente_id || ('n:' + (a.cliente_nome || '?')), a.cliente_nome, null, null)
+
     result.top_clientes = Object.values(topMap).sort((a,b)=>b.visitas-a.visitas).slice(0,10)
 
     return res.json(result)
