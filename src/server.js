@@ -104,6 +104,52 @@ cron.schedule('0 8 * * *', async () => {
   }
 }, { timezone: 'America/Sao_Paulo' })
 
+// A cada 5 min — lembretes por PUSH (≈1h antes e ≈30min antes)
+const { enviarPushParaCliente } = require('./routes/publico')
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const agora = new Date()
+    const em30  = new Date(agora.getTime() + 30 * 60000)
+    const em60  = new Date(agora.getTime() + 60 * 60000)
+
+    const { data: ags } = await supabaseAdmin.from('agendamentos')
+      .select('id, cliente_id, data_hora_ini, unidades(nome)')
+      .gt('data_hora_ini', agora.toISOString())
+      .lte('data_hora_ini', em60.toISOString())
+      .in('status', ['agendado', 'confirmado'])
+      .not('cliente_id', 'is', null)
+    if (!ags || !ags.length) return
+
+    const ids = ags.map(a => a.id)
+    const { data: enviados } = await supabaseAdmin.from('push_lembretes')
+      .select('agendamento_id, tipo').in('agendamento_id', ids)
+    const jaEnviado = new Set((enviados || []).map(s => s.agendamento_id + '|' + s.tipo))
+
+    for (const a of ags) {
+      const dt = new Date(a.data_hora_ini)
+      const tipo = dt > em30 ? '1h' : '30m'   // 30–60min antes → "1h"; ≤30min → "30m"
+      if (jaEnviado.has(a.id + '|' + tipo)) continue
+
+      // horário de Brasília (UTC-3, sem horário de verão no Brasil)
+      const br = new Date(dt.getTime() - 3 * 3600000)
+      const hora = String(br.getUTCHours()).padStart(2, '0') + ':' + String(br.getUTCMinutes()).padStart(2, '0')
+      const uni = (a.unidades && a.unidades.nome) ? ' na ' + a.unidades.nome : ''
+      const quando = tipo === '1h' ? 'daqui a 1 hora' : 'em 30 minutos'
+
+      try {
+        await enviarPushParaCliente(a.cliente_id, {
+          title: 'Seu horário está chegando ✂️',
+          body: `Seu atendimento é ${quando}, às ${hora}${uni}. Até já!`,
+          url: 'https://barbearia1989.com.br'
+        })
+        await supabaseAdmin.from('push_lembretes').insert({ agendamento_id: a.id, tipo })
+      } catch (e) { /* falha pontual não derruba o loop */ }
+    }
+  } catch (err) {
+    console.error('[CRON push] erro:', err.message)
+  }
+}, { timezone: 'America/Sao_Paulo' })
+
 // ============================================================
 // Start
 // ============================================================
