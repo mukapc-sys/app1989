@@ -82,7 +82,7 @@ router.get('/colaboradores', autenticar, async (req, res) => {
 
 router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
-    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, servico_ids, senha_temp, foto_url } = req.body
+    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
 
     // Cria user no Auth
     const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
@@ -92,7 +92,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (r
 
     const { data: colab, error } = await supabaseAdmin
       .from('colaboradores')
-      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, foto_url })
+      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, foto_url, foto_url_2 })
       .select().single()
     if (error) throw error
 
