@@ -3,6 +3,20 @@ const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
+// ---- Realtime: avisa "agenda mudou" (broadcast, SEM dados de cliente) ----
+async function pingAgenda(unidade_id) {
+  try {
+    const url = process.env.SUPABASE_URL
+    const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
+    if (!url || !key) return
+    await fetch(`${url}/realtime/v1/api/broadcast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': key, 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({ messages: [{ topic: 'agenda', event: 'mudou', payload: { unidade_id: unidade_id || null, at: Date.now() } }] }),
+    })
+  } catch (e) { console.error('[ping agenda]', e.message) }
+}
+
 // GET /agendamentos/hoje?unidade_id=xxx
 // Retorna agenda do dia — todos os perfis (filtrado por permissão)
 router.get('/hoje', autenticar, async (req, res) => {
@@ -187,6 +201,7 @@ router.post('/', autenticar, async (req, res) => {
 
     if (error) throw error
 
+    pingAgenda(unidade_id)
     return res.status(201).json(novo)
   } catch (err) {
     console.error(err)
@@ -218,6 +233,7 @@ router.put('/:id/status', autenticar, async (req, res) => {
       .from('agendamentos').update({ status }).eq('id', id).select().single()
 
     if (error) throw error
+    pingAgenda(data && data.unidade_id)
     return res.json(data)
   } catch (err) {
     console.error(err)
