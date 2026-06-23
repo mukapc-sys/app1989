@@ -71,7 +71,7 @@ async function enviarWhatsApp(numero, texto) {
 router.get('/barbeiros', async (_req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('colaboradores')
-      .select('id,nome,foto_url,perfil,ativo,unidade_id,unidades(nome)')
+      .select('id,nome,foto_url,foto_url_2,perfil,ativo,unidade_id,unidades(nome)')
       .eq('ativo', true).order('nome')
     if (error) throw error
     return res.json((data || []).filter(c => c.perfil !== 'caixa'))
