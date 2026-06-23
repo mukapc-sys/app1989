@@ -23,7 +23,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     // Tenta pelo user_id do Supabase Auth
     const { data: c1 } = await supabaseAdmin
       .from('colaboradores')
-      .select('id, nome, perfil, unidade_id, unidades(id, nome)')
+      .select('id, nome, perfil, unidade_id, comissao_pct, unidades(id, nome)')
       .eq('user_id', usuario.id)
       .single()
     
@@ -33,7 +33,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       // Tenta pelo id direto da tabela colaboradores
       const { data: c2 } = await supabaseAdmin
         .from('colaboradores')
-        .select('id, nome, perfil, unidade_id, unidades(id, nome)')
+        .select('id, nome, perfil, unidade_id, comissao_pct, unidades(id, nome)')
         .eq('id', usuario.id)
         .single()
       colab = c2
@@ -159,7 +159,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     // ---- Comissões do dia ----
     if (['proprietario','gerente'].includes(perfil)) {
       let qCom = supabaseAdmin.from('agendamentos')
-        .select('valor, colaborador_id, colaboradores(id, nome)')
+        .select('valor, colaborador_id, colaboradores(id, nome, comissao_pct)')
         .gte('data_hora_ini', inicioHoje)
         .lte('data_hora_ini', fimHoje)
         .eq('status', 'concluido')
@@ -170,8 +170,9 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       for (const a of (comAgends || [])) {
         const id   = a.colaborador_id
         const nome = a.colaboradores?.nome || 'Desconhecido'
+        const pct  = (a.colaboradores?.comissao_pct != null ? a.colaboradores.comissao_pct : 40) / 100
         if (!comMap[id]) comMap[id] = { nome, total: 0, atendimentos: 0 }
-        comMap[id].total       += (parseFloat(a.valor)||0) * 0.4
+        comMap[id].total       += (parseFloat(a.valor)||0) * pct
         comMap[id].atendimentos += 1
       }
       result.comissoes = Object.values(comMap).sort((a,b) => b.total - a.total)
@@ -181,8 +182,9 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
         .eq('colaborador_id', colab.id)
         .eq('status', 'concluido')
         .gte('data_hora_ini', inicioMes)
-      const hoje_val  = (minhasComandas||[]).filter(a => a.data_hora_ini >= inicioHoje).reduce((s,a)=>s+(parseFloat(a.valor)||0)*0.4,0)
-      const mes_val   = (minhasComandas||[]).reduce((s,a)=>s+(parseFloat(a.valor)||0)*0.4,0)
+      const pct = (colab.comissao_pct != null ? colab.comissao_pct : 40) / 100
+      const hoje_val  = (minhasComandas||[]).filter(a => a.data_hora_ini >= inicioHoje).reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
+      const mes_val   = (minhasComandas||[]).reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
       result.comissoes = { hoje: hoje_val.toFixed(2), mes: mes_val.toFixed(2), atendimentos_mes: (minhasComandas||[]).length }
     }
 
