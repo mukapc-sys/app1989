@@ -336,7 +336,7 @@ router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
 // ============ FERIADOS ============
 // Horário especial 09h-18h (igual sábado). Cadastrados por gerente/proprietário.
 
-router.get('/feriados', autenticar, ADMIN, async (req, res) => {
+router.get('/feriados', autenticar, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('feriados').select('*').order('data', { ascending: true })
@@ -349,11 +349,19 @@ router.get('/feriados', autenticar, ADMIN, async (req, res) => {
 
 router.post('/feriados', autenticar, ADMIN, async (req, res) => {
   try {
-    const { data, descricao } = req.body || {}
+    const { data, descricao, fechado, hora_abre, hora_fecha } = req.body || {}
     if (!data) return res.status(400).json({ erro: 'Informe a data do feriado' })
+    const reg = {
+      data,
+      descricao: (descricao || '').trim() || null,
+      fechado: !!fechado,
+      hora_abre:  (!fechado && hora_abre)  ? String(hora_abre).slice(0, 5)  : null,
+      hora_fecha: (!fechado && hora_fecha) ? String(hora_fecha).slice(0, 5) : null,
+      criado_por: req.usuario.id,
+    }
     const { data: novo, error } = await supabaseAdmin
       .from('feriados')
-      .upsert({ data, descricao: (descricao || '').trim() || null, criado_por: req.usuario.id }, { onConflict: 'data' })
+      .upsert(reg, { onConflict: 'data' })
       .select().single()
     if (error) throw error
     return res.status(201).json(novo)
