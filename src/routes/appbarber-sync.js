@@ -139,12 +139,32 @@ async function processarAgendamentos(unidadeId, bruto) {
   for (const r of registros) porId.set(r.appbarber_id, r)
   const registrosUnicos = Array.from(porId.values())
 
-  // grava em lotes (upsert por appbarber_id -> não duplica)
+  // grava em lotes (upsert por appbarber_id -> não duplica).
+  // Se o lote falhar (ex.: 1 registro com dado inválido), tenta um a um
+  // pra não perder o lote inteiro — e registra quais falharam e por quê.
+  let gravados = 0
+  const falhas = []
   if (registrosUnicos.length) {
     const { error } = await supabaseAdmin
       .from('agenda_appbarber')
       .upsert(registrosUnicos, { onConflict: 'appbarber_id' })
-    if (error) throw error
+    if (!error) {
+      gravados = registrosUnicos.length
+    } else {
+      for (const r of registrosUnicos) {
+        const { error: e1 } = await supabaseAdmin
+          .from('agenda_appbarber')
+          .upsert(r, { onConflict: 'appbarber_id' })
+        if (e1) {
+          falhas.push({
+            appbarber_id: r.appbarber_id,
+            motivo: (e1.message || e1.details || e1.hint || e1.code || 'erro'),
+          })
+        } else {
+          gravados++
+        }
+      }
+    }
   }
 
   return {
@@ -153,7 +173,9 @@ async function processarAgendamentos(unidadeId, bruto) {
     bloqueios,
     novos_clientes: novosClientes,
     pendentes_de_vinculo: pendentes,
-    gravados: registrosUnicos.length,
+    gravados,
+    falhas: falhas.length,
+    detalhe_falhas: falhas.slice(0, 3),
   }
 }
 
