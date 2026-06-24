@@ -32,6 +32,7 @@ if (process.env.NODE_ENV !== 'production') {
 app.use('/auth',         require('./routes/auth'))
 app.use('/agendamentos', require('./routes/agendamentos'))
 app.use('/comandas',     require('./routes/comandas'))
+app.use('/caixa',        require('./routes/caixa'))
 app.use('/financeiro',   require('./routes/financeiro'))
 app.use('/relatorios',   require('./routes/financeiro'))
 app.use('/assistente',   require('./routes/assistente'))
