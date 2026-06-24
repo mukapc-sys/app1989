@@ -398,60 +398,72 @@ router.patch('/agendamentos/:id', autenticar, async (req, res) => {
   }
 })
 
-// POST /agendamentos/bloquear — bloquear horário na agenda
+// POST /agendamentos/bloquear — bloqueia a agenda em blocos de 30 min
+// Cria UM bloqueio por slot (30 min) entre ini e fim, para que cada horário
+// possa ser desbloqueado individualmente. Pula slots que já têm cliente/bloqueio.
 router.post('/agendamentos/bloquear', autenticar, async (req, res) => {
   try {
-    const { colaborador_id, data_hora_ini, data_hora_fim, tipo } = req.body
-    if (!colaborador_id) return res.status(400).json({ erro: 'colaborador_id obrigatório' })
+    const { colaborador_id, data_hora_ini, data_hora_fim } = req.body
+    if (!colaborador_id || !data_hora_ini || !data_hora_fim) {
+      return res.status(400).json({ erro: 'colaborador_id, data_hora_ini e data_hora_fim são obrigatórios' })
+    }
 
-    const data_folga = (data_hora_ini || new Date().toISOString()).split('T')[0]
-
-    // Busca unidade do colaborador
+    // Unidade do colaborador
     const { data: colab } = await supabaseAdmin
       .from('colaboradores').select('unidade_id').eq('id', colaborador_id).single()
     const unidade_id = colab?.unidade_id || null
 
-    if (tipo === 'dia') {
-      // Dia todo → folga (upsert para não duplicar)
-      const { data: folgaExist } = await supabaseAdmin
-        .from('folgas').select('id').eq('colaborador_id', colaborador_id).eq('data_folga', data_folga).single()
+    // Serviço qualquer (ativo) só para satisfazer NOT NULL
+    const { data: servico } = await supabaseAdmin
+      .from('servicos').select('id').eq('ativo', true).limit(1).single()
+    if (!servico) return res.status(400).json({ erro: 'Nenhum serviço cadastrado para usar como bloqueio' })
 
-      if (folgaExist) {
-        // Já existe folga — atualiza para dia_todo
-        const { data, error } = await supabaseAdmin
-          .from('folgas').update({ periodo: 'dia_todo', status: 'aprovada' })
-          .eq('id', folgaExist.id).select().single()
-        if (error) throw error
-        return res.status(200).json(data)
-      } else {
-        const { data, error } = await supabaseAdmin.from('folgas').insert({
-          colaborador_id, data_folga, periodo: 'dia_todo',
-          unidade_id, status: 'aprovada', obs: 'Bloqueio via agenda'
-        }).select().single()
-        if (error) throw error
-        return res.status(201).json(data)
-      }
-    } else {
-      // Slot / manhã / tarde → insere agendamento de bloqueio
-      // Busca um servico_id válido para não violar NOT NULL
-      const { data: servico } = await supabaseAdmin
-        .from('servicos').select('id').eq('ativo', true).limit(1).single()
-      if (!servico) return res.status(400).json({ erro: 'Nenhum serviço cadastrado para usar como bloqueio' })
+    const ini = new Date(data_hora_ini)
+    const fim = new Date(data_hora_fim)
+    const STEP_MS = 30 * 60 * 1000
+    if (!(fim.getTime() > ini.getTime())) return res.status(400).json({ erro: 'Período inválido' })
 
-      const { data, error } = await supabaseAdmin.from('agendamentos').insert({
+    // O que já existe nesse intervalo (não duplica e não atropela cliente)
+    const { data: existentes } = await supabaseAdmin
+      .from('agendamentos')
+      .select('data_hora_ini,data_hora_fim,status')
+      .eq('colaborador_id', colaborador_id)
+      .gte('data_hora_ini', new Date(ini.getTime() - STEP_MS).toISOString())
+      .lt('data_hora_ini', fim.toISOString())
+      .not('status', 'eq', 'cancelado')
+
+    function ocupado(t) {
+      return (existentes || []).some(function (a) {
+        const s = new Date(a.data_hora_ini).getTime()
+        const e = a.data_hora_fim ? new Date(a.data_hora_fim).getTime() : s + STEP_MS
+        return s < t + STEP_MS && e > t // sobreposição
+      })
+    }
+
+    const linhas = []
+    let pulados = 0
+    for (let t = ini.getTime(); t < fim.getTime(); t += STEP_MS) {
+      if (ocupado(t)) { pulados++; continue }
+      linhas.push({
         colaborador_id,
         unidade_id,
-        servico_id:    servico.id,
-        data_hora_ini: data_hora_ini,
-        data_hora_fim: data_hora_fim,
-        status:        'bloqueado',
-        valor:         0
-      }).select().single()
-      if (error) throw error
-      return res.status(201).json(data)
+        servico_id: servico.id,
+        data_hora_ini: new Date(t).toISOString(),
+        data_hora_fim: new Date(t + STEP_MS).toISOString(),
+        status: 'bloqueado',
+        valor: 0
+      })
     }
+
+    if (!linhas.length) {
+      return res.status(200).json({ ok: true, criados: 0, pulados, msg: 'Todos os horários já estavam ocupados' })
+    }
+
+    const { data, error } = await supabaseAdmin.from('agendamentos').insert(linhas).select('id')
+    if (error) throw error
+    return res.status(201).json({ ok: true, criados: data.length, pulados })
   } catch (err) {
-    console.error('[bloquear slot]', err.message)
+    console.error('[bloquear]', err.message)
     return res.status(500).json({ erro: err.message || 'Erro ao bloquear' })
   }
 })
