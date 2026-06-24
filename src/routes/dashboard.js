@@ -2,6 +2,7 @@ const express = require('express')
 const router  = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { calcularComissaoFaixa, limitesMes } = require('./comissao-faixa')
 
 // ============================================================
 // GET /dashboard/metricas
@@ -156,57 +157,38 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
 
     result.alertas = alertas
 
-    // ---- Comissões do dia (mesma fonte do Financeiro: comandas finalizadas + AppBarber realizado) ----
+    // ---- Comissões do MÊS por faixa (mesmo motor do Caixa e do Relatório) ----
     if (['proprietario','gerente'].includes(perfil)) {
-      const { data: colsCom } = await supabaseAdmin
-        .from('colaboradores').select('id, nome, comissao_pct')
-
-      // Comandas finalizadas hoje
-      let qCmd = supabaseAdmin.from('comandas')
-        .select('total, colaborador_id')
-        .eq('status', 'finalizada')
-        .gte('finalizada_em', inicioHoje).lte('finalizada_em', fimHoje)
-      if (perfil === 'gerente') qCmd = qCmd.eq('unidade_id', unidade_id)
-      const { data: cmds } = await qCmd
-
-      // AppBarber finalizado FORA do sistema, hoje (não virou comanda)
-      let qAB = supabaseAdmin.from('agenda_appbarber')
-        .select('valor, colaborador_id')
-        .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
-        .gte('inicio', inicioHoje).lte('inicio', fimHoje)
-      if (perfil === 'gerente') qAB = qAB.eq('unidade_id', unidade_id)
-      const { data: abs } = await qAB
-
-      const comMap = {}
-      const addCom = (cid, valor) => {
-        const col = (colsCom || []).find(x => x.id === cid)
-        if (!col) return
-        const pct = (col.comissao_pct != null ? col.comissao_pct : 40) / 100
-        if (!comMap[col.id]) comMap[col.id] = { nome: col.nome, total: 0, atendimentos: 0 }
-        comMap[col.id].total       += (parseFloat(valor)||0) * pct
-        comMap[col.id].atendimentos += 1
-      }
-      ;(cmds || []).forEach(c => addCom(c.colaborador_id, c.total))
-      ;(abs  || []).forEach(a => addCom(a.colaborador_id, a.valor))
-      result.comissoes = Object.values(comMap).sort((a,b) => b.total - a.total)
+      try {
+        const { ini, fim } = limitesMes()
+        const uidCom = perfil === 'gerente' ? unidade_id : null
+        const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: uidCom })
+        result.comissoes = (fx.linhas || []).map(l => ({
+          nome: l.nome,
+          total: l.comissao_total,
+          servico_total: l.servico_total, servico_pct: l.servico_pct,
+          produto_total: l.produto_total, produto_unidades: l.produto_unidades, produto_pct: l.produto_pct
+        }))
+      } catch (e) { console.error('[dashboard comissoes-faixa]', e.message); result.comissoes = [] }
     } else if (perfil === 'colaborador') {
-      const pct = (colab.comissao_pct != null ? colab.comissao_pct : 40) / 100
-      const { data: minhasCmds } = await supabaseAdmin.from('comandas')
-        .select('total, finalizada_em')
-        .eq('colaborador_id', colab.id).eq('status', 'finalizada')
-        .gte('finalizada_em', inicioMes)
-      const { data: meusAB } = await supabaseAdmin.from('agenda_appbarber')
-        .select('valor, inicio')
-        .eq('colaborador_id', colab.id)
-        .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
-        .gte('inicio', inicioMes)
-      const linhas = [].concat(
-        (minhasCmds || []).map(x => ({ valor: x.total, quando: x.finalizada_em })),
-        (meusAB     || []).map(x => ({ valor: x.valor, quando: x.inicio }))
-      )
-      const hoje_val = linhas.filter(a => a.quando >= inicioHoje).reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
-      const mes_val  = linhas.reduce((s,a)=>s+(parseFloat(a.valor)||0)*pct,0)
-      result.comissoes = { hoje: hoje_val.toFixed(2), mes: mes_val.toFixed(2), atendimentos_mes: linhas.length }
+      try {
+        const { ini, fim } = limitesMes()
+        const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: colab.unidade_id || null })
+        const minha = (fx.linhas || []).find(l => l.colaborador_id === colab.id) ||
+          { comissao_total: 0, servico_pct: 40, produto_pct: 10, servico_total: 0, produto_total: 0, produto_unidades: 0 }
+        // estimativa de hoje: receita de hoje × a faixa do mês
+        const fxHoje = await calcularComissaoFaixa({ ini: inicioHoje, fim: fimHoje, unidade_id: colab.unidade_id || null })
+        const h = (fxHoje.linhas || []).find(l => l.colaborador_id === colab.id) || { servico_total: 0, produto_total: 0 }
+        const hojeVal = h.servico_total * minha.servico_pct / 100 + h.produto_total * minha.produto_pct / 100
+        result.comissoes = {
+          hoje: hojeVal.toFixed(2),
+          mes: Number(minha.comissao_total).toFixed(2),
+          pct_servico: minha.servico_pct,
+          servico_total: minha.servico_total,
+          produto_total: minha.produto_total,
+          produto_unidades: minha.produto_unidades
+        }
+      } catch (e) { console.error('[dashboard comissoes-faixa colab]', e.message); result.comissoes = { hoje: '0.00', mes: '0.00', pct_servico: 40 } }
     }
 
     // ---- Top clientes do mês (comandas finalizadas + AppBarber realizado) ----
