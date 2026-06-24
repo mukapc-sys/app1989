@@ -15,8 +15,8 @@ app.use(cors({
   credentials: true
 }))
 
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+app.use(express.json({ limit: '15mb' }))
+app.use(express.urlencoded({ extended: true, limit: '15mb' }))
 
 // Log de requisições em desenvolvimento
 if (process.env.NODE_ENV !== 'production') {
@@ -54,7 +54,11 @@ app.get('/health', (_req, res) => {
 // Handler de erros
 app.use((err, _req, res, _next) => {
   console.error('Erro não tratado:', err)
-  res.status(500).json({ erro: 'Erro interno do servidor' })
+  // corpo grande demais (payload) -> avisa de forma clara em vez de 500 genérico
+  if (err && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413)) {
+    return res.status(413).json({ ok: false, motivo: 'PAYLOAD_GRANDE', erro: 'Os dados enviados são grandes demais. Tente um período/dia menor.', detalhe: err.message })
+  }
+  res.status(500).json({ ok: false, erro: 'Erro interno do servidor', detalhe: (err && err.message) || String(err) })
 })
 
 // 404
@@ -138,8 +142,8 @@ cron.schedule('*/5 * * * *', async () => {
 
       try {
         await enviarPushParaCliente(a.cliente_id, {
-          title: 'Seu horário está chegando ✂️',
-          body: `Seu atendimento é ${quando}, às ${hora}${uni}. Até já!`,
+          titulo: 'Seu horário está chegando ✂️',
+          corpo: `Seu atendimento é ${quando}, às ${hora}${uni}. Até já!`,
           url: 'https://barbearia1989.com.br'
         })
         await supabaseAdmin.from('push_lembretes').insert({ agendamento_id: a.id, tipo })
