@@ -60,6 +60,22 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
     }
   }
 
+  // AppBarber realizado FORA do sistema (não virou comanda): conta como SERVIÇO.
+  // is('agendamento_id', null) garante que não duplica com comandas/agendamentos finalizados.
+  let qab = supabaseAdmin
+    .from('agenda_appbarber')
+    .select('valor, colaborador_id')
+    .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+    .gte('inicio', ini).lt('inicio', fim)
+  if (unidade_id) qab = qab.eq('unidade_id', unidade_id)
+  const { data: abs } = await qab
+  for (const a of (abs || [])) {
+    const cid = a.colaborador_id
+    if (!cid) continue
+    if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0 }
+    acc[cid].servico_total += parseFloat(a.valor || 0)
+  }
+
   // Nomes dos barbeiros
   const ids = Object.keys(acc)
   const nomes = {}
