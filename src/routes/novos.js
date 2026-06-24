@@ -273,6 +273,7 @@ router.post('/agendamentos', autenticar, async (req, res) => {
         data_hora_fim: fim.toISOString(),
         nome_acompanhante: item.nome_acompanhante || null,
         valor: servico?.valor || 0,
+        encaixe: !!(item.encaixe || req.body.encaixe),
         status: 'agendado'
       }).select().single()
       if (error) throw error
@@ -593,6 +594,15 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
     const { data: agenda, error } = await q
     if(error) throw error
 
+    // Busca o flag "encaixe" direto da tabela (a view pode não expor) e monta um Set.
+    const ids = (agenda || []).map(a => a.id).filter(Boolean)
+    const encaixeSet = new Set()
+    if (ids.length) {
+      const { data: encs } = await supabaseAdmin
+        .from('agendamentos').select('id').eq('encaixe', true).in('id', ids)
+      ;(encs || []).forEach(e => encaixeSet.add(e.id))
+    }
+
     const flat = (agenda || []).map(a => ({
       id:               a.id,
       data_hora_ini:    a.data_hora_ini,
@@ -605,7 +615,8 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       cliente_nome:     a.cliente_nome || null,
       servico_nome:     a.servico_nome || null,
       duracao_min:      a.duracao_min || 30,
-      canal_origem:     a.canal_origem || null
+      canal_origem:     a.canal_origem || null,
+      encaixe:          encaixeSet.has(a.id)
     }))
 
     return res.json(flat)
