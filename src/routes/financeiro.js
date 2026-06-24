@@ -32,23 +32,17 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
     const total_pix     = somar(comandas.filter(c => c.forma_pgto === 'pix'),     'total')
     const total_dinheiro= somar(comandas.filter(c => c.forma_pgto === 'dinheiro'),'total')
 
-    // Busca comissões
-    const { data: colabs } = await supabaseAdmin
-      .from('colaboradores').select('id, comissao_pct')
-    const comissoes = (comandas || []).reduce((acc, c) => {
-      const col = (colabs || []).find(x => x.id === c.colaborador_id)
-      const pct = col ? (col.comissao_pct != null ? col.comissao_pct : 40) : 0
-      return acc + parseFloat(c.total || 0) * pct / 100
-    }, 0)
+    // Comissão por FAIXA (serviço progressivo + produto por unidade) — mesmo motor do Caixa/Dashboard
+    let comissoes = 0
+    try {
+      const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: uid })
+      comissoes = fx.total_comissao
+    } catch (e) { console.error('[resumo comissoes-faixa]', e.message) }
 
-    // AppBarber finalizado FORA do sistema (observação no caixa)
+    // AppBarber finalizado FORA do sistema (faturamento — observação)
     const ab = await appbarberRealizados(ini, fim, uid)
     const abFaturamento = somar(ab, 'valor')
-    const abComissao = ab.reduce((acc, a) => {
-      const col = (colabs || []).find(x => x.id === a.colaborador_id)
-      const pct = col ? (col.comissao_pct != null ? col.comissao_pct : 40) : 0
-      return acc + parseFloat(a.valor || 0) * pct / 100
-    }, 0)
+    const abComissao = 0 // já incluído no cálculo por faixa (vira comanda com itens)
 
     const faturamentoTotal = faturamento + abFaturamento
     const comissoesTotal   = comissoes + abComissao
@@ -220,56 +214,32 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, async (req, res) => {
     const { ini, fim } = getPeriodo(periodo)
     const uid = u.perfil === 'proprietario' ? unidade_id : u.unidade_id
 
-    let query = supabaseAdmin
-      .from('comandas').select('total, colaborador_id')
+    const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: uid })
+
+    // nº de atendimentos (comandas finalizadas) e unidade por barbeiro
+    let q = supabaseAdmin.from('comandas').select('colaborador_id, unidade_id')
       .eq('status', 'finalizada').gte('finalizada_em', ini).lte('finalizada_em', fim)
-    if (uid) query = query.eq('unidade_id', uid)
-    const { data: comandas, error } = await query
-    if (error) throw error
-
-    const { data: colabs } = await supabaseAdmin
-      .from('colaboradores').select('id, nome, comissao_pct, unidade_id')
+    if (uid) q = q.eq('unidade_id', uid)
+    const { data: cmds } = await q
+    const cont = {}, unidDe = {}
+    ;(cmds || []).forEach(c => {
+      cont[c.colaborador_id] = (cont[c.colaborador_id] || 0) + 1
+      if (!unidDe[c.colaborador_id]) unidDe[c.colaborador_id] = c.unidade_id
+    })
     const { data: unidades } = await supabaseAdmin.from('unidades').select('id, nome')
+    const unome = (id) => { const un = (unidades || []).find(x => x.id === id); return un ? un.nome.replace('Unidade ', '') : '' }
 
-    const mapa = {}
-    ;(comandas || []).forEach(c => {
-      const col = (colabs || []).find(x => x.id === c.colaborador_id)
-      if (!col) return
-      if (!mapa[col.id]) {
-        const un = (unidades || []).find(x => x.id === col.unidade_id)
-        mapa[col.id] = {
-          nome: col.nome,
-          unidade: (un ? un.nome : '').replace('Unidade ', ''),
-          comissao_pct: col.comissao_pct || 0,
-          atendimentos: 0, faturado: 0
-        }
-      }
-      mapa[col.id].atendimentos += 1
-      mapa[col.id].faturado += parseFloat(c.total || 0)
-    })
-
-    // AppBarber finalizado fora do sistema (entra na comissão, marcado como observação)
-    const ab = await appbarberRealizados(ini, fim, uid)
-    ;(ab || []).forEach(a => {
-      const col = (colabs || []).find(x => x.id === a.colaborador_id)
-      if (!col) return
-      if (!mapa[col.id]) {
-        const un = (unidades || []).find(x => x.id === col.unidade_id)
-        mapa[col.id] = {
-          nome: col.nome,
-          unidade: (un ? un.nome : '').replace('Unidade ', ''),
-          comissao_pct: col.comissao_pct || 0,
-          atendimentos: 0, faturado: 0, ab_faturado: 0
-        }
-      }
-      mapa[col.id].atendimentos += 1
-      mapa[col.id].faturado += parseFloat(a.valor || 0)
-      mapa[col.id].ab_faturado = (mapa[col.id].ab_faturado || 0) + parseFloat(a.valor || 0)
-    })
-
-    const lista = Object.values(mapa)
-      .map(r => ({ ...r, faturado: round(r.faturado), ab_faturado: round(r.ab_faturado || 0), comissao: round(r.faturado * r.comissao_pct / 100) }))
-      .sort((a, b) => b.faturado - a.faturado)
+    const lista = (fx.linhas || []).map(l => ({
+      nome: l.nome,
+      unidade: unome(unidDe[l.colaborador_id]),
+      atendimentos: cont[l.colaborador_id] || 0,
+      faturado: round(l.servico_total + l.produto_total),
+      comissao_pct: l.servico_pct,
+      comissao: l.comissao_total,
+      servico_total: l.servico_total, servico_pct: l.servico_pct,
+      produto_total: l.produto_total, produto_unidades: l.produto_unidades, produto_pct: l.produto_pct,
+      ab_faturado: 0
+    })).sort((a, b) => b.comissao - a.comissao)
     return res.json(lista)
   } catch (err) {
     console.error('[comissoes-barbeiro]', err.message)
