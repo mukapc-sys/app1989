@@ -14,6 +14,16 @@ function diaDeHojeBR() {
   return `${dd}/${mm}/${agora.getFullYear()}`
 }
 
+// Monta uma mensagem de erro legível. Erros do Supabase trazem a informação
+// útil em details/hint/code (e às vezes message vem vazio) — por isso juntamos tudo.
+function montarDetalhe(err) {
+  if (!err) return 'erro sem detalhe'
+  if (typeof err === 'string') return err
+  const partes = [err.message, err.details, err.hint, err.code].filter(Boolean)
+  if (partes.length) return partes.join(' | ')
+  try { return JSON.stringify(err) } catch (e) { return String(err) }
+}
+
 // ============================================================
 // GET /appbarber/depara
 // Retorna tudo que a telinha de de-para precisa:
@@ -115,10 +125,10 @@ router.post('/ler/:unidade', autenticar, exigirPerfil(...ADM), async (req, res) 
     const resumo = await sincronizarUnidade(unidadeId, cookie, dia)
     return res.json({ ok: true, resumo })
   } catch (err) {
-    console.error('[appbarber/ler]', err.message)
-    const motivo = err.message === 'SESSAO_EXPIRADA' ? 'SESSAO_EXPIRADA' : 'ERRO'
+    console.error('[appbarber/ler]', err)
+    const motivo = (err && err.message === 'SESSAO_EXPIRADA') ? 'SESSAO_EXPIRADA' : 'ERRO'
     // devolve 200 com ok:false p/ o front conseguir ler o motivo (em vez de quebrar)
-    return res.status(200).json({ ok: false, motivo, detalhe: err.message })
+    return res.status(200).json({ ok: false, motivo, detalhe: montarDetalhe(err) })
   }
 })
 
@@ -207,8 +217,8 @@ router.post('/importar', async (req, res) => {
     const resumo = await processarAgendamentos(unidade_id, agendamentos)
     return res.json({ ok: true, resumo: { unidade_id, ...resumo } })
   } catch (err) {
-    console.error('[appbarber/importar]', err.message)
-    return res.status(200).json({ ok: false, motivo: 'ERRO', detalhe: err.message })
+    console.error('[appbarber/importar]', err)
+    return res.status(200).json({ ok: false, motivo: 'ERRO', detalhe: montarDetalhe(err) })
   }
 })
 
