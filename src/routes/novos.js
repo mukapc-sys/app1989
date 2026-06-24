@@ -398,6 +398,66 @@ router.patch('/agendamentos/:id', autenticar, async (req, res) => {
   }
 })
 
+// POST /agendamentos/:id/finalizar — conclui o atendimento E grava o detalhe dos itens
+// (serviço/produto + quantidade) numa comanda ligada, para a comissão por faixa.
+// O faturamento continua contando por agendamento.valor (comanda fica com agendamento_id → não duplica).
+// O registro dos itens é "best-effort": se falhar, a venda mesmo assim é concluída.
+router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
+  try {
+    const { forma_pgto, desconto = 0, itens } = req.body || {}
+    const { data: ag, error: e0 } = await supabaseAdmin
+      .from('agendamentos').select('id, colaborador_id, unidade_id, cliente_id').eq('id', req.params.id).single()
+    if (e0 || !ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
+
+    const lista = Array.isArray(itens) ? itens : []
+    const subtotal = lista.reduce((s, it) => s + (parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0) * (parseInt(it.quantidade) || 1), 0)
+    const total = Math.max(0, subtotal - parseFloat(desconto || 0))
+
+    // 1) conclui o agendamento (faturamento conta por aqui — inalterado)
+    await supabaseAdmin.from('agendamentos')
+      .update({ status: 'concluido', valor: total, forma_pagamento: forma_pgto || null })
+      .eq('id', ag.id)
+
+    // 2) grava o detalhe numa comanda ligada ao agendamento (best-effort)
+    let comanda_id = null
+    try {
+      if (lista.length) {
+        const { data: cm } = await supabaseAdmin.from('comandas').insert({
+          agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
+          colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
+          status: 'finalizada', forma_pgto: forma_pgto || 'dinheiro',
+          subtotal, desconto, total, finalizada_em: new Date().toISOString(),
+          observacao: 'Finalização de atendimento', criado_por: req.usuario.id
+        }).select().single()
+        if (cm) {
+          comanda_id = cm.id
+          for (const it of lista) {
+            const tipo = (String(it.tipo || '').toLowerCase().indexOf('produto') !== -1) ? 'produto' : 'servico'
+            const qtd = parseInt(it.quantidade) || 1
+            const valor_unit = parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0
+            await supabaseAdmin.from('itens_comanda').insert({
+              comanda_id: cm.id, tipo, servico_id: it.servico_id || null, produto_id: it.produto_id || null,
+              descricao: it.nome || it.descricao || (tipo === 'produto' ? 'Produto' : 'Serviço'),
+              quantidade: qtd, valor_unit
+            })
+            if (tipo === 'produto' && it.produto_id) {
+              await supabaseAdmin.from('movimentacoes_estoque').insert({
+                produto_id: it.produto_id, unidade_id: ag.unidade_id, tipo: 'saida_venda',
+                quantidade: qtd, responsavel_id: ag.colaborador_id, referencia_id: cm.id
+              }).then(() => {}).catch(() => {})
+            }
+          }
+        }
+      }
+    } catch (eItens) { console.error('[finalizar itens]', eItens.message) }
+
+    return res.json({ ok: true, agendamento_id: ag.id, comanda_id, total })
+  } catch (err) {
+    console.error('[agendamentos/finalizar]', err.message)
+    return res.status(500).json({ erro: err.message || 'Erro ao finalizar' })
+  }
+})
+
 // POST /agendamentos/bloquear — bloqueia a agenda em blocos de 30 min
 // Cria UM bloqueio por slot (30 min) entre ini e fim, para que cada horário
 // possa ser desbloqueado individualmente. Pula slots que já têm cliente/bloqueio.
