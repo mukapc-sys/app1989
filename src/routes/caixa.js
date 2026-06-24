@@ -56,6 +56,10 @@ router.post('/abrir', autenticar, ADM, async (req, res) => {
     if (error) throw error
     return res.status(201).json(data)
   } catch (err) {
+    // corrida: o índice único pegou outra abertura simultânea
+    if (err && (err.code === '23505' || /duplicate key/i.test(err.message || ''))) {
+      return res.status(409).json({ erro: 'O caixa já está aberto.' })
+    }
     console.error('[caixa/abrir]', err.message)
     return res.status(500).json({ erro: err.message })
   }
