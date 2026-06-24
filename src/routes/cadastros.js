@@ -421,7 +421,7 @@ router.delete('/feriados/:id', autenticar, ADMIN, async (req, res) => {
 })
 
 // ===================== PUSH EM MASSA (Fase 3) =====================
-const { enviarPushParaCliente } = require('./publico')
+const { enviarPushParaVarios } = require('./publico')
 
 function _uniq(arr){ return [...new Set(arr.filter(Boolean))] }
 
@@ -485,17 +485,12 @@ router.post('/push-massa', autenticar, exigirPerfil('proprietario', 'gerente'), 
     ids = ids.slice(0, 5000)
     if (!ids.length) return res.json({ alcance: 0, enviados: 0, whatsapp: 0 })
 
-    let enviados = 0
-    const lote = 40
-    for (let i = 0; i < ids.length; i += lote) {
-      const parte = ids.slice(i, i + lote)
-      const rs = await Promise.allSettled(parte.map(cid => enviarPushParaCliente(cid, {
-        title: titulo || 'Barbearia 1989',
-        body: mensagem,
-        url: 'https://barbearia1989.com.br'
-      })))
-      rs.forEach(r => { if (r.status === 'fulfilled' && r.value && r.value.enviados) enviados += r.value.enviados })
-    }
+    const rPush = await enviarPushParaVarios(ids, {
+      titulo: titulo || 'Barbearia 1989',
+      corpo: mensagem,
+      url: 'https://barbearia1989.com.br'
+    })
+    const enviados = rPush.enviados
 
     let zap = 0
     if (tambem_whatsapp) {
