@@ -590,6 +590,41 @@ async function enviarPushParaVarios(clienteIds, payload) {
   return { enviados, falhas, aparelhos: subs.length }
 }
 
+// Envia o MESMO push para TODOS os aparelhos com notificação ativa
+// (não depende da lista de clientes nem de nenhum corte). Usado no "Todos".
+async function enviarPushParaTodos(payload) {
+  if (!webpush || !process.env.VAPID_PUBLIC) return { enviados: 0, falhas: 0, aparelhos: 0 }
+  let subs = [], from = 0
+  const pag = 1000
+  while (true) {
+    const { data } = await supabaseAdmin
+      .from('push_inscricoes').select('endpoint, p256dh, auth')
+      .eq('ativo', true).range(from, from + pag - 1)
+    if (!data || !data.length) break
+    subs = subs.concat(data)
+    if (data.length < pag) break
+    from += pag
+    if (from > 100000) break
+  }
+  const payloadStr = JSON.stringify(payload)
+  let enviados = 0, falhas = 0
+  for (let i = 0; i < subs.length; i += 50) {
+    const lote = subs.slice(i, i + 50)
+    const rs = await Promise.allSettled(lote.map(s =>
+      webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payloadStr)
+    ))
+    rs.forEach((r, idx) => {
+      if (r.status === 'fulfilled') { enviados++; return }
+      falhas++
+      const code = r.reason && r.reason.statusCode
+      if (code === 404 || code === 410) {
+        supabaseAdmin.from('push_inscricoes').update({ ativo: false }).eq('endpoint', lote[idx].endpoint).then(() => {}, () => {})
+      }
+    })
+  }
+  return { enviados, falhas, aparelhos: subs.length }
+}
+
 // Chave pública — o app usa pra se inscrever (não é segredo)
 router.get('/push/chave', (_req, res) => {
   if (!process.env.VAPID_PUBLIC) return res.status(503).json({ erro: 'Push não configurado' })
@@ -656,3 +691,4 @@ router.post('/push/teste', autenticarCliente, async (req, res) => {
 module.exports = router
 module.exports.enviarPushParaCliente = enviarPushParaCliente
 module.exports.enviarPushParaVarios = enviarPushParaVarios
+module.exports.enviarPushParaTodos = enviarPushParaTodos
