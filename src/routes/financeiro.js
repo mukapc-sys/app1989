@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { calcularComissaoFaixa, limitesMes } = require('./comissao-faixa')
 
 const SEM_ACESSO = exigirPerfil('proprietario', 'gerente')
 
@@ -36,7 +37,8 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
       .from('colaboradores').select('id, comissao_pct')
     const comissoes = (comandas || []).reduce((acc, c) => {
       const col = (colabs || []).find(x => x.id === c.colaborador_id)
-      return acc + (col ? parseFloat(c.total) * col.comissao_pct / 100 : 0)
+      const pct = col ? (col.comissao_pct != null ? col.comissao_pct : 40) : 0
+      return acc + parseFloat(c.total || 0) * pct / 100
     }, 0)
 
     // AppBarber finalizado FORA do sistema (observação no caixa)
@@ -44,7 +46,8 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
     const abFaturamento = somar(ab, 'valor')
     const abComissao = ab.reduce((acc, a) => {
       const col = (colabs || []).find(x => x.id === a.colaborador_id)
-      return acc + (col ? parseFloat(a.valor || 0) * col.comissao_pct / 100 : 0)
+      const pct = col ? (col.comissao_pct != null ? col.comissao_pct : 40) : 0
+      return acc + parseFloat(a.valor || 0) * pct / 100
     }, 0)
 
     const faturamentoTotal = faturamento + abFaturamento
@@ -71,6 +74,23 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ erro: 'Erro ao buscar resumo financeiro' })
+  }
+})
+
+// GET /financeiro/comissoes-faixa?mes=YYYY-MM&unidade_id=xxx
+// Comissão por faixa (serviço progressivo + produto por unidade), por barbeiro, no mês.
+router.get('/comissoes-faixa', autenticar, async (req, res) => {
+  try {
+    const u = req.usuario
+    const mesQ = (req.query.mes || '').match(/^\d{4}-\d{2}$/) ? (req.query.mes + '-15') : null
+    const { ini, fim } = limitesMes(mesQ)
+    const unidade_id = (u.perfil === 'proprietario') ? (req.query.unidade_id || null) : (u.unidade_id || null)
+
+    const r = await calcularComissaoFaixa({ ini, fim, unidade_id })
+    return res.json({ mes: ini.slice(0, 7), ...r })
+  } catch (err) {
+    console.error('[comissoes-faixa]', err.message)
+    return res.status(500).json({ erro: 'Erro ao calcular comissões por faixa' })
   }
 })
 
