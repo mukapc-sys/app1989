@@ -502,8 +502,8 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
     const { data } = req.query
     const dia = data || new Date().toLocaleString('en-CA', { timeZone: 'America/Sao_Paulo' }).split(',')[0]
 
-    const { data: colab } = await supabaseAdmin
-      .from('colaboradores').select('id,perfil,unidade_id').eq('user_id', req.usuario.id).single()
+    const perfil = req.usuario.perfil
+    const unidadeId = req.usuario.unidade_id
 
     let q = supabaseAdmin.from('vw_agenda_dia')
       .select('id,data_hora_ini,data_hora_fim,status,valor,colaborador_id,colaborador_nome,unidade_id,unidade_nome,cliente_nome,servico_nome,duracao_min,canal_origem')
@@ -512,8 +512,11 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       .not('status', 'eq', 'cancelado')
       .order('data_hora_ini')
 
-    if(colab?.perfil === 'colaborador') q = q.eq('colaborador_id', colab.id)
-    else if(colab?.perfil === 'gerente' && colab?.unidade_id) q = q.eq('unidade_id', colab.unidade_id)
+    // Gerente e barbeiro veem APENAS a própria unidade (com todos os barbeiros dela).
+    // O "apenas minha agenda" é um filtro visual na tela. Proprietário/caixa veem tudo.
+    if ((perfil === 'gerente' || perfil === 'colaborador') && unidadeId) {
+      q = q.eq('unidade_id', unidadeId)
+    }
 
     const { data: agenda, error } = await q
     if(error) throw error
