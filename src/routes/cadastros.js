@@ -420,4 +420,101 @@ router.delete('/feriados/:id', autenticar, ADMIN, async (req, res) => {
   }
 })
 
+// ===================== PUSH EM MASSA (Fase 3) =====================
+const { enviarPushParaCliente } = require('./publico')
+
+function _uniq(arr){ return [...new Set(arr.filter(Boolean))] }
+
+async function _fetchPaged(table, select, applyFilters){
+  const pageSize = 1000; let from = 0; let all = []
+  while (true) {
+    let q = supabaseAdmin.from(table).select(select)
+    q = applyFilters(q)
+    const { data, error } = await q.range(from, from + pageSize - 1)
+    if (error || !data) break
+    all = all.concat(data)
+    if (data.length < pageSize) break
+    from += pageSize
+    if (from > 60000) break
+  }
+  return all
+}
+
+async function _resolverSegmento(segmento, valor){
+  const doze = new Date(); doze.setMonth(doze.getMonth() - 12); const iniISO = doze.toISOString()
+
+  if (segmento === 'assinantes') {
+    const { data } = await supabaseAdmin.from('assinaturas').select('cliente_id').eq('status', 'ativa')
+    return _uniq((data || []).map(x => x.cliente_id))
+  }
+  if (segmento === 'aniversariantes') {
+    const mes = new Date().getMonth() + 1
+    const cls = await _fetchPaged('clientes', 'id, data_nasc', q => q.not('data_nasc', 'is', null))
+    return cls.filter(c => { const d = new Date(c.data_nasc); return !isNaN(d) && (d.getUTCMonth() + 1) === mes }).map(c => c.id)
+  }
+  if (segmento === 'unidade' && valor) {
+    const c = await _fetchPaged('comandas', 'cliente_id', q => q.eq('unidade_id', valor).gte('finalizada_em', iniISO).not('cliente_id', 'is', null))
+    return _uniq(c.map(x => x.cliente_id))
+  }
+  if (segmento === 'barbeiro' && valor) {
+    const c = await _fetchPaged('comandas', 'cliente_id', q => q.eq('colaborador_id', valor).gte('finalizada_em', iniISO).not('cliente_id', 'is', null))
+    return _uniq(c.map(x => x.cliente_id))
+  }
+  if (segmento === 'sumidos') {
+    const janela = new Date(Date.now() - 400 * 86400000).toISOString()
+    const cmds = await _fetchPaged('comandas', 'cliente_id, finalizada_em', q => q.eq('status', 'finalizada').gte('finalizada_em', janela).not('cliente_id', 'is', null))
+    const abs  = await _fetchPaged('agenda_appbarber', 'cliente_id, inicio', q => q.eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado').gte('inicio', janela).not('cliente_id', 'is', null))
+    const ult = {}
+    cmds.forEach(c => { const t = new Date(c.finalizada_em).getTime(); if (!ult[c.cliente_id] || t > ult[c.cliente_id]) ult[c.cliente_id] = t })
+    abs.forEach(a => { const t = new Date(a.inicio).getTime(); if (!ult[a.cliente_id] || t > ult[a.cliente_id]) ult[a.cliente_id] = t })
+    const ag = Date.now()
+    return Object.keys(ult).filter(id => { const dias = (ag - ult[id]) / 86400000; return dias >= 45 && dias <= 365 })
+  }
+  // todos
+  const cls = await _fetchPaged('clientes', 'id', q => q)
+  return cls.map(c => c.id)
+}
+
+// POST /push-massa  { segmento, valor, titulo, mensagem, tambem_whatsapp }
+router.post('/push-massa', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
+  try {
+    const { segmento, valor, titulo, mensagem, tambem_whatsapp } = req.body
+    if (!segmento || !mensagem) return res.status(400).json({ erro: 'Informe o segmento e a mensagem' })
+
+    let ids = await _resolverSegmento(segmento, valor)
+    ids = ids.slice(0, 5000)
+    if (!ids.length) return res.json({ alcance: 0, enviados: 0, whatsapp: 0 })
+
+    let enviados = 0
+    const lote = 40
+    for (let i = 0; i < ids.length; i += lote) {
+      const parte = ids.slice(i, i + lote)
+      const rs = await Promise.allSettled(parte.map(cid => enviarPushParaCliente(cid, {
+        title: titulo || 'Barbearia 1989',
+        body: mensagem,
+        url: 'https://barbearia1989.com.br'
+      })))
+      rs.forEach(r => { if (r.status === 'fulfilled' && r.value && r.value.enviados) enviados += r.value.enviados })
+    }
+
+    let zap = 0
+    if (tambem_whatsapp) {
+      for (let i = 0; i < ids.length; i += 200) {
+        const parte = ids.slice(i, i + 200)
+        const { data: cls } = await supabaseAdmin.from('clientes').select('whatsapp').in('id', parte)
+        const linhas = (cls || []).filter(c => c.whatsapp).map(c => ({
+          destinatario: '55' + ('' + c.whatsapp).replace(/\D/g, ''),
+          mensagem, tipo: 'massa', status: 'pendente'
+        }))
+        if (linhas.length) { await supabaseAdmin.from('notificacoes_whatsapp').insert(linhas); zap += linhas.length }
+      }
+    }
+
+    return res.json({ alcance: ids.length, enviados, whatsapp: zap })
+  } catch (err) {
+    console.error('[push-massa]', err.message)
+    return res.status(500).json({ erro: 'Erro ao enviar push em massa' })
+  }
+})
+
 module.exports = router
