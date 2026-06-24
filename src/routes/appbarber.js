@@ -14,16 +14,6 @@ function diaDeHojeBR() {
   return `${dd}/${mm}/${agora.getFullYear()}`
 }
 
-// Monta uma mensagem de erro legível. Erros do Supabase trazem a informação
-// útil em details/hint/code (e às vezes message vem vazio) — por isso juntamos tudo.
-function montarDetalhe(err) {
-  if (!err) return 'erro sem detalhe'
-  if (typeof err === 'string') return err
-  const partes = [err.message, err.details, err.hint, err.code].filter(Boolean)
-  if (partes.length) return partes.join(' | ')
-  try { return JSON.stringify(err) } catch (e) { return String(err) }
-}
-
 // ============================================================
 // GET /appbarber/depara
 // Retorna tudo que a telinha de de-para precisa:
@@ -125,10 +115,10 @@ router.post('/ler/:unidade', autenticar, exigirPerfil(...ADM), async (req, res) 
     const resumo = await sincronizarUnidade(unidadeId, cookie, dia)
     return res.json({ ok: true, resumo })
   } catch (err) {
-    console.error('[appbarber/ler]', err)
-    const motivo = (err && err.message === 'SESSAO_EXPIRADA') ? 'SESSAO_EXPIRADA' : 'ERRO'
+    console.error('[appbarber/ler]', err.message)
+    const motivo = err.message === 'SESSAO_EXPIRADA' ? 'SESSAO_EXPIRADA' : 'ERRO'
     // devolve 200 com ok:false p/ o front conseguir ler o motivo (em vez de quebrar)
-    return res.status(200).json({ ok: false, motivo, detalhe: montarDetalhe(err) })
+    return res.status(200).json({ ok: false, motivo, detalhe: err.message })
   }
 })
 
@@ -217,8 +207,8 @@ router.post('/importar', async (req, res) => {
     const resumo = await processarAgendamentos(unidade_id, agendamentos)
     return res.json({ ok: true, resumo: { unidade_id, ...resumo } })
   } catch (err) {
-    console.error('[appbarber/importar]', err)
-    return res.status(200).json({ ok: false, motivo: 'ERRO', detalhe: montarDetalhe(err) })
+    console.error('[appbarber/importar]', err.message)
+    return res.status(200).json({ ok: false, motivo: 'ERRO', detalhe: err.message })
   }
 })
 
@@ -293,6 +283,41 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       })
       .eq('id', ab.id)
     if (e3) throw e3
+
+    // ===== grava o detalhe dos itens (serviço/produto + qtd) p/ comissão por faixa (best-effort) =====
+    try {
+      const lista = Array.isArray(req.body.itens) ? req.body.itens : []
+      if (lista.length) {
+        let cid = comandaId
+        if (!cid) {
+          const { data: cmd } = await supabaseAdmin.from('comandas').insert({
+            agendamento_id: ag.id, cliente_id: ab.cliente_id, colaborador_id: ab.colaborador_id,
+            unidade_id: ab.unidade_id, status: 'finalizada', forma_pgto: forma_pgto || 'dinheiro',
+            subtotal: valorFinal, desconto: 0, total: valorFinal, finalizada_em: new Date().toISOString(),
+            criado_por: req.usuario.id, observacao: 'Detalhe AppBarber'
+          }).select().single()
+          cid = cmd ? cmd.id : null
+        }
+        if (cid) {
+          for (const it of lista) {
+            const tipo = (String(it.tipo || '').toLowerCase().indexOf('produto') !== -1) ? 'produto' : 'servico'
+            const qtd = parseInt(it.quantidade) || 1
+            const valor_unit = parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0
+            await supabaseAdmin.from('itens_comanda').insert({
+              comanda_id: cid, tipo, servico_id: it.servico_id || null, produto_id: it.produto_id || null,
+              descricao: it.nome || it.descricao || (tipo === 'produto' ? 'Produto' : 'Serviço'),
+              quantidade: qtd, valor_unit
+            })
+            if (tipo === 'produto' && it.produto_id) {
+              await supabaseAdmin.from('movimentacoes_estoque').insert({
+                produto_id: it.produto_id, unidade_id: ab.unidade_id, tipo: 'saida_venda',
+                quantidade: qtd, responsavel_id: ab.colaborador_id, referencia_id: cid
+              }).then(() => {}).catch(() => {})
+            }
+          }
+        }
+      }
+    } catch (eItens) { console.error('[appbarber finalizar itens]', eItens.message) }
 
     return res.json({ ok: true, onde: ondeFinal, agendamento_id: ag.id, comanda_id: comandaId })
   } catch (err) {
