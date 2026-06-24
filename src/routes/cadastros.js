@@ -421,7 +421,7 @@ router.delete('/feriados/:id', autenticar, ADMIN, async (req, res) => {
 })
 
 // ===================== PUSH EM MASSA (Fase 3) =====================
-const { enviarPushParaVarios } = require('./publico')
+const { enviarPushParaVarios, enviarPushParaTodos } = require('./publico')
 
 function _uniq(arr){ return [...new Set(arr.filter(Boolean))] }
 
@@ -482,14 +482,18 @@ router.post('/push-massa', autenticar, exigirPerfil('proprietario', 'gerente'), 
     if (!segmento || !mensagem) return res.status(400).json({ erro: 'Informe o segmento e a mensagem' })
 
     let ids = await _resolverSegmento(segmento, valor)
-    ids = ids.slice(0, 5000)
-    if (!ids.length) return res.json({ alcance: 0, enviados: 0, whatsapp: 0 })
+    ids = ids.slice(0, 50000)
+    const ehTodos = (segmento === 'todos')
+    if (!ehTodos && !ids.length) return res.json({ alcance: 0, enviados: 0, whatsapp: 0 })
 
-    const rPush = await enviarPushParaVarios(ids, {
+    const payloadPush = {
       titulo: titulo || 'Barbearia 1989',
       corpo: mensagem,
       url: 'https://barbearia1989.com.br'
-    })
+    }
+    const rPush = ehTodos
+      ? await enviarPushParaTodos(payloadPush)
+      : await enviarPushParaVarios(ids, payloadPush)
     const enviados = rPush.enviados
 
     let zap = 0
