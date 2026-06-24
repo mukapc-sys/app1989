@@ -435,6 +435,75 @@ router.post('/login', async (req, res) => {
 })
 
 // ============================================================
+// POST /publico/senha/esqueci — gera um código e envia pelo WhatsApp
+// ============================================================
+router.post('/senha/esqueci', async (req, res) => {
+  try {
+    const { whatsapp } = req.body || {}
+    const tel = String(whatsapp || '').replace(/\D/g, '')
+    if (tel.length < 10) return res.status(400).json({ erro: 'Informe o WhatsApp com DDD' })
+
+    const { data: achados } = await supabaseAdmin.from('clientes')
+      .select('id,nome,whatsapp,senha_hash').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
+    const cli = achados && achados[0]
+
+    // Só envia se existir uma conta com senha. Mesmo assim, responde sempre "ok"
+    // para não revelar se o número tem conta ou não.
+    if (cli && cli.senha_hash) {
+      const codigo = String(Math.floor(100000 + Math.random() * 900000)) // 6 dígitos
+      const expira = new Date(Date.now() + 10 * 60 * 1000).toISOString()  // 10 min
+      await supabaseAdmin.from('clientes')
+        .update({ reset_codigo: codigo, reset_expira: expira }).eq('id', cli.id)
+
+      const numero = '55' + String(cli.whatsapp || tel).replace(/\D/g, '')
+      await supabaseAdmin.from('notificacoes_whatsapp').insert({
+        destinatario: numero,
+        mensagem: `Barbearia 1989: seu código para redefinir a senha é ${codigo}. Vale por 10 minutos. Se não foi você, ignore.`,
+        tipo: 'reset_senha',
+        status: 'pendente'
+      })
+    }
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[senha/esqueci]', e.message)
+    return res.status(500).json({ erro: 'Erro ao enviar o código' })
+  }
+})
+
+// ============================================================
+// POST /publico/senha/redefinir — confere o código e troca a senha
+// ============================================================
+router.post('/senha/redefinir', async (req, res) => {
+  try {
+    const { whatsapp, codigo, senha } = req.body || {}
+    const tel = String(whatsapp || '').replace(/\D/g, '')
+    const cod = String(codigo || '').replace(/\D/g, '')
+    if (tel.length < 10 || !cod) return res.status(400).json({ erro: 'Informe o WhatsApp e o código' })
+    if (String(senha || '').length < 4) return res.status(400).json({ erro: 'A nova senha precisa de pelo menos 4 caracteres' })
+
+    const { data: achados } = await supabaseAdmin.from('clientes')
+      .select('id,nome,whatsapp,reset_codigo,reset_expira').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
+    const cli = achados && achados[0]
+    if (!cli || !cli.reset_codigo) return res.status(400).json({ erro: 'Código inválido. Peça um novo.' })
+    if (cli.reset_expira && new Date(cli.reset_expira).getTime() < Date.now()) {
+      return res.status(400).json({ erro: 'Código expirado. Peça um novo.' })
+    }
+    if (String(cli.reset_codigo) !== cod) return res.status(400).json({ erro: 'Código incorreto.' })
+
+    const hash = bcrypt.hashSync(String(senha), 10)
+    const { data: up, error: eu } = await supabaseAdmin.from('clientes')
+      .update({ senha_hash: hash, reset_codigo: null, reset_expira: null }).eq('id', cli.id)
+      .select('id,nome,whatsapp').single()
+    if (eu) throw eu
+
+    return res.json({ token: tokenCliente(up), cliente: { id: up.id, nome: up.nome, whatsapp: up.whatsapp } })
+  } catch (e) {
+    console.error('[senha/redefinir]', e.message)
+    return res.status(500).json({ erro: 'Erro ao redefinir a senha' })
+  }
+})
+
+// ============================================================
 // GET /publico/eu — dados do cliente logado (perfil)
 // ============================================================
 router.get('/eu', autenticarCliente, async (req, res) => {
