@@ -318,8 +318,8 @@ router.post('/agendar', async (req, res) => {
 
     // confirmação por push (se o cliente tiver notificações ativas no app)
     enviarPushParaCliente(cliente_id, {
-      title: 'Agendamento confirmado ✂️',
-      body: `${sv.nome} com ${col.nome} — ${quando}`,
+      titulo: 'Agendamento confirmado ✂️',
+      corpo: `${sv.nome} com ${col.nome} — ${quando}`,
       url: 'https://barbearia1989.com.br'
     }).catch(() => {})
 
@@ -556,6 +556,40 @@ async function enviarPushParaCliente(cliente_id, payload) {
   return { enviados, falhas }
 }
 
+// Envia o MESMO push para vários clientes de uma vez (rápido: busca as inscrições
+// em lote em vez de uma consulta por cliente). Usado no push em massa.
+async function enviarPushParaVarios(clienteIds, payload) {
+  if (!webpush || !process.env.VAPID_PUBLIC) return { enviados: 0, falhas: 0, aparelhos: 0 }
+  if (!clienteIds || !clienteIds.length) return { enviados: 0, falhas: 0, aparelhos: 0 }
+
+  let subs = []
+  for (let i = 0; i < clienteIds.length; i += 300) {
+    const parte = clienteIds.slice(i, i + 300)
+    const { data } = await supabaseAdmin
+      .from('push_inscricoes').select('endpoint, p256dh, auth')
+      .eq('ativo', true).in('cliente_id', parte)
+    if (data) subs = subs.concat(data)
+  }
+
+  const payloadStr = JSON.stringify(payload)
+  let enviados = 0, falhas = 0
+  for (let i = 0; i < subs.length; i += 50) {
+    const lote = subs.slice(i, i + 50)
+    const rs = await Promise.allSettled(lote.map(s =>
+      webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payloadStr)
+    ))
+    rs.forEach((r, idx) => {
+      if (r.status === 'fulfilled') { enviados++; return }
+      falhas++
+      const code = r.reason && r.reason.statusCode
+      if (code === 404 || code === 410) {
+        supabaseAdmin.from('push_inscricoes').update({ ativo: false }).eq('endpoint', lote[idx].endpoint).then(() => {}, () => {})
+      }
+    })
+  }
+  return { enviados, falhas, aparelhos: subs.length }
+}
+
 // Chave pública — o app usa pra se inscrever (não é segredo)
 router.get('/push/chave', (_req, res) => {
   if (!process.env.VAPID_PUBLIC) return res.status(503).json({ erro: 'Push não configurado' })
@@ -621,3 +655,4 @@ router.post('/push/teste', autenticarCliente, async (req, res) => {
 
 module.exports = router
 module.exports.enviarPushParaCliente = enviarPushParaCliente
+module.exports.enviarPushParaVarios = enviarPushParaVarios
