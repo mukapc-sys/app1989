@@ -39,8 +39,12 @@ router.post('/unidades', autenticar, exigirPerfil('proprietario'), async (req, r
   }
 })
 
-router.put('/unidades/:id', autenticar, exigirPerfil('proprietario'), async (req, res) => {
+router.put('/unidades/:id', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
   try {
+    // Gerente só edita a própria unidade
+    if (req.usuario.perfil === 'gerente' && String(req.params.id) !== String(req.usuario.unidade_id)) {
+      return res.status(403).json({ erro: 'Você só pode editar a sua unidade' })
+    }
     const { horarios, ...campos } = req.body
     const { data, error } = await supabaseAdmin.from('unidades').update(campos).eq('id', req.params.id).select().single()
     if (error) throw error
@@ -80,9 +84,17 @@ router.get('/colaboradores', autenticar, async (req, res) => {
   }
 })
 
-router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (req, res) => {
+router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
   try {
     const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
+
+    // Gerente: força a própria unidade e não pode criar proprietário
+    let unidadeFinal = unidade_id
+    let perfilFinal = perfil
+    if (req.usuario.perfil === 'gerente') {
+      unidadeFinal = req.usuario.unidade_id
+      if (perfilFinal === 'proprietario') perfilFinal = 'colaborador'
+    }
 
     // Cria user no Auth
     const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
@@ -92,7 +104,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (r
 
     const { data: colab, error } = await supabaseAdmin
       .from('colaboradores')
-      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, foto_url, foto_url_2 })
+      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil: perfilFinal, unidade_id: unidadeFinal, comissao_pct, foto_url, foto_url_2 })
       .select().single()
     if (error) throw error
 
@@ -108,9 +120,20 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario'), async (r
   }
 })
 
-router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario'), async (req, res) => {
+router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
   try {
     const { servico_ids, senha_temp, ...campos } = req.body
+
+    // Gerente: só edita colaborador da própria unidade, não muda de unidade nem vira proprietário
+    if (req.usuario.perfil === 'gerente') {
+      const { data: alvo } = await supabaseAdmin.from('colaboradores').select('unidade_id').eq('id', req.params.id).single()
+      if (!alvo || alvo.unidade_id !== req.usuario.unidade_id) {
+        return res.status(403).json({ erro: 'Você só pode editar colaboradores da sua unidade' })
+      }
+      if (campos.unidade_id) campos.unidade_id = req.usuario.unidade_id
+      if (campos.perfil === 'proprietario') delete campos.perfil
+    }
+
     const { data, error } = await supabaseAdmin.from('colaboradores').update(campos).eq('id', req.params.id).select().single()
     if (error) throw error
 
