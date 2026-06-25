@@ -397,15 +397,25 @@ function round(n) {
 //  tipo=agendamento, status=realizado, e SEM comanda no sistema (agendamento_id IS NULL).
 //  Entram no faturamento/comissão como "observação" (não passaram pelo caixa físico).
 async function appbarberRealizados(ini, fim, uid) {
-  let q = supabaseAdmin.from('agenda_appbarber')
-    .select('valor, colaborador_id, unidade_id, inicio')
-    .eq('tipo', 'agendamento')
-    .is('agendamento_id', null)
-    .eq('status', 'realizado')
-    .gte('inicio', ini).lte('inicio', fim)
-  if (uid) q = q.eq('unidade_id', uid)
-  const { data } = await q
-  return data || []
+  // Busca paginada (Supabase devolve no máximo 1000 por vez). Sem isto, meses
+  // com +1000 atendimentos somam só uma parte e o faturamento sai truncado.
+  const pageSize = 1000; let from = 0; let all = []
+  while (true) {
+    let q = supabaseAdmin.from('agenda_appbarber')
+      .select('valor, colaborador_id, unidade_id, inicio')
+      .eq('tipo', 'agendamento')
+      .is('agendamento_id', null)
+      .eq('status', 'realizado')
+      .gte('inicio', ini).lte('inicio', fim)
+    if (uid) q = q.eq('unidade_id', uid)
+    const { data, error } = await q.range(from, from + pageSize - 1)
+    if (error || !data || data.length === 0) break
+    all = all.concat(data)
+    if (data.length < pageSize) break
+    from += pageSize
+    if (from > 200000) break
+  }
+  return all
 }
 
 // GET /financeiro/comparativo?mes1=2026-03&mes2=2026-04[&unidade_id=xxx]
