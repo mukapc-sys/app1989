@@ -95,7 +95,7 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
 
     const { data: comanda, error: errC } = await supabaseAdmin
       .from('comandas')
-      .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: req.usuario.id, unidade_id: req.usuario.unidade_id, observacao: 'Comanda avulsa', criado_por: req.usuario.id })
+      .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: req.usuario.id, unidade_id: req.usuario.unidade_id, aberta_em: new Date().toISOString(), observacao: 'Comanda avulsa', criado_por: req.usuario.id })
       .select().single()
     if (errC) throw errC
 
