@@ -103,22 +103,34 @@ router.get('/barbeiros', async (_req, res) => {
 router.get('/servicos', async (req, res) => {
   try {
     const { colaborador_id } = req.query
-    let ids = null
-    if (colaborador_id) {
-      const { data: vinc } = await supabaseAdmin
-        .from('colaborador_servicos').select('servico_id').eq('colaborador_id', colaborador_id)
-      const linkIds = (vinc || []).map(v => v.servico_id)
-      if (linkIds.length) ids = linkIds   // só filtra se o barbeiro tiver serviços configurados
-    }
 
-    let q = supabaseAdmin.from('servicos')
-      .select('id,nome,duracao_min,valor,disponivel_online,ativo')
+    // Todos os serviços ativos e disponíveis online
+    const { data: todos, error } = await supabaseAdmin.from('servicos')
+      .select('id,nome,duracao_min,valor,disponivel_online,ativo,restrito_barbeiro')
       .eq('ativo', true).eq('disponivel_online', true).order('nome')
-    if (ids) q = q.in('id', ids)
-
-    const { data, error } = await q
     if (error) throw error
-    let result = data || []
+
+    // Vínculos do barbeiro escolhido (colaborador_servicos)
+    let vinc = []
+    if (colaborador_id) {
+      const { data: v } = await supabaseAdmin
+        .from('colaborador_servicos').select('servico_id').eq('colaborador_id', colaborador_id)
+      vinc = (v || []).map(x => x.servico_id)
+    }
+    const vincSet = new Set(vinc)
+
+    const lista     = todos || []
+    const gerais    = lista.filter(s => !s.restrito_barbeiro)
+    const restritos = lista.filter(s => s.restrito_barbeiro)
+    const idsGerais = new Set(gerais.map(s => s.id))
+
+    // Só aplica a "config de serviços do barbeiro" se ele tiver vínculo com algum serviço GERAL
+    const temConfigGeral = colaborador_id && vinc.some(id => idsGerais.has(id))
+    const gOut = temConfigGeral ? gerais.filter(s => vincSet.has(s.id)) : gerais
+    // Serviço restrito só aparece se o barbeiro escolhido estiver vinculado a ele
+    const rOut = colaborador_id ? restritos.filter(s => vincSet.has(s.id)) : []
+
+    let result = gOut.concat(rOut).sort((a, b) => (a.nome || '').localeCompare(b.nome || ''))
 
     // tempo de cada serviço para ESTE barbeiro (sobrepõe a duração padrão)
     if (colaborador_id && result.length) {
