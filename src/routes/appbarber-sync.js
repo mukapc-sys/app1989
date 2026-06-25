@@ -139,6 +139,26 @@ async function processarAgendamentos(unidadeId, bruto) {
   for (const r of registros) porId.set((r.unidade_id || '') + ':' + r.appbarber_id, r)
   const registrosUnicos = Array.from(porId.values())
 
+  // PROTEÇÃO: não re-importa por cima de quem JÁ foi finalizado no sistema novo.
+  // (senão o AppBarber sobrescreve o atendimento já fechado e ele "reabre".)
+  try {
+    const ids = registrosUnicos.map(r => r.appbarber_id).filter(Boolean)
+    if (ids.length) {
+      const { data: jaFinal } = await supabaseAdmin
+        .from('agenda_appbarber')
+        .select('appbarber_id')
+        .eq('unidade_id', unidadeId)
+        .eq('finalizado', true)
+        .in('appbarber_id', ids)
+      const setFinal = new Set((jaFinal || []).map(x => String(x.appbarber_id)))
+      if (setFinal.size) {
+        for (let i = registrosUnicos.length - 1; i >= 0; i--) {
+          if (setFinal.has(String(registrosUnicos[i].appbarber_id))) registrosUnicos.splice(i, 1)
+        }
+      }
+    }
+  } catch (e) { /* se a checagem falhar, segue (melhor importar do que travar o sync) */ }
+
   // grava em lotes (upsert por appbarber_id -> não duplica).
   // Se o lote falhar (ex.: 1 registro com dado inválido), tenta um a um
   // pra não perder o lote inteiro — e registra quais falharam e por quê.
