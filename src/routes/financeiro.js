@@ -151,7 +151,7 @@ router.get('/relatorios/servicos', autenticar, SEM_ACESSO, async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from('itens_comanda')
-      .select('descricao, quantidade, valor_total, servico_id, comandas(unidade_id, finalizada_em, status)')
+      .select('descricao, quantidade, valor_unit, servico_id, comandas(unidade_id, finalizada_em, status)')
       .eq('tipo', 'servico')
       .not('servico_id', 'is', null)
 
@@ -169,7 +169,7 @@ router.get('/relatorios/servicos', autenticar, SEM_ACESSO, async (req, res) => {
     filtrado.forEach(i => {
       if (!mapa[i.descricao]) mapa[i.descricao] = { nome: i.descricao, quantidade: 0, faturado: 0 }
       mapa[i.descricao].quantidade += i.quantidade
-      mapa[i.descricao].faturado   += parseFloat(i.valor_total)
+      mapa[i.descricao].faturado   += (parseFloat(i.valor_unit)||0) * (parseInt(i.quantidade)||1)
     })
 
     const ranking = Object.values(mapa)
@@ -310,7 +310,7 @@ router.get('/produtos', autenticar, SEM_ACESSO, async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from('itens_comanda')
-      .select('descricao, quantidade, valor_total, comandas(unidade_id, finalizada_em, status)')
+      .select('descricao, quantidade, valor_unit, comandas(unidade_id, finalizada_em, status)')
       .eq('tipo', 'produto')
     if (error) throw error
 
@@ -324,8 +324,9 @@ router.get('/produtos', autenticar, SEM_ACESSO, async (req, res) => {
     filt.forEach(i => {
       if (!mapa[i.descricao]) mapa[i.descricao] = { nome: i.descricao, quantidade: 0, faturado: 0 }
       mapa[i.descricao].quantidade += i.quantidade
-      mapa[i.descricao].faturado += parseFloat(i.valor_total || 0)
-      total += parseFloat(i.valor_total || 0)
+      const _vt = (parseFloat(i.valor_unit)||0) * (parseInt(i.quantidade)||1)
+      mapa[i.descricao].faturado += _vt
+      total += _vt
     })
     const ranking = Object.values(mapa).map(r => ({ ...r, faturado: round(r.faturado) })).sort((a, b) => b.faturado - a.faturado)
     return res.json({ total: round(total), ranking })
@@ -438,14 +439,14 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
 
       // Itens (serviço x produto)
       const { data: itens } = await supabaseAdmin.from('itens_comanda')
-        .select('tipo, valor_total, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
+        .select('tipo, valor_unit, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
       for (const i of (itens||[])) {
         const c = i.comandas
         if (!c || c.status !== 'finalizada') continue
         if (!(c.finalizada_em >= ini && c.finalizada_em < fim)) continue
         if (uidFiltro && c.unidade_id !== uidFiltro) continue
-        const v = parseFloat(i.valor_total) || 0
-        const q = parseInt(i.quantidade) || 0
+        const q = parseInt(i.quantidade) || 1
+        const v = (parseFloat(i.valor_unit)||0) * q
         if (i.tipo === 'produto') {
           if (c.colaborador_id){ const x=eC(c.colaborador_id); x.valor_prod+=v; x.prod_qtd+=q }
           if (c.unidade_id)    { const y=eU(c.unidade_id);     y.valor_prod+=v; y.prod_qtd+=q }
