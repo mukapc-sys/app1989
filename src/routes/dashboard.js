@@ -195,6 +195,13 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     if (perfil === 'colaborador') {
       try {
         const r2 = n => Math.round((n || 0) * 100) / 100
+        // Só conta produto de BARBEARIA (pomada, shampoo, etc.) — Bar (bebida,
+        // chocolate) não é venda do barbeiro. Classifica pelo nome (à prova de
+        // variação de escrita); comissão não serve (tem exceção nos dois lados).
+        const ehBarbearia = (nome) => {
+          const s = String(nome || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          return /(balm|cera|oleo|pomada|redensyl|shampoo)/.test(s)
+        }
         const desemp = async (ini, fim) => {
           const [abReal, cmdsFin, abAus, abProd, agePend] = await Promise.all([
             supabaseAdmin.from('agenda_appbarber').select('valor, cliente_codigo, cliente_nome')
@@ -205,7 +212,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
             supabaseAdmin.from('agenda_appbarber').select('id')
               .eq('tipo', 'agendamento').eq('status', 'ausente')
               .eq('colaborador_id', colab.id).gte('inicio', ini).lte('inicio', fim),
-            supabaseAdmin.from('agenda_appbarber_produtos').select('quantidade, valor_unit')
+            supabaseAdmin.from('agenda_appbarber_produtos').select('quantidade, valor_unit, descricao')
               .eq('colaborador_id', colab.id).gte('data', ini).lte('data', fim),
             supabaseAdmin.from('agenda_appbarber').select('id')
               .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'agendado')
@@ -215,7 +222,11 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
           const faltas = (abAus.data?.length || 0)
           const agendados = (agePend.data?.length || 0)
           let prod_qtd = 0, prod_valor = 0
-          ;(abProd.data || []).forEach(p => { const q = parseInt(p.quantidade) || 1; prod_qtd += q; prod_valor += (parseFloat(p.valor_unit) || 0) * q })
+          ;(abProd.data || []).forEach(p => {
+            if (!ehBarbearia(p.descricao)) return // ignora Bar
+            const q = parseInt(p.quantidade) || 1
+            prod_qtd += q; prod_valor += (parseFloat(p.valor_unit) || 0) * q
+          })
           const servico_valor = (abReal.data || []).reduce((s, a) => s + (parseFloat(a.valor) || 0), 0) +
                                 (cmdsFin.data || []).reduce((s, c) => s + (parseFloat(c.total) || 0), 0)
           const geral = servico_valor + prod_valor
@@ -303,3 +314,4 @@ router.get('/dashboard/agenda/:unidade_id', autenticar, async (req, res) => {
 })
 
 module.exports = router
+
