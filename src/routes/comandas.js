@@ -33,8 +33,8 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
     else if (u.perfil !== 'proprietario') query = query.eq('unidade_id', u.unidade_id)
 
     if (data) {
-      const ini = new Date(data + 'T00:00:00').toISOString()
-      const fim = new Date(data + 'T23:59:59').toISOString()
+      const ini = new Date(data + 'T00:00:00-03:00').toISOString()
+      const fim = new Date(data + 'T23:59:59-03:00').toISOString()
       query = query.gte('aberta_em', ini).lte('aberta_em', fim)
     }
 
