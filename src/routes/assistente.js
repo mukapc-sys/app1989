@@ -35,7 +35,7 @@ router.post('/chat', autenticar, exigirPerfil('proprietario', 'gerente', 'colabo
           .gte('data_hora_ini', inicioMesAnterior)
           .lte('data_hora_ini', fimMesAnterior),
         supabaseAdmin.from('itens_comanda')
-          .select('descricao, quantidade, valor_total, comandas(colaborador_id, finalizada_em, status)')
+          .select('descricao, quantidade, valor_unit, comandas(colaborador_id, finalizada_em, status)')
           .eq('tipo', 'produto'),
         supabaseAdmin.from('agendamentos')
           .select('cliente_id, clientes(nome), data_hora_ini, status')
