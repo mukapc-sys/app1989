@@ -271,7 +271,7 @@ router.post('/importar-produtos', async (req, res) => {
     if (linhas.length) {
       const { error } = await supabaseAdmin
         .from('agenda_appbarber_produtos')
-        .upsert(linhas, { onConflict: 'appbarber_item_id' })
+        .upsert(linhas, { onConflict: 'unidade_id,appbarber_item_id' })
       if (error) throw error
       gravados = linhas.length
     }
