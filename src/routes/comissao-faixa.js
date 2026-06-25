@@ -118,7 +118,11 @@ function limitesMes(ref) {
   const d = ref ? new Date(ref) : new Date()
   const y = d.getFullYear(), m = d.getMonth() // 0-11
   const ini = new Date(Date.UTC(y, m, 1)).toISOString()
-  const fim = new Date(Date.UTC(m === 11 ? y + 1 : y, m === 11 ? 0 : m + 1, 1)).toISOString()
+  const fimMes = new Date(Date.UTC(m === 11 ? y + 1 : y, m === 11 ? 0 : m + 1, 1))
+  // Não conta o FUTURO: o fim é o menor entre "fim do mês" e "agora".
+  // (mês passado -> fim do mês; mês atual -> agora). Mantém admin e barbeiro iguais.
+  const agora = new Date()
+  const fim = (agora < fimMes ? agora : fimMes).toISOString()
   return { ini, fim }
 }
 
