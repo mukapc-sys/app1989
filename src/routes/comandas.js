@@ -39,8 +39,14 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
       .order('aberta_em', { ascending: false })
 
     if (status)     query = query.eq('status', status)
-    if (unidade_id) query = query.eq('unidade_id', unidade_id)
-    else if (u.perfil !== 'proprietario') query = query.eq('unidade_id', unidadeUsuario)
+    if (unidade_id) {
+      query = query.eq('unidade_id', unidade_id)
+    } else if (u.perfil !== 'proprietario') {
+      // Sem unidade resolvida, não filtra por uuid vazio (isso dá erro no banco):
+      // devolve lista vazia, sem quebrar.
+      if (!unidadeUsuario) return res.json([])
+      query = query.eq('unidade_id', unidadeUsuario)
+    }
 
     if (data) {
       const ini = new Date(data + 'T00:00:00-03:00').toISOString()
