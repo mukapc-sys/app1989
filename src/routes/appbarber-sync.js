@@ -139,8 +139,8 @@ async function processarAgendamentos(unidadeId, bruto) {
   for (const r of registros) porId.set((r.unidade_id || '') + ':' + r.appbarber_id, r)
   const registrosUnicos = Array.from(porId.values())
 
-  // PROTEÇÃO: não re-importa por cima de quem JÁ foi finalizado no sistema novo.
-  // (senão o AppBarber sobrescreve o atendimento já fechado e ele "reabre".)
+  // PROTEÇÃO: não re-importa por cima de quem JÁ foi finalizado OU editado
+  // (movido/cancelado) no sistema novo — senão o AppBarber sobrescreve.
   try {
     const ids = registrosUnicos.map(r => r.appbarber_id).filter(Boolean)
     if (ids.length) {
@@ -148,7 +148,7 @@ async function processarAgendamentos(unidadeId, bruto) {
         .from('agenda_appbarber')
         .select('appbarber_id')
         .eq('unidade_id', unidadeId)
-        .eq('finalizado', true)
+        .or('finalizado.eq.true,editado_local.eq.true')
         .in('appbarber_id', ids)
       const setFinal = new Set((jaFinal || []).map(x => String(x.appbarber_id)))
       if (setFinal.size) {
