@@ -23,6 +23,23 @@ function pctServico(total) { return total < 8000 ? 40 : (total < 11000 ? 45 : 50
 function pctProduto(unid)  { return unid  < 10   ? 10 : (unid  < 20    ? 20 : 30) }
 function round(n) { return Math.round((Number(n) || 0) * 100) / 100 }
 
+// Busca paginada: o Supabase devolve no máximo 1000 linhas por vez.
+// Sem isto, períodos com +1000 atendimentos somam só uma parte (faturamento
+// e comissão saem truncados). buildQuery() deve montar a query do zero a cada página.
+async function fetchAll(buildQuery) {
+  const pageSize = 1000; let from = 0; let all = []
+  while (true) {
+    const { data, error } = await buildQuery().range(from, from + pageSize - 1)
+    if (error) throw error
+    if (!data || data.length === 0) break
+    all = all.concat(data)
+    if (data.length < pageSize) break
+    from += pageSize
+    if (from > 200000) break
+  }
+  return all
+}
+
 /**
  * Calcula a comissão por faixa de cada barbeiro num intervalo.
  * @param {object} opts { ini, fim }  ISO strings;  fim é EXCLUSIVO
@@ -30,16 +47,16 @@ function round(n) { return Math.round((Number(n) || 0) * 100) / 100 }
  * @returns {Promise<{linhas:Array, total_comissao:number, total_servico:number, total_produto:number}>}
  */
 async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
-  let q = supabaseAdmin
-    .from('itens_comanda')
-    .select('tipo, quantidade, valor_unit, comandas!inner(colaborador_id, unidade_id, status, finalizada_em)')
-    .eq('comandas.status', 'finalizada')
-    .gte('comandas.finalizada_em', ini)
-    .lt('comandas.finalizada_em', fim)
-  if (unidade_id) q = q.eq('comandas.unidade_id', unidade_id)
-
-  const { data: itens, error } = await q
-  if (error) throw error
+  const itens = await fetchAll(() => {
+    let q = supabaseAdmin
+      .from('itens_comanda')
+      .select('tipo, quantidade, valor_unit, comandas!inner(colaborador_id, unidade_id, status, finalizada_em)')
+      .eq('comandas.status', 'finalizada')
+      .gte('comandas.finalizada_em', ini)
+      .lt('comandas.finalizada_em', fim)
+    if (unidade_id) q = q.eq('comandas.unidade_id', unidade_id)
+    return q
+  })
 
   // Agrega por barbeiro
   const acc = {}
@@ -62,13 +79,15 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
 
   // AppBarber realizado FORA do sistema (não virou comanda): conta como SERVIÇO.
   // is('agendamento_id', null) garante que não duplica com comandas/agendamentos finalizados.
-  let qab = supabaseAdmin
-    .from('agenda_appbarber')
-    .select('valor, colaborador_id')
-    .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
-    .gte('inicio', ini).lt('inicio', fim)
-  if (unidade_id) qab = qab.eq('unidade_id', unidade_id)
-  const { data: abs } = await qab
+  const abs = await fetchAll(() => {
+    let qab = supabaseAdmin
+      .from('agenda_appbarber')
+      .select('valor, colaborador_id')
+      .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+      .gte('inicio', ini).lt('inicio', fim)
+    if (unidade_id) qab = qab.eq('unidade_id', unidade_id)
+    return qab
+  })
   for (const a of (abs || [])) {
     const cid = a.colaborador_id
     if (!cid) continue
