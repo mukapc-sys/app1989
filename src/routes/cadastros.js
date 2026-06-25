@@ -343,6 +343,80 @@ router.post('/estoque/entrada', autenticar, ADMIN, async (req, res) => {
   }
 })
 
+// Lê todos os movimentos de uma unidade (paginado: passa do limite de 1000).
+async function _movimentosUnidade(unidade_id, produto_id) {
+  const pageSize = 1000; let from = 0; let all = []
+  while (true) {
+    let q = supabaseAdmin.from('movimentacoes_estoque')
+      .select('produto_id, tipo, quantidade').eq('unidade_id', unidade_id)
+    if (produto_id) q = q.eq('produto_id', produto_id)
+    const { data, error } = await q.range(from, from + pageSize - 1)
+    if (error || !data || data.length === 0) break
+    all = all.concat(data)
+    if (data.length < pageSize) break
+    from += pageSize
+    if (from > 200000) break
+  }
+  return all
+}
+// saldo = entradas + ajustes (assinados) - saídas
+function _saldoPorProduto(movs) {
+  const s = {}
+  for (const m of movs) {
+    const q = parseFloat(m.quantidade) || 0
+    const neg = String(m.tipo || '').startsWith('saida')
+    s[m.produto_id] = (s[m.produto_id] || 0) + (neg ? -q : q)
+  }
+  return s
+}
+
+// GET /estoque/saldo?unidade_id=xxx — saldo atual de cada produto ativo na unidade
+router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
+  try {
+    const unidade_id = req.usuario.perfil === 'proprietario' ? (req.query.unidade_id || null) : req.usuario.unidade_id
+    if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade' })
+    const { data: prods } = await supabaseAdmin.from('produtos')
+      .select('id, nome, valor_venda, estoque_minimo, categorias_produto(nome)')
+      .eq('ativo', true).order('nome')
+    const saldo = _saldoPorProduto(await _movimentosUnidade(unidade_id, null))
+    const lista = (prods || []).map(p => ({
+      produto_id: p.id, nome: p.nome,
+      categoria: (p.categorias_produto && p.categorias_produto.nome) || '—',
+      valor_venda: p.valor_venda, estoque_minimo: p.estoque_minimo || 0,
+      saldo: Math.round(saldo[p.id] || 0)
+    }))
+    return res.json(lista)
+  } catch (err) {
+    console.error('[estoque/saldo]', err.message)
+    return res.status(500).json({ erro: 'Erro ao buscar saldo de estoque' })
+  }
+})
+
+// POST /estoque/acerto — digita a CONTAGEM real e o sistema ajusta o saldo (só Proprietário)
+router.post('/estoque/acerto', autenticar, exigirPerfil('proprietario'), async (req, res) => {
+  try {
+    const { produto_id, unidade_id, contagem } = req.body
+    if (!produto_id || !unidade_id || contagem == null || isNaN(parseFloat(contagem)))
+      return res.status(400).json({ erro: 'Envie produto_id, unidade_id e contagem' })
+    const saldoMap = _saldoPorProduto(await _movimentosUnidade(unidade_id, produto_id))
+    const saldoAtual = Math.round(saldoMap[produto_id] || 0)
+    const alvo = Math.round(parseFloat(contagem))
+    const diff = alvo - saldoAtual
+    if (diff !== 0) {
+      const { error } = await supabaseAdmin.from('movimentacoes_estoque').insert({
+        produto_id, unidade_id, tipo: 'ajuste', quantidade: diff,
+        responsavel_id: req.usuario.id,
+        observacao: 'Acerto de contagem (de ' + saldoAtual + ' para ' + alvo + ')'
+      })
+      if (error) throw error
+    }
+    return res.json({ ok: true, saldo_anterior: saldoAtual, saldo_novo: alvo, ajuste: diff })
+  } catch (err) {
+    console.error('[estoque/acerto]', err.message)
+    return res.status(500).json({ erro: 'Erro ao registrar acerto' })
+  }
+})
+
 // ============ PLANOS ============
 
 router.get('/planos', autenticar, async (req, res) => {
