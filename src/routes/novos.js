@@ -9,6 +9,16 @@ const ADMIN    = exigirPerfil('proprietario')
 const ADM_GER  = exigirPerfil('proprietario','gerente')
 const TODOS    = exigirPerfil('proprietario','gerente','colaborador','caixa')
 
+// Normaliza a forma de pagamento para os valores que o banco aceita.
+function normalizarForma(f) {
+  const s = String(f || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (s.includes('din')) return 'dinheiro'
+  if (s.includes('cred')) return 'credito'
+  if (s.includes('deb')) return 'debito'
+  if (s.includes('pix')) return 'pix'
+  return 'dinheiro'
+}
+
 // ============================================================
 // AUTORIZAÇÃO DO GERENTE — senha que libera ações sensíveis do caixa
 // ============================================================
@@ -497,7 +507,7 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
         const { data: cm } = await supabaseAdmin.from('comandas').insert({
           agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
           colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
-          status: 'finalizada', forma_pgto: forma_pgto || 'dinheiro',
+          status: 'finalizada', forma_pgto: normalizarForma(forma_pgto),
           subtotal, desconto, total,
           aberta_em: new Date().toISOString(), finalizada_em: new Date().toISOString(),
           observacao: 'Finalização de atendimento', criado_por: req.usuario.id
