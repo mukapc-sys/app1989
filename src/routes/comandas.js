@@ -19,6 +19,16 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
     const { unidade_id, data, status } = req.query
     const u = req.usuario
 
+    // À prova de login antigo: se o token veio SEM unidade, busca a do
+    // colaborador no banco (igual o Dashboard faz). Sem isso o caixa/gerente
+    // com token velho não enxerga as próprias comandas.
+    let unidadeUsuario = u.unidade_id
+    if (!unidadeUsuario && u.id && u.perfil !== 'proprietario' && u.perfil !== 'cliente') {
+      const { data: col } = await supabaseAdmin
+        .from('colaboradores').select('unidade_id').eq('id', u.id).single()
+      if (col && col.unidade_id) unidadeUsuario = col.unidade_id
+    }
+
     let query = supabaseAdmin
       .from('comandas')
       .select(`
@@ -30,7 +40,7 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
 
     if (status)     query = query.eq('status', status)
     if (unidade_id) query = query.eq('unidade_id', unidade_id)
-    else if (u.perfil !== 'proprietario') query = query.eq('unidade_id', u.unidade_id)
+    else if (u.perfil !== 'proprietario') query = query.eq('unidade_id', unidadeUsuario)
 
     if (data) {
       const ini = new Date(data + 'T00:00:00-03:00').toISOString()
