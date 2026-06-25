@@ -477,6 +477,42 @@ router.post('/agendamentos/:id/reabrir-autorizado', autenticar, async (req, res)
   }
 })
 
+// POST /agendamentos/:id/corrigir-forma — troca a forma de pagamento de um
+// atendimento JÁ finalizado, direto na comanda (sem reabrir, sem duplicar).
+// Gestor logado autoriza sozinho; caixa precisa da senha de autorização.
+router.post('/agendamentos/:id/corrigir-forma', autenticar, async (req, res) => {
+  try {
+    const raw = String(req.body.forma || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    let forma = null
+    if (raw.includes('din')) forma = 'dinheiro'
+    else if (raw.includes('cred')) forma = 'credito'
+    else if (raw.includes('deb')) forma = 'debito'
+    else if (raw.includes('pix')) forma = 'pix'
+    if (!forma) return res.status(400).json({ erro: 'Forma inválida. Use dinheiro, débito, crédito ou pix.' })
+
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('comandas')
+      .update({ forma_pgto: forma })
+      .eq('agendamento_id', req.params.id)
+      .eq('status', 'finalizada')
+      .select('id, total, forma_pgto')
+    if (error) throw error
+    if (!data || !data.length) return res.status(404).json({ erro: 'Comanda finalizada não encontrada para este atendimento.' })
+    return res.json({ ok: true, forma: forma, comandas: data, autorizado_por: autorizador.nome })
+  } catch (err) {
+    console.error('[corrigir-forma]', err.message)
+    return res.status(500).json({ erro: 'Erro ao corrigir forma de pagamento' })
+  }
+})
+
 // POST /agendamentos/:id/finalizar — conclui o atendimento E grava o detalhe dos itens
 // (serviço/produto + quantidade) numa comanda ligada, para a comissão por faixa.
 // O faturamento continua contando por agendamento.valor (comanda fica com agendamento_id → não duplica).
