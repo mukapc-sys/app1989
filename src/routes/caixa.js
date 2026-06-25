@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 
 // Quem pode abrir/fechar o caixa
 const ADM = exigirPerfil('proprietario', 'gerente', 'caixa')
@@ -106,6 +107,64 @@ router.post('/fechar', autenticar, ADM, async (req, res) => {
     return res.json(data)
   } catch (err) {
     console.error('[caixa/fechar]', err.message)
+    return res.status(500).json({ erro: err.message })
+  }
+})
+
+// ============================================================
+// POST /caixa/retirada  — saída/sangria do caixa
+//   Caixa pode lançar, mas precisa da senha de autorização.
+//   Gerente/proprietário logado autoriza sozinho.
+// ============================================================
+router.post('/retirada', autenticar, ADM, async (req, res) => {
+  try {
+    const unidade = unidadeDoUsuario(req)
+    const valor = parseFloat(req.body.valor)
+    if (!valor || valor <= 0) {
+      return res.status(400).json({ erro: 'Informe um valor válido para a saída.' })
+    }
+
+    // Autorização: gestor logado OU senha de autorização válida
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+
+    // Sessão de caixa aberta da unidade (se houver)
+    let q = supabaseAdmin.from('caixa_sessoes').select('id').eq('status', 'aberto')
+      .order('aberto_em', { ascending: false }).limit(1)
+    if (unidade) q = q.eq('unidade_id', unidade)
+    const { data: abertos } = await q
+    const sessao_id = (abertos && abertos[0]) ? abertos[0].id : null
+
+    // Nome do responsável (quem operou)
+    let responsavel_id = req.body.responsavel_id || req.usuario.id
+    let responsavel_nome = req.usuario.nome || null
+    if (req.body.responsavel_id) {
+      const { data: rc } = await supabaseAdmin.from('colaboradores').select('nome').eq('id', req.body.responsavel_id).single()
+      if (rc) responsavel_nome = rc.nome
+    }
+
+    const motivo = [req.body.motivo, req.body.descricao].filter(Boolean).join(' — ')
+
+    const { data, error } = await supabaseAdmin.from('caixa_retiradas').insert({
+      sessao_id,
+      unidade_id:          unidade,
+      valor,
+      motivo:              motivo || null,
+      responsavel_id,
+      responsavel_nome,
+      autorizado_por:      autorizador.id,
+      autorizado_por_nome: autorizador.nome,
+    }).select().single()
+    if (error) throw error
+
+    return res.status(201).json({ ok: true, autorizado_por: autorizador.nome, retirada: data })
+  } catch (err) {
+    console.error('[caixa/retirada]', err.message)
     return res.status(500).json({ erro: err.message })
   }
 })
