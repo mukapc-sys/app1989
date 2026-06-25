@@ -6,6 +6,17 @@ const { sincronizarUnidade, processarAgendamentos, carregarDeParas } = require('
 
 const ADM = ['proprietario', 'gerente']
 
+// Normaliza a forma de pagamento para os valores que o banco aceita.
+// (o front às vezes manda o rótulo do botão, ex.: "Cartão Débito")
+function normalizarForma(f) {
+  const s = String(f || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (s.includes('din')) return 'dinheiro'
+  if (s.includes('cred')) return 'credito'
+  if (s.includes('deb')) return 'debito'
+  if (s.includes('pix')) return 'pix'
+  return 'dinheiro'
+}
+
 // dd/mm/aaaa de hoje (fuso de São Paulo)
 function diaDeHojeBR() {
   const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
@@ -311,6 +322,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
     if (eClaim) throw eClaim
     if (!claim || !claim.length) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
 
+    let agId = null
     try {
     // ===== SEMPRE cria o agendamento concluído =====
     // (alimenta faturamento do dashboard, relatórios e COMISSÕES — nos dois casos)
@@ -328,6 +340,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       criado_por:    req.usuario.id,
     }).select().single()
     if (e1) throw e1
+    agId = ag.id
 
     // ===== Comanda SÓ no caminho "novo" =====
     // (a comanda é o que entra no FECHAMENTO DE CAIXA; no caminho "appbarber"
@@ -340,7 +353,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
         colaborador_id: ab.colaborador_id,
         unidade_id:     ab.unidade_id,
         status:         'finalizada',
-        forma_pgto:     forma_pgto || 'dinheiro',
+        forma_pgto:     normalizarForma(forma_pgto),
         subtotal:       valorFinal,
         desconto:       0,
         total:          valorFinal,
@@ -385,7 +398,9 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
 
     return res.json({ ok: true, onde: ondeFinal, agendamento_id: ag.id, comanda_id: comandaId })
     } catch (errInterno) {
-      // desfaz o claim (não deixa "finalizado" sem comanda) para permitir nova tentativa
+      // ROLLBACK: apaga o agendamento criado (se houver) e desfaz o claim,
+      // para não deixar duplicata nem "finalizado" sem comanda.
+      if (agId) { try { await supabaseAdmin.from('agendamentos').delete().eq('id', agId) } catch (e) {} }
       await supabaseAdmin.from('agenda_appbarber')
         .update({ finalizado: false, finalizado_em: null, finalizado_onde: null, agendamento_id: null, comanda_id: null })
         .eq('id', ab.id)
