@@ -12,6 +12,17 @@ const autenticar = async (req, res, next) => {
     const token = auth.split(' ')[1]
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
     req.usuario = decoded
+
+    // À prova de login antigo: se o token veio SEM unidade, busca a do
+    // colaborador no banco (senão o caixa/gerente não enxerga a própria unidade).
+    if (!req.usuario.unidade_id && req.usuario.id && req.usuario.perfil && req.usuario.perfil !== 'cliente') {
+      try {
+        const { data: col } = await supabaseAdmin
+          .from('colaboradores').select('unidade_id').eq('id', req.usuario.id).single()
+        if (col && col.unidade_id) req.usuario.unidade_id = col.unidade_id
+      } catch (e) { /* se falhar, segue sem unidade */ }
+    }
+
     next()
   } catch (err) {
     return res.status(401).json({ erro: 'Token inválido ou expirado' })
