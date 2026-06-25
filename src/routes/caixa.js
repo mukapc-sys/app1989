@@ -203,4 +203,27 @@ router.get('/retiradas', autenticar, ADM, async (req, res) => {
   }
 })
 
+// ============================================================
+// DELETE /caixa/retirada/:id — exclui uma saída (precisa autorização)
+// ============================================================
+router.delete('/retirada/:id', autenticar, ADM, async (req, res) => {
+  try {
+    // Autorização: gestor logado OU senha de autorização válida
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      const senha = (req.body && req.body.senha) || req.query.senha
+      autorizador = await validarSenhaAutorizacao(senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+    const { error } = await supabaseAdmin.from('caixa_retiradas').delete().eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[caixa/retirada DELETE]', err.message)
+    return res.status(500).json({ erro: err.message })
+  }
+})
+
 module.exports = router
