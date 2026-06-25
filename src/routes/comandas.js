@@ -12,9 +12,9 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
     let query = supabaseAdmin
       .from('comandas')
       .select(`
-        id, status, subtotal, desconto, total, forma_pgto, aberta_em, finalizada_em, observacao,
+        id, status, subtotal, desconto, total, forma_pgto, aberta_em, finalizada_em, observacao, colaborador_id,
         clientes(nome, whatsapp),
-        colaboradores(nome)
+        colaboradores(id, nome, comissao_pct)
       `)
       .order('aberta_em', { ascending: false })
 
@@ -194,9 +194,9 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
 
     // Recalcula total com desconto
     const { data: itens } = await supabaseAdmin
-      .from('itens_comanda').select('valor_total').eq('comanda_id', id)
+      .from('itens_comanda').select('valor_unit, quantidade').eq('comanda_id', id)
 
-    const subtotal = (itens || []).reduce((s, i) => s + parseFloat(i.valor_total), 0)
+    const subtotal = (itens || []).reduce((s, i) => s + (parseFloat(i.valor_unit)||0) * (parseInt(i.quantidade)||1), 0)
     const total    = Math.max(0, subtotal - parseFloat(desconto))
 
     const { data, error } = await supabaseAdmin
