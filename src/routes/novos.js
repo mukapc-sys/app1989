@@ -91,22 +91,34 @@ router.post('/comandas/:id/reabrir', autenticar, async (req, res) => {
   try {
     const { senha_gerente, motivo } = req.body
     const { id } = req.params
+    if (!motivo || !String(motivo).trim()) {
+      return res.status(400).json({ erro: 'Informe o motivo da reabertura.' })
+    }
 
-    // Valida senha do gerente
-    const { data: colab } = await supabaseAdmin.from('colaboradores').select('id,perfil').eq('user_id', req.usuario.id).single()
-    if (!colab || !['gerente','proprietario'].includes(colab.perfil)) {
-      return res.status(403).json({ erro: 'Apenas gerentes podem reabrir comandas' })
+    // Quem autoriza? O próprio gestor logado, OU alguém via senha de autorização.
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(senha_gerente)
+      if (!autorizador) {
+        return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+      }
     }
 
     // Reabre a comanda
-    const { error } = await supabaseAdmin.from('comandas').update({ status: 'aberta', status_pagamento: 'aberta' }).eq('id', id)
+    const { error } = await supabaseAdmin.from('comandas')
+      .update({ status: 'aberta', status_pagamento: 'aberta' }).eq('id', id)
     if (error) throw error
 
-    // Registra log
-    await supabaseAdmin.from('log_reaberturas').insert({ comanda_id: id, gerente_id: colab.id, motivo })
+    // Registra log: quem autorizou + motivo
+    await supabaseAdmin.from('log_reaberturas').insert({
+      comanda_id: id, gerente_id: autorizador.id, motivo: motivo
+    })
 
-    return res.json({ ok: true })
+    return res.json({ ok: true, autorizado_por: autorizador.nome })
   } catch (err) {
+    console.error('[reabrir]', err.message)
     return res.status(500).json({ erro: 'Erro ao reabrir comanda' })
   }
 })
