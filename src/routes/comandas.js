@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 
 // Normaliza a forma de pagamento para os valores que o banco aceita.
 function normalizarForma(f) {
@@ -84,6 +85,41 @@ router.get('/:id', autenticar, async (req, res) => {
     return res.json(data)
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao buscar comanda' })
+  }
+})
+
+// POST /comandas/:id/corrigir-forma — troca a forma de pagamento de uma comanda
+// JÁ finalizada, direto pelo id (serve pra qualquer comanda, inclusive avulsa).
+// Gestor logado autoriza sozinho; caixa precisa da senha de autorização.
+router.post('/:id/corrigir-forma', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
+  try {
+    const raw = String(req.body.forma || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    let forma = null
+    if (raw.includes('din')) forma = 'dinheiro'
+    else if (raw.includes('cred')) forma = 'credito'
+    else if (raw.includes('deb')) forma = 'debito'
+    else if (raw.includes('pix')) forma = 'pix'
+    if (!forma) return res.status(400).json({ erro: 'Forma inválida. Use dinheiro, débito, crédito ou pix.' })
+
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('comandas')
+      .update({ forma_pgto: forma })
+      .eq('id', req.params.id)
+      .eq('status', 'finalizada')
+      .select('id, total, forma_pgto')
+    if (error) throw error
+    if (!data || !data.length) return res.status(404).json({ erro: 'Comanda finalizada não encontrada.' })
+    return res.json({ ok: true, forma: forma, comanda: data[0], autorizado_por: autorizador.nome })
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao corrigir forma de pagamento' })
   }
 })
 
