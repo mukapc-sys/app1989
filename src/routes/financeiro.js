@@ -328,6 +328,24 @@ router.get('/produtos', autenticar, SEM_ACESSO, async (req, res) => {
       mapa[i.descricao].faturado += _vt
       total += _vt
     })
+
+    // Produtos vendidos no AppBarber (espelho) no período
+    let qAB = supabaseAdmin
+      .from('agenda_appbarber_produtos')
+      .select('descricao, quantidade, valor_unit, unidade_id, data')
+      .gte('data', ini).lte('data', fim)
+    if (uid) qAB = qAB.eq('unidade_id', uid)
+    const { data: abProd } = await qAB
+    ;(abProd || []).forEach(i => {
+      const nome = i.descricao || 'Produto'
+      if (!mapa[nome]) mapa[nome] = { nome, quantidade: 0, faturado: 0 }
+      const q = parseInt(i.quantidade) || 1
+      const v = (parseFloat(i.valor_unit) || 0) * q
+      mapa[nome].quantidade += q
+      mapa[nome].faturado += v
+      total += v
+    })
+
     const ranking = Object.values(mapa).map(r => ({ ...r, faturado: round(r.faturado) })).sort((a, b) => b.faturado - a.faturado)
     return res.json({ total: round(total), ranking })
   } catch (err) {
