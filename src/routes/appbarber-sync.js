@@ -136,7 +136,7 @@ async function processarAgendamentos(unidadeId, bruto) {
   // repete o mesmo item entre dias) — senão o upsert dá
   // "ON CONFLICT cannot affect row a second time". Fica com a última ocorrência.
   const porId = new Map()
-  for (const r of registros) porId.set(r.appbarber_id, r)
+  for (const r of registros) porId.set((r.unidade_id || '') + ':' + r.appbarber_id, r)
   const registrosUnicos = Array.from(porId.values())
 
   // grava em lotes (upsert por appbarber_id -> não duplica).
@@ -147,14 +147,14 @@ async function processarAgendamentos(unidadeId, bruto) {
   if (registrosUnicos.length) {
     const { error } = await supabaseAdmin
       .from('agenda_appbarber')
-      .upsert(registrosUnicos, { onConflict: 'appbarber_id' })
+      .upsert(registrosUnicos, { onConflict: 'unidade_id,appbarber_id' })
     if (!error) {
       gravados = registrosUnicos.length
     } else {
       for (const r of registrosUnicos) {
         const { error: e1 } = await supabaseAdmin
           .from('agenda_appbarber')
-          .upsert(r, { onConflict: 'appbarber_id' })
+          .upsert(r, { onConflict: 'unidade_id,appbarber_id' })
         if (e1) {
           falhas.push({
             appbarber_id: r.appbarber_id,
