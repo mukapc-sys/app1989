@@ -34,7 +34,7 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
       .select(`
         id, status, subtotal, desconto, total, forma_pgto, aberta_em, finalizada_em, observacao, colaborador_id,
         clientes(nome, whatsapp),
-        colaboradores(id, nome, comissao_pct)
+        colaboradores(id, nome)
       `)
       .order('aberta_em', { ascending: false })
 
@@ -60,7 +60,7 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
     if (error) throw error
     return res.json(rows)
   } catch (err) {
-    return res.status(500).json({ erro: 'Erro ao buscar comandas' })
+    return res.status(500).json({ erro: 'Erro ao buscar comandas: ' + String((err && err.message) || err) })
   }
 })
 
