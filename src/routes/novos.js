@@ -446,6 +446,27 @@ router.patch('/agendamentos/:id', autenticar, async (req, res) => {
   }
 })
 
+// POST /agendamentos/:id/reabrir-autorizado — reabre um atendimento concluído.
+// Gestor logado autoriza sozinho; caixa precisa da senha de autorização.
+router.post('/agendamentos/:id/reabrir-autorizado', autenticar, async (req, res) => {
+  try {
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+    const { data, error } = await supabaseAdmin
+      .from('agendamentos').update({ status: 'agendado' }).eq('id', req.params.id).select().single()
+    if (error) throw error
+    return res.json({ ok: true, autorizado_por: autorizador.nome })
+  } catch (err) {
+    console.error('[reabrir-autorizado]', err.message)
+    return res.status(500).json({ erro: 'Erro ao reabrir atendimento' })
+  }
+})
+
 // POST /agendamentos/:id/finalizar — conclui o atendimento E grava o detalhe dos itens
 // (serviço/produto + quantidade) numa comanda ligada, para a comissão por faixa.
 // O faturamento continua contando por agendamento.valor (comanda fica com agendamento_id → não duplica).
