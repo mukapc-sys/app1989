@@ -331,7 +331,10 @@ router.put('/produtos/:id', autenticar, ADMIN, async (req, res) => {
 
 router.post('/estoque/entrada', autenticar, ADMIN, async (req, res) => {
   try {
-    const { produto_id, unidade_id, quantidade, valor_unitario, observacao } = req.body
+    const { produto_id, quantidade, valor_unitario, observacao } = req.body
+    // Proprietário escolhe a unidade; gerente só pode lançar na PRÓPRIA unidade.
+    const unidade_id = req.usuario.perfil === 'proprietario' ? req.body.unidade_id : req.usuario.unidade_id
+    if (!produto_id || !unidade_id) return res.status(400).json({ erro: 'Produto e unidade são obrigatórios' })
     const { data, error } = await supabaseAdmin
       .from('movimentacoes_estoque')
       .insert({ produto_id, unidade_id, tipo: 'entrada', quantidade, valor_unitario, responsavel_id: req.usuario.id, observacao })
@@ -385,7 +388,11 @@ router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','
       valor_venda: p.valor_venda, estoque_minimo: p.estoque_minimo || 0,
       saldo: Math.round(saldo[p.id] || 0)
     }))
-    return res.json(lista)
+    return res.json({
+      unidade_id,
+      pode_escolher: req.usuario.perfil === 'proprietario',
+      produtos: lista
+    })
   } catch (err) {
     console.error('[estoque/saldo]', err.message)
     return res.status(500).json({ erro: 'Erro ao buscar saldo de estoque' })
