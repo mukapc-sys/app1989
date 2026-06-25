@@ -357,6 +357,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
         subtotal:       valorFinal,
         desconto:       0,
         total:          valorFinal,
+        aberta_em:      new Date().toISOString(),
         finalizada_em:  new Date().toISOString(),
         criado_por:     req.usuario.id,
         observacao:     'Importado do AppBarber',
