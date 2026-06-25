@@ -3,6 +3,16 @@ const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
+// Normaliza a forma de pagamento para os valores que o banco aceita.
+function normalizarForma(f) {
+  const s = String(f || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (s.includes('din')) return 'dinheiro'
+  if (s.includes('cred')) return 'credito'
+  if (s.includes('deb')) return 'debito'
+  if (s.includes('pix')) return 'pix'
+  return 'dinheiro'
+}
+
 // GET /comandas?unidade_id=xxx&data=2025-05-15&status=aberta
 router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador','caixa'), async (req, res) => {
   try {
@@ -122,7 +132,7 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     const total = Math.max(0, subtotal - parseFloat(desconto || 0))
     const { data: fin, error: errF } = await supabaseAdmin
       .from('comandas')
-      .update({ status: 'finalizada', forma_pgto: forma_pagamento, desconto, subtotal, total, finalizada_em: new Date().toISOString() })
+      .update({ status: 'finalizada', forma_pgto: normalizarForma(forma_pagamento), desconto, subtotal, total, finalizada_em: new Date().toISOString() })
       .eq('id', comanda.id).select().single()
     if (errF) throw errF
 
@@ -201,7 +211,7 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from('comandas')
-      .update({ status: 'finalizada', forma_pgto, desconto, subtotal, total, finalizada_em: new Date().toISOString() })
+      .update({ status: 'finalizada', forma_pgto: normalizarForma(forma_pgto), desconto, subtotal, total, finalizada_em: new Date().toISOString() })
       .eq('id', id).select().single()
 
     if (error) throw error
