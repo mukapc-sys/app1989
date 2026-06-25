@@ -191,6 +191,56 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       } catch (e) { console.error('[dashboard comissoes-faixa colab]', e.message); result.comissoes = { hoje: '0.00', mes: '0.00', pct_servico: 40 } }
     }
 
+    // ---- Meu desempenho (barbeiro): hoje + mês ----
+    if (perfil === 'colaborador') {
+      try {
+        const r2 = n => Math.round((n || 0) * 100) / 100
+        const desemp = async (ini, fim) => {
+          const [abReal, cmdsFin, abAus, abProd, agePend] = await Promise.all([
+            supabaseAdmin.from('agenda_appbarber').select('valor, cliente_codigo, cliente_nome')
+              .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+              .eq('colaborador_id', colab.id).gte('inicio', ini).lte('inicio', fim),
+            supabaseAdmin.from('comandas').select('total, cliente_id')
+              .eq('status', 'finalizada').eq('colaborador_id', colab.id).gte('finalizada_em', ini).lte('finalizada_em', fim),
+            supabaseAdmin.from('agenda_appbarber').select('id')
+              .eq('tipo', 'agendamento').eq('status', 'ausente')
+              .eq('colaborador_id', colab.id).gte('inicio', ini).lte('inicio', fim),
+            supabaseAdmin.from('agenda_appbarber_produtos').select('quantidade, valor_unit')
+              .eq('colaborador_id', colab.id).gte('data', ini).lte('data', fim),
+            supabaseAdmin.from('agenda_appbarber').select('id')
+              .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'agendado')
+              .eq('colaborador_id', colab.id).gte('inicio', ini).lte('inicio', fim),
+          ])
+          const feitos = (abReal.data?.length || 0) + (cmdsFin.data?.length || 0)
+          const faltas = (abAus.data?.length || 0)
+          const agendados = (agePend.data?.length || 0)
+          let prod_qtd = 0, prod_valor = 0
+          ;(abProd.data || []).forEach(p => { const q = parseInt(p.quantidade) || 1; prod_qtd += q; prod_valor += (parseFloat(p.valor_unit) || 0) * q })
+          const servico_valor = (abReal.data || []).reduce((s, a) => s + (parseFloat(a.valor) || 0), 0) +
+                                (cmdsFin.data || []).reduce((s, c) => s + (parseFloat(c.total) || 0), 0)
+          const geral = servico_valor + prod_valor
+          const cli = new Set()
+          ;(abReal.data || []).forEach(a => cli.add(a.cliente_codigo || ('n:' + (a.cliente_nome || '?'))))
+          ;(cmdsFin.data || []).forEach(c => { if (c.cliente_id) cli.add('c:' + c.cliente_id) })
+          return { feitos, agendados, faltas, prod_qtd, prod_valor: r2(prod_valor), servico_valor: r2(servico_valor), geral: r2(geral), ticket: feitos > 0 ? r2(geral / feitos) : 0, _cli: cli }
+        }
+        const dHoje = await desemp(inicioHoje, fimHoje)
+        const dMes  = await desemp(inicioMes, fimHoje)
+        // novos x recorrentes (mês): cliente que NÃO apareceu antes do mês = novo
+        let novos = 0, recorrentes = 0
+        try {
+          const { data: antes } = await supabaseAdmin.from('agenda_appbarber')
+            .select('cliente_codigo, cliente_nome')
+            .eq('tipo', 'agendamento').eq('status', 'realizado').eq('colaborador_id', colab.id)
+            .lt('inicio', inicioMes)
+          const antesSet = new Set((antes || []).map(a => a.cliente_codigo || ('n:' + (a.cliente_nome || '?'))))
+          dMes._cli.forEach(k => { if (antesSet.has(k)) recorrentes++; else novos++ })
+        } catch (e) {}
+        const limpar = d => ({ feitos: d.feitos, agendados: d.agendados, faltas: d.faltas, prod_qtd: d.prod_qtd, prod_valor: d.prod_valor, servico_valor: d.servico_valor, geral: d.geral, ticket: d.ticket, clientes: d._cli.size })
+        result.desempenho = { hoje: limpar(dHoje), mes: { ...limpar(dMes), clientes_novos: novos, clientes_recorrentes: recorrentes } }
+      } catch (e) { console.error('[dashboard desempenho]', e.message) }
+    }
+
     // ---- Top clientes do mês (comandas finalizadas + AppBarber realizado) ----
     const topMap = {}
     const addTop = (key, nome, unidade, barbeiro) => {
