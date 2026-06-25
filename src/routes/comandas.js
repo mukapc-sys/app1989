@@ -123,6 +123,41 @@ router.post('/:id/corrigir-forma', autenticar, exigirPerfil('proprietario','gere
   }
 })
 
+// POST /comandas/:id/estornar — estorna/exclui uma comanda lançada errada.
+// Tira do caixa e do faturamento. Gestor autoriza sozinho; caixa precisa de senha.
+router.post('/:id/estornar', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
+  try {
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+
+    const { data: cmd, error: e1 } = await supabaseAdmin
+      .from('comandas').select('id, agendamento_id').eq('id', req.params.id).single()
+    if (e1 || !cmd) return res.status(404).json({ erro: 'Comanda não encontrada.' })
+
+    const { error: e2 } = await supabaseAdmin.from('comandas').delete().eq('id', req.params.id)
+    if (e2) throw e2
+
+    // Se a comanda estava ligada a um atendimento e NÃO sobrou outra comanda
+    // para ele, devolve o atendimento para "agendado" (sai do faturamento e
+    // pode ser refinalizado). Se for duplicata (outra comanda existe), só remove.
+    if (cmd.agendamento_id) {
+      const { data: outras } = await supabaseAdmin
+        .from('comandas').select('id').eq('agendamento_id', cmd.agendamento_id).limit(1)
+      if (!outras || !outras.length) {
+        await supabaseAdmin.from('agendamentos').update({ status: 'agendado' }).eq('id', cmd.agendamento_id)
+      }
+    }
+    return res.json({ ok: true, estornado_por: autorizador.nome })
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao estornar comanda' })
+  }
+})
+
 // POST /comandas — abrir nova comanda
 router.post('/', autenticar, exigirPerfil('proprietario','gerente','colaborador','caixa'), async (req, res) => {
   try {
