@@ -169,4 +169,38 @@ router.post('/retirada', autenticar, ADM, async (req, res) => {
   }
 })
 
+// ============================================================
+// GET /caixa/retiradas — saídas da sessão aberta (ou do dia) da unidade
+// ============================================================
+router.get('/retiradas', autenticar, ADM, async (req, res) => {
+  try {
+    const unidade = unidadeDoUsuario(req)
+
+    // Sessão aberta da unidade (se houver)
+    let qs = supabaseAdmin.from('caixa_sessoes').select('id').eq('status', 'aberto')
+      .order('aberto_em', { ascending: false }).limit(1)
+    if (unidade) qs = qs.eq('unidade_id', unidade)
+    const { data: abertos } = await qs
+    const sessao_id = (abertos && abertos[0]) ? abertos[0].id : null
+
+    let q = supabaseAdmin.from('caixa_retiradas').select('*').order('criado_em', { ascending: false })
+    if (sessao_id) {
+      q = q.eq('sessao_id', sessao_id)
+    } else {
+      // sem caixa aberto: mostra as de hoje da unidade
+      const hoje = new Date()
+      const ini = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 0, 0, 0).toISOString()
+      if (unidade) q = q.eq('unidade_id', unidade)
+      q = q.gte('criado_em', ini)
+    }
+    const { data, error } = await q
+    if (error) throw error
+    const total = (data || []).reduce((s, r) => s + (parseFloat(r.valor) || 0), 0)
+    return res.json({ retiradas: data || [], total })
+  } catch (err) {
+    console.error('[caixa/retiradas]', err.message)
+    return res.status(500).json({ erro: err.message })
+  }
+})
+
 module.exports = router
