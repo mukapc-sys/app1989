@@ -412,4 +412,46 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
   }
 })
 
+// ============================================================
+// POST /appbarber/mover/:id   — move um agendamento importado
+//   (novo horário e/ou novo barbeiro). Marca como editado_local
+//   para o sync NÃO reimportar por cima.
+//   body: { inicio, fim?, colaborador_id? }
+// ============================================================
+router.post('/mover/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
+  try {
+    const { inicio, fim, colaborador_id } = req.body || {}
+    const updates = { editado_local: true }
+    if (inicio) updates.inicio = inicio
+    if (fim) updates.fim = fim
+    if (colaborador_id !== undefined) updates.colaborador_id = colaborador_id || null
+    const { data, error } = await supabaseAdmin
+      .from('agenda_appbarber').update(updates).eq('id', req.params.id).select().single()
+    if (error) throw error
+    return res.json({ ok: true, agendamento: data })
+  } catch (err) {
+    console.error('[appbarber/mover]', err.message)
+    return res.status(500).json({ erro: 'Erro ao mover', detalhe: err.message })
+  }
+})
+
+// ============================================================
+// POST /appbarber/cancelar/:id  — cancela um agendamento importado
+//   (status=cancelado). Marca editado_local para o sync não o trazer
+//   de volta. Some da agenda (a view filtra cancelado).
+// ============================================================
+router.post('/cancelar/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('agenda_appbarber')
+      .update({ status: 'cancelado', editado_local: true })
+      .eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[appbarber/cancelar]', err.message)
+    return res.status(500).json({ erro: 'Erro ao cancelar', detalhe: err.message })
+  }
+})
+
 module.exports = router
