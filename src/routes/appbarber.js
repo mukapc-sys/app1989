@@ -302,6 +302,16 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
     const valorFinal = (valor !== undefined && valor !== null && valor !== '') ? Number(valor) : Number(ab.valor || 0)
     const ondeFinal = (onde === 'appbarber') ? 'appbarber' : 'novo'
 
+    // ===== CLAIM ATÔMICO: evita duplo/triplo clique criar 2x/3x =====
+    // Só UMA requisição consegue virar finalizado false->true. As outras param aqui.
+    const { data: claim, error: eClaim } = await supabaseAdmin
+      .from('agenda_appbarber')
+      .update({ finalizado: true, finalizado_em: new Date().toISOString(), finalizado_onde: ondeFinal })
+      .eq('id', ab.id).eq('finalizado', false).select('id')
+    if (eClaim) throw eClaim
+    if (!claim || !claim.length) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
+
+    try {
     // ===== SEMPRE cria o agendamento concluído =====
     // (alimenta faturamento do dashboard, relatórios e COMISSÕES — nos dois casos)
     const { data: ag, error: e1 } = await supabaseAdmin.from('agendamentos').insert({
@@ -367,19 +377,20 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       }
     }
 
-    // ===== marca o importado como finalizado e liga aos criados =====
+    // ===== liga os criados ao importado (o 'finalizado' já foi marcado no claim) =====
     const { error: e3 } = await supabaseAdmin.from('agenda_appbarber')
-      .update({
-        finalizado: true,
-        finalizado_em: new Date().toISOString(),
-        finalizado_onde: ondeFinal,
-        agendamento_id: ag.id,
-        comanda_id: comandaId,
-      })
+      .update({ agendamento_id: ag.id, comanda_id: comandaId })
       .eq('id', ab.id)
     if (e3) throw e3
 
     return res.json({ ok: true, onde: ondeFinal, agendamento_id: ag.id, comanda_id: comandaId })
+    } catch (errInterno) {
+      // desfaz o claim (não deixa "finalizado" sem comanda) para permitir nova tentativa
+      await supabaseAdmin.from('agenda_appbarber')
+        .update({ finalizado: false, finalizado_em: null, finalizado_onde: null, agendamento_id: null, comanda_id: null })
+        .eq('id', ab.id)
+      throw errInterno
+    }
   } catch (err) {
     console.error('[appbarber/finalizar]', err.message)
     return res.status(500).json({ erro: 'Erro ao finalizar', detalhe: err.message })
