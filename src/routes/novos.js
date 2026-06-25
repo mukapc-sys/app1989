@@ -1,11 +1,46 @@
 const express = require('express')
 const router  = express.Router()
+const bcrypt  = require('bcryptjs')
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 
 const ADMIN    = exigirPerfil('proprietario')
 const ADM_GER  = exigirPerfil('proprietario','gerente')
 const TODOS    = exigirPerfil('proprietario','gerente','colaborador','caixa')
+
+// ============================================================
+// AUTORIZAÇÃO DO GERENTE — senha que libera ações sensíveis do caixa
+// ============================================================
+// O gestor (gerente/proprietário) logado define/atualiza a PRÓPRIA senha.
+router.post('/autorizacao/definir', autenticar, ADM_GER, async (req, res) => {
+  try {
+    const senha = String(req.body.senha || '')
+    if (senha.length < 4) {
+      return res.status(400).json({ erro: 'A senha de autorização precisa ter ao menos 4 caracteres.' })
+    }
+    const hash = await bcrypt.hash(senha, 10)
+    const { error } = await supabaseAdmin
+      .from('colaboradores').update({ senha_autorizacao: hash }).eq('id', req.usuario.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[autorizacao/definir]', err.message)
+    return res.status(500).json({ erro: 'Erro ao salvar senha de autorização' })
+  }
+})
+
+// Diz se o gestor logado já tem senha de autorização definida.
+router.get('/autorizacao/status', autenticar, async (req, res) => {
+  try {
+    const { data } = await supabaseAdmin
+      .from('colaboradores').select('senha_autorizacao').eq('id', req.usuario.id).single()
+    return res.json({ definida: !!(data && data.senha_autorizacao) })
+  } catch (err) {
+    return res.json({ definida: false })
+  }
+})
+
 
 // ============================================================
 // VALE PIX
