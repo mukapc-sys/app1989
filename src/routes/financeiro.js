@@ -482,6 +482,19 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
         if (a.unidade_id)    { const y=eU(a.unidade_id);     y.valor_serv+=v; y.atend++ }
       }
 
+      // AppBarber PRODUTOS (espelho das comandas) → produto + quantidade
+      let qabp = supabaseAdmin.from('agenda_appbarber_produtos')
+        .select('valor_unit, quantidade, colaborador_id, unidade_id, data')
+        .gte('data', ini).lt('data', fim)
+      if (uidFiltro) qabp = qabp.eq('unidade_id', uidFiltro)
+      const { data: abProd } = await qabp
+      for (const p of (abProd||[])) {
+        const q = parseInt(p.quantidade) || 1
+        const v = (parseFloat(p.valor_unit)||0) * q
+        if (p.colaborador_id){ const x=eC(p.colaborador_id); x.valor_prod+=v; x.prod_qtd+=q }
+        if (p.unidade_id)    { const y=eU(p.unidade_id);     y.valor_prod+=v; y.prod_qtd+=q }
+      }
+
       return { porColab, porUni }
     }
 
