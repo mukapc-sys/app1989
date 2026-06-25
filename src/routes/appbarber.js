@@ -2,7 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
-const { sincronizarUnidade, processarAgendamentos } = require('./appbarber-sync')
+const { sincronizarUnidade, processarAgendamentos, carregarDeParas } = require('./appbarber-sync')
 
 const ADM = ['proprietario', 'gerente']
 
@@ -213,6 +213,76 @@ router.post('/importar', async (req, res) => {
 })
 
 // ============================================================
+// POST /appbarber/importar-produtos   (chamado pela EXTENSÃO)
+// Recebe os PRODUTOS lidos das comandas do AppBarber e grava (upsert por CodItem).
+// body: { unidade_id, produtos: [{ item_id, comanda_codigo, descricao, quantidade,
+//          valor_unit, comissao, cliente_codigo, profissional_codigo, data }] }
+// ============================================================
+function parseNumAB(v) {
+  if (v == null || v === '') return 0
+  let s = String(v).trim()
+  if (s.indexOf(',') >= 0) s = s.replace(/\./g, '').replace(',', '.') // formato BR "1.234,56"
+  const n = parseFloat(s)
+  return isNaN(n) ? 0 : n
+}
+function parseDataAB(s) {
+  // "23/06/2026 14:30" -> ISO -03:00 ; aceita também já-ISO
+  if (!s) return null
+  s = String(s).trim()
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2}))?/)
+  if (m) {
+    const [, dd, mm, yyyy, hh = '12', mi = '00'] = m
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}:00-03:00`
+  }
+  return s
+}
+
+router.post('/importar-produtos', async (req, res) => {
+  try {
+    const segredo = req.headers['x-ext-segredo'] || (req.body && req.body.segredo)
+    if (!process.env.APPBARBER_EXT_SECRET || segredo !== process.env.APPBARBER_EXT_SECRET) {
+      return res.status(401).json({ ok: false, motivo: 'SEGREDO_INVALIDO' })
+    }
+    const { unidade_id, produtos } = req.body || {}
+    if (!unidade_id || !Array.isArray(produtos)) {
+      return res.status(400).json({ ok: false, erro: 'Envie unidade_id e produtos[]' })
+    }
+
+    // mapa profissional AppBarber -> colaborador do sistema (pra atribuir o produto)
+    let profMap = {}
+    try { const dp = await carregarDeParas(unidade_id); profMap = dp.profMap || {} } catch (e) {}
+
+    const linhas = produtos
+      .filter(p => p && p.item_id)
+      .map(p => ({
+        appbarber_item_id: String(p.item_id),
+        comanda_codigo:    p.comanda_codigo != null ? String(p.comanda_codigo) : null,
+        unidade_id,
+        colaborador_id:    (p.profissional_codigo && profMap[String(p.profissional_codigo)]) || null,
+        cliente_codigo:    p.cliente_codigo != null ? String(p.cliente_codigo) : null,
+        descricao:         (p.descricao || '').trim() || 'Produto',
+        quantidade:        parseInt(p.quantidade) || 1,
+        valor_unit:        parseNumAB(p.valor_unit),
+        comissao:          parseNumAB(p.comissao),
+        data:              parseDataAB(p.data),
+      }))
+
+    let gravados = 0
+    if (linhas.length) {
+      const { error } = await supabaseAdmin
+        .from('agenda_appbarber_produtos')
+        .upsert(linhas, { onConflict: 'appbarber_item_id' })
+      if (error) throw error
+      gravados = linhas.length
+    }
+    return res.json({ ok: true, resumo: { unidade_id, gravados } })
+  } catch (err) {
+    console.error('[appbarber/importar-produtos]', err.message)
+    return res.status(200).json({ ok: false, motivo: 'ERRO', detalhe: err.message })
+  }
+})
+
+// ============================================================
 // POST /appbarber/finalizar/:id   (chamado pela TELA, caixa logado)
 // Finaliza um agendamento importado, de 2 formas:
 //   onde='novo'      -> cria agendamento concluído + comanda finalizada (entra no caixa)
@@ -221,7 +291,7 @@ router.post('/importar', async (req, res) => {
 // ============================================================
 router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
   try {
-    const { onde = 'novo', forma_pgto, valor } = req.body || {}
+    const { onde = 'novo', forma_pgto, valor, itens } = req.body || {}
 
     // 1) carrega o importado
     const { data: ab, error: e0 } = await supabaseAdmin
@@ -270,6 +340,31 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       }).select().single()
       if (e2) throw e2
       comandaId = cm.id
+
+      // best-effort: grava os ITENS da comanda (alimenta a comissão por faixa).
+      // Não quebra a finalização se falhar.
+      try {
+        const listaItens = Array.isArray(itens) ? itens : []
+        if (listaItens.length) {
+          const linhas = listaItens.map(function (it) {
+            const q = parseInt(it.quantidade) || 1
+            const vu = (it.valor_unit != null) ? Number(it.valor_unit)
+                      : (it.valor != null ? Number(it.valor) : 0)
+            return {
+              comanda_id: comandaId,
+              tipo:       it.tipo || 'servico',
+              servico_id: it.servico_id || null,
+              produto_id: it.produto_id || null,
+              descricao:  it.descricao || null,
+              quantidade: q,
+              valor_unit: vu,
+            }
+          })
+          await supabaseAdmin.from('itens_comanda').insert(linhas)
+        }
+      } catch (eItens) {
+        console.error('[appbarber/finalizar itens]', eItens.message)
+      }
     }
 
     // ===== marca o importado como finalizado e liga aos criados =====
@@ -283,41 +378,6 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       })
       .eq('id', ab.id)
     if (e3) throw e3
-
-    // ===== grava o detalhe dos itens (serviço/produto + qtd) p/ comissão por faixa (best-effort) =====
-    try {
-      const lista = Array.isArray(req.body.itens) ? req.body.itens : []
-      if (lista.length) {
-        let cid = comandaId
-        if (!cid) {
-          const { data: cmd } = await supabaseAdmin.from('comandas').insert({
-            agendamento_id: ag.id, cliente_id: ab.cliente_id, colaborador_id: ab.colaborador_id,
-            unidade_id: ab.unidade_id, status: 'finalizada', forma_pgto: forma_pgto || 'dinheiro',
-            subtotal: valorFinal, desconto: 0, total: valorFinal, finalizada_em: new Date().toISOString(),
-            criado_por: req.usuario.id, observacao: 'Detalhe AppBarber'
-          }).select().single()
-          cid = cmd ? cmd.id : null
-        }
-        if (cid) {
-          for (const it of lista) {
-            const tipo = (String(it.tipo || '').toLowerCase().indexOf('produto') !== -1) ? 'produto' : 'servico'
-            const qtd = parseInt(it.quantidade) || 1
-            const valor_unit = parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0
-            await supabaseAdmin.from('itens_comanda').insert({
-              comanda_id: cid, tipo, servico_id: it.servico_id || null, produto_id: it.produto_id || null,
-              descricao: it.nome || it.descricao || (tipo === 'produto' ? 'Produto' : 'Serviço'),
-              quantidade: qtd, valor_unit
-            })
-            if (tipo === 'produto' && it.produto_id) {
-              await supabaseAdmin.from('movimentacoes_estoque').insert({
-                produto_id: it.produto_id, unidade_id: ab.unidade_id, tipo: 'saida_venda',
-                quantidade: qtd, responsavel_id: ab.colaborador_id, referencia_id: cid
-              }).then(() => {}).catch(() => {})
-            }
-          }
-        }
-      }
-    } catch (eItens) { console.error('[appbarber finalizar itens]', eItens.message) }
 
     return res.json({ ok: true, onde: ondeFinal, agendamento_id: ag.id, comanda_id: comandaId })
   } catch (err) {
