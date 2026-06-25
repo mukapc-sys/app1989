@@ -495,7 +495,7 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
     // 1) conclui o agendamento — GUARDA ATÔMICA contra duplo-clique:
     //    só finaliza se ainda NÃO está concluído (evita criar comanda 2x).
     const { data: flip, error: eflip } = await supabaseAdmin.from('agendamentos')
-      .update({ status: 'concluido', valor: total, forma_pagamento: forma_pgto || null })
+      .update({ status: 'concluido', valor: total, forma_pagamento: forma_pgto ? normalizarForma(forma_pgto) : null })
       .eq('id', ag.id).neq('status', 'concluido').select('id')
     if (eflip) throw eflip
     if (!flip || !flip.length) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
