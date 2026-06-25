@@ -418,6 +418,13 @@ async function appbarberRealizados(ini, fim, uid) {
   return all
 }
 
+// Classifica produto pelo NOME: Barbearia (pomada, shampoo, etc.) x Bar (bebida,
+// chocolate). Comissão não serve (tem exceção); o nome é confiável.
+function ehProdutoBarbearia(nome) {
+  const s = String(nome || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  return /(balm|cera|oleo|pomada|redensyl|shampoo)/.test(s)
+}
+
 // GET /financeiro/comparativo?mes1=2026-03&mes2=2026-04[&unidade_id=xxx]
 // Comparativo mês x mês por BARBEIRO e por UNIDADE.
 // Métricas: atendimentos, produtos (qtd), serviços (R$), produtos/bar (R$), geral (R$), ticket médio.
@@ -446,7 +453,8 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
     if (uidFiltro) qUni = qUni.eq('id', uidFiltro)
     const { data: unids } = await qUni
 
-    const vazio = () => ({ atend:0, prod_qtd:0, valor_serv:0, valor_prod:0 })
+    const vazio = () => ({ atend:0, prod_qtd:0, valor_serv:0, valor_prod:0,
+      prod_barb_qtd:0, prod_barb_valor:0, prod_bar_qtd:0, prod_bar_valor:0 })
 
     async function metricasMes(mes) {
       const { ini, fim } = rangeMes(mes)
@@ -467,7 +475,7 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
 
       // Itens (serviço x produto)
       const { data: itens } = await supabaseAdmin.from('itens_comanda')
-        .select('tipo, valor_unit, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
+        .select('tipo, descricao, valor_unit, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
       for (const i of (itens||[])) {
         const c = i.comandas
         if (!c || c.status !== 'finalizada') continue
@@ -476,8 +484,13 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
         const q = parseInt(i.quantidade) || 1
         const v = (parseFloat(i.valor_unit)||0) * q
         if (i.tipo === 'produto') {
-          if (c.colaborador_id){ const x=eC(c.colaborador_id); x.valor_prod+=v; x.prod_qtd+=q }
-          if (c.unidade_id)    { const y=eU(c.unidade_id);     y.valor_prod+=v; y.prod_qtd+=q }
+          const barb = ehProdutoBarbearia(i.descricao)
+          const add = (x) => {
+            x.valor_prod+=v; x.prod_qtd+=q
+            if (barb){ x.prod_barb_valor+=v; x.prod_barb_qtd+=q } else { x.prod_bar_valor+=v; x.prod_bar_qtd+=q }
+          }
+          if (c.colaborador_id) add(eC(c.colaborador_id))
+          if (c.unidade_id)     add(eU(c.unidade_id))
         } else {
           if (c.colaborador_id) eC(c.colaborador_id).valor_serv += v
           if (c.unidade_id)     eU(c.unidade_id).valor_serv += v
@@ -494,15 +507,20 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
 
       // AppBarber PRODUTOS (espelho das comandas) → produto + quantidade
       let qabp = supabaseAdmin.from('agenda_appbarber_produtos')
-        .select('valor_unit, quantidade, colaborador_id, unidade_id, data')
+        .select('descricao, valor_unit, quantidade, colaborador_id, unidade_id, data')
         .gte('data', ini).lt('data', fim)
       if (uidFiltro) qabp = qabp.eq('unidade_id', uidFiltro)
       const { data: abProd } = await qabp
       for (const p of (abProd||[])) {
         const q = parseInt(p.quantidade) || 1
         const v = (parseFloat(p.valor_unit)||0) * q
-        if (p.colaborador_id){ const x=eC(p.colaborador_id); x.valor_prod+=v; x.prod_qtd+=q }
-        if (p.unidade_id)    { const y=eU(p.unidade_id);     y.valor_prod+=v; y.prod_qtd+=q }
+        const barb = ehProdutoBarbearia(p.descricao)
+        const add = (x) => {
+          x.valor_prod+=v; x.prod_qtd+=q
+          if (barb){ x.prod_barb_valor+=v; x.prod_barb_qtd+=q } else { x.prod_bar_valor+=v; x.prod_bar_qtd+=q }
+        }
+        if (p.colaborador_id) add(eC(p.colaborador_id))
+        if (p.unidade_id)     add(eU(p.unidade_id))
       }
 
       return { porColab, porUni }
@@ -514,6 +532,8 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
     const finaliza = (m) => ({
       atend: m.atend, prod_qtd: m.prod_qtd,
       valor_serv: m.valor_serv, valor_prod: m.valor_prod,
+      prod_barb_qtd: m.prod_barb_qtd, prod_barb_valor: m.prod_barb_valor,
+      prod_bar_qtd: m.prod_bar_qtd, prod_bar_valor: m.prod_bar_valor,
       geral: m.valor_serv + m.valor_prod,
       ticket: m.atend > 0 ? m.valor_serv / m.atend : 0
     })
@@ -544,8 +564,14 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
       .sort((a,b) => b.m2.geral - a.m2.geral)
 
     const somar = (lista, chave) => {
-      const t = { atend:0, prod_qtd:0, valor_serv:0, valor_prod:0, geral:0 }
-      lista.forEach(r => { t.atend+=r[chave].atend; t.prod_qtd+=r[chave].prod_qtd; t.valor_serv+=r[chave].valor_serv; t.valor_prod+=r[chave].valor_prod; t.geral+=r[chave].geral })
+      const t = { atend:0, prod_qtd:0, valor_serv:0, valor_prod:0, geral:0,
+        prod_barb_qtd:0, prod_barb_valor:0, prod_bar_qtd:0, prod_bar_valor:0 }
+      lista.forEach(r => {
+        t.atend+=r[chave].atend; t.prod_qtd+=r[chave].prod_qtd
+        t.valor_serv+=r[chave].valor_serv; t.valor_prod+=r[chave].valor_prod; t.geral+=r[chave].geral
+        t.prod_barb_qtd+=r[chave].prod_barb_qtd; t.prod_barb_valor+=r[chave].prod_barb_valor
+        t.prod_bar_qtd+=r[chave].prod_bar_qtd; t.prod_bar_valor+=r[chave].prod_bar_valor
+      })
       t.ticket = t.atend > 0 ? t.valor_serv / t.atend : 0
       return t
     }
