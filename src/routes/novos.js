@@ -495,7 +495,8 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
           agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
           colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
           status: 'finalizada', forma_pgto: forma_pgto || 'dinheiro',
-          subtotal, desconto, total, finalizada_em: new Date().toISOString(),
+          subtotal, desconto, total,
+          aberta_em: new Date().toISOString(), finalizada_em: new Date().toISOString(),
           observacao: 'Finalização de atendimento', criado_por: req.usuario.id
         }).select().single()
         if (cm) {
