@@ -492,18 +492,22 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
     const subtotal = lista.reduce((s, it) => s + (parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0) * (parseInt(it.quantidade) || 1), 0)
     const total = Math.max(0, subtotal - parseFloat(desconto || 0))
 
-    // 1) conclui o agendamento — GUARDA ATÔMICA contra duplo-clique.
+    // 1) conclui o agendamento (idempotente — NÃO dá erro se já estava concluído)
     //    (a forma de pagamento é guardada na COMANDA, não no agendamento)
-    const { data: flip, error: eflip } = await supabaseAdmin.from('agendamentos')
+    const { error: eflip } = await supabaseAdmin.from('agendamentos')
       .update({ status: 'concluido', valor: total })
-      .eq('id', ag.id).neq('status', 'concluido').select('id')
+      .eq('id', ag.id)
     if (eflip) throw eflip
-    if (!flip || !flip.length) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
 
-    // 2) grava o detalhe numa comanda ligada ao agendamento (best-effort)
+    // 2) grava o detalhe numa comanda ligada ao agendamento (best-effort).
+    //    Só cria se ainda NÃO existe comanda pra esse agendamento (não duplica).
     let comanda_id = null
     try {
-      if (lista.length) {
+      const { data: jaTemComanda } = await supabaseAdmin.from('comandas')
+        .select('id').eq('agendamento_id', ag.id).limit(1)
+      if (jaTemComanda && jaTemComanda.length) {
+        comanda_id = jaTemComanda[0].id
+      } else if (lista.length) {
         const { data: cm } = await supabaseAdmin.from('comandas').insert({
           agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
           colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
