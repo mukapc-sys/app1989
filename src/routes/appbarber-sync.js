@@ -119,7 +119,9 @@ async function processarAgendamentos(unidadeId, bruto) {
 
   for (const raw of bruto) {
     const m = mapearAgendamento(raw, { unidade_id: unidadeId })
-    if (m.tipo === 'agendamento') agendamentos++; else bloqueios++
+    // Não importa BLOQUEIOS do AppBarber — só agendamentos de verdade (com cliente).
+    // (bloqueio no AppBarber serve só pra tampar o horário lá; aqui a marcação real já existe)
+    if (m.tipo === 'agendamento') { agendamentos++ } else { bloqueios++; continue }
 
     const colaborador_id = profMap[String(m.profissional_appbarber_id)] || null
     const servico_id = servMap[String(m.servico_codigo)] || null
