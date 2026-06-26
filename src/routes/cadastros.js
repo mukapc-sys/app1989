@@ -536,7 +536,7 @@ router.post('/planos', autenticar, exigirPerfil('proprietario'), async (req, res
   }
 })
 
-router.get('/assinaturas', autenticar, ADMIN, async (req, res) => {
+router.get('/assinaturas', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('assinaturas')
@@ -550,11 +550,17 @@ router.get('/assinaturas', autenticar, ADMIN, async (req, res) => {
 })
 
 // PATCH /assinaturas/:id — edita campos da assinatura (plano, status, datas, titular)
-router.patch('/assinaturas/:id', autenticar, ADMIN, async (req, res) => {
+router.patch('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
-    const permitidos = ['plano_id','status','data_inicio','data_renovacao','vendedor_id','forma_pgto']
+    // Caixa só pode vincular o barbeiro titular; gerente/proprietário editam tudo
+    const permitidos = req.usuario.perfil === 'caixa'
+      ? ['vendedor_id']
+      : ['plano_id','status','data_inicio','data_renovacao','vendedor_id','forma_pgto']
     const campos = {}
     for (const k of permitidos) if (k in req.body) campos[k] = (req.body[k] === '' ? null : req.body[k])
+    if (Object.keys(campos).length === 0) {
+      return res.status(400).json({ erro: 'Nada para atualizar' })
+    }
     campos.atualizado_em = new Date().toISOString()
     const { data, error } = await supabaseAdmin
       .from('assinaturas').update(campos).eq('id', req.params.id).select().single()
