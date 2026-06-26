@@ -17,6 +17,25 @@ function normalizarForma(f) {
   return 'dinheiro'
 }
 
+// Pagamento dividido.
+// Monta [{forma,valor}] só quando há 2+ formas com valor>0 e a soma bate com o
+// total (tolerância de 5 centavos). Caso contrário devolve null = forma única.
+function montarPagamentos(pagamentos, totalEsperado) {
+  if (!Array.isArray(pagamentos)) return null
+  const linhas = pagamentos
+    .map(p => ({ forma: normalizarForma(p && p.forma), valor: Math.round((Number(p && p.valor) || 0) * 100) / 100 }))
+    .filter(p => p.valor > 0)
+  if (linhas.length < 2) return null
+  const soma = Math.round(linhas.reduce((s, p) => s + p.valor, 0) * 100) / 100
+  if (Math.abs(soma - Number(totalEsperado || 0)) > 0.05) return null
+  return linhas
+}
+// forma "principal" (a de maior valor) — usada na coluna forma_pgto por compatibilidade
+function formaPrincipalDe(pags, fallback) {
+  if (!pags || !pags.length) return normalizarForma(fallback)
+  return pags.reduce((a, b) => (b.valor > a.valor ? b : a)).forma
+}
+
 // dd/mm/aaaa de hoje (fuso de São Paulo)
 function diaDeHojeBR() {
   const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
@@ -360,9 +379,11 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
         const { data: itensAb } = await supabaseAdmin
           .from('itens_comanda').select('valor_unit, quantidade').eq('comanda_id', cmdAberta.id)
         const sub = (itensAb || []).reduce((s, i) => s + Number(i.valor_unit || 0) * (parseInt(i.quantidade) || 1), 0)
+        const pagsAb = montarPagamentos(req.body && req.body.pagamentos, sub)
         const { data: cmF, error: eF } = await supabaseAdmin.from('comandas').update({
           status:         'finalizada',
-          forma_pgto:     normalizarForma(forma_pgto),
+          forma_pgto:     formaPrincipalDe(pagsAb, forma_pgto),
+          pagamentos:     pagsAb,
           agendamento_id: ag.id,
           subtotal:       sub,
           desconto:       0,
@@ -381,7 +402,8 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
         colaborador_id: ab.colaborador_id,
         unidade_id:     ab.unidade_id,
         status:         'finalizada',
-        forma_pgto:     normalizarForma(forma_pgto),
+        forma_pgto:     formaPrincipalDe(montarPagamentos(req.body && req.body.pagamentos, valorFinal), forma_pgto),
+        pagamentos:     montarPagamentos(req.body && req.body.pagamentos, valorFinal),
         subtotal:       valorFinal,
         desconto:       0,
         total:          valorFinal,
