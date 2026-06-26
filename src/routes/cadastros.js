@@ -304,6 +304,16 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
   }
 })
 
+// GET /clientes-assinantes-ids — ids dos clientes assinantes (p/ a coroa na agenda)
+router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const { data } = await supabaseAdmin.from('assinaturas')
+      .select('cliente_id').in('status', ['ativa','vencida','suspensa'])
+    const ids = Array.from(new Set((data || []).map(a => a.cliente_id).filter(Boolean)))
+    return res.json(ids)
+  } catch (e) { return res.json([]) }
+})
+
 // ============ SERVIÇOS ============
 
 router.get('/servicos', autenticar, async (req, res) => {
