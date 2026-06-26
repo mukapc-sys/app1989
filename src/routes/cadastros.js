@@ -458,12 +458,39 @@ router.get('/assinaturas', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('assinaturas')
-      .select('*, clientes(nome, whatsapp), planos(nome, valor_mensal)')
+      .select('*, clientes(id, nome, whatsapp, email, unidade_pref), planos(id, nome, valor_mensal), colaboradores!vendedor_id(id, nome)')
       .order('data_renovacao')
     if (error) throw error
     return res.json(data)
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao buscar assinaturas' })
+  }
+})
+
+// PATCH /assinaturas/:id — edita campos da assinatura (plano, status, datas, titular)
+router.patch('/assinaturas/:id', autenticar, ADMIN, async (req, res) => {
+  try {
+    const permitidos = ['plano_id','status','data_inicio','data_renovacao','vendedor_id','forma_pgto']
+    const campos = {}
+    for (const k of permitidos) if (k in req.body) campos[k] = (req.body[k] === '' ? null : req.body[k])
+    campos.atualizado_em = new Date().toISOString()
+    const { data, error } = await supabaseAdmin
+      .from('assinaturas').update(campos).eq('id', req.params.id).select().single()
+    if (error) throw error
+    return res.json(data)
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao atualizar assinatura' })
+  }
+})
+
+// DELETE /assinaturas/:id — remove uma assinatura
+router.delete('/assinaturas/:id', autenticar, ADMIN, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin.from('assinaturas').delete().eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao remover assinatura' })
   }
 })
 
