@@ -240,6 +240,70 @@ router.put('/clientes/:id', autenticar, async (req, res) => {
   }
 })
 
+// GET /clientes/:id/situacao-plano — situação completa p/ a comanda (coroa, zerar, renovar)
+router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const cliente_id = req.params.id
+    // assinatura mais recente do cliente (qualquer status)
+    const { data: assins } = await supabaseAdmin.from('assinaturas')
+      .select('*, planos(id,nome,valor_mensal,visitas_semana,fichas_bar_mes)')
+      .eq('cliente_id', cliente_id)
+      .order('data_renovacao', { ascending: false }).limit(1)
+    if (!assins || !assins.length) return res.json({ assinante: false })
+    const a = assins[0]
+    const plano = a.planos || {}
+
+    // serviços cobertos pelo plano
+    const { data: ps } = await supabaseAdmin.from('plano_servicos')
+      .select('servico_id, servicos(nome)').eq('plano_id', plano.id)
+    const servicos_cobertos = (ps || []).map(x => x.servico_id)
+    const servicos_nomes = (ps || []).map(x => (x.servicos && x.servicos.nome) || '').filter(Boolean)
+
+    // limites da semana (segunda 00:00 → próxima segunda) em horário de São Paulo (-03:00)
+    const sp = new Date(Date.now() - 3 * 3600 * 1000)
+    const dow = sp.getUTCDay()                       // 0=dom .. 6=sáb
+    const diffMon = (dow === 0 ? 6 : dow - 1)
+    const monMid = Date.UTC(sp.getUTCFullYear(), sp.getUTCMonth(), sp.getUTCDate() - diffMon, 0, 0, 0)
+    const ini = new Date(monMid + 3 * 3600 * 1000).toISOString()
+    const fim = new Date(monMid + 3 * 3600 * 1000 + 7 * 24 * 3600 * 1000).toISOString()
+
+    // visitas do plano já usadas nesta semana (itens marcados como 'plano')
+    let visitas_usadas = 0
+    try {
+      const { data: usados } = await supabaseAdmin.from('itens_comanda')
+        .select('id, comandas!inner(cliente_id,status,finalizada_em)')
+        .eq('comandas.cliente_id', cliente_id)
+        .eq('comandas.status', 'finalizada')
+        .gte('comandas.finalizada_em', ini).lt('comandas.finalizada_em', fim)
+        .ilike('tipo', '%plano%')
+      visitas_usadas = (usados || []).length
+    } catch (e) { visitas_usadas = 0 }
+
+    const visitas_semana = plano.visitas_semana || 1
+    const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+    const venceu = a.data_renovacao && String(a.data_renovacao).slice(0, 10) < hoje
+    const em_dia = (a.status === 'ativa') && !venceu
+    const pode_zerar = em_dia && (visitas_usadas < visitas_semana)
+
+    return res.json({
+      assinante: true,
+      assinatura_id: a.id,
+      situacao: em_dia ? 'em_dia' : 'atrasado',
+      status_assinatura: a.status,
+      plano: { id: plano.id, nome: plano.nome, valor_mensal: plano.valor_mensal },
+      servicos_cobertos,
+      servicos_nomes,
+      visitas_semana,
+      visitas_usadas,
+      pode_zerar,
+      data_renovacao: a.data_renovacao || null
+    })
+  } catch (e) {
+    console.error('[situacao-plano]', e.message)
+    return res.status(500).json({ erro: 'Erro ao carregar situação do plano' })
+  }
+})
+
 // ============ SERVIÇOS ============
 
 router.get('/servicos', autenticar, async (req, res) => {
