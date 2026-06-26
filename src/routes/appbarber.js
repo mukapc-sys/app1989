@@ -347,6 +347,34 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
     //  o dinheiro já foi recebido lá, então não criamos comanda)
     let comandaId = null
     if (ondeFinal === 'novo') {
+      // Se já existe COMANDA ABERTA pra esse importado (consumo acumulado),
+      // finaliza ELA em vez de criar outra — evita duplicata.
+      let cmdAberta = null
+      if (ab.comanda_id) {
+        const { data: cmd } = await supabaseAdmin.from('comandas').select('*').eq('id', ab.comanda_id).maybeSingle()
+        if (cmd && cmd.status === 'aberta') cmdAberta = cmd
+      }
+
+      if (cmdAberta) {
+        // total = soma do que já está salvo na comanda (serviço + bar + produtos)
+        const { data: itensAb } = await supabaseAdmin
+          .from('itens_comanda').select('valor_unit, quantidade').eq('comanda_id', cmdAberta.id)
+        const sub = (itensAb || []).reduce((s, i) => s + Number(i.valor_unit || 0) * (parseInt(i.quantidade) || 1), 0)
+        const { data: cmF, error: eF } = await supabaseAdmin.from('comandas').update({
+          status:         'finalizada',
+          forma_pgto:     normalizarForma(forma_pgto),
+          agendamento_id: ag.id,
+          subtotal:       sub,
+          desconto:       0,
+          total:          sub,
+          finalizada_em:  new Date().toISOString(),
+        }).eq('id', cmdAberta.id).select().single()
+        if (eF) throw eF
+        comandaId = cmF.id
+        // mantém o valor do agendamento igual ao total real (serviço + consumo)
+        await supabaseAdmin.from('agendamentos').update({ valor: sub }).eq('id', ag.id)
+        // itens já estão salvos na comanda aberta — não re-insere
+      } else {
       const { data: cm, error: e2 } = await supabaseAdmin.from('comandas').insert({
         agendamento_id: ag.id,
         cliente_id:     ab.cliente_id,
@@ -401,6 +429,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       } catch (eItens) {
         console.error('[appbarber/finalizar itens]', eItens.message)
       }
+      } // fim do else: criar comanda nova quando NÃO há comanda aberta
     }
 
     // ===== liga os criados ao importado (o 'finalizado' já foi marcado no claim) =====
@@ -422,6 +451,69 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
   } catch (err) {
     console.error('[appbarber/finalizar]', err.message)
     return res.status(500).json({ erro: 'Erro ao finalizar', detalhe: err.message })
+  }
+})
+
+// ============================================================
+// POST /appbarber/abrir/:id   — abre (ou devolve) a COMANDA ABERTA
+//   de um atendimento importado, já com o serviço agendado dentro.
+//   NÃO finaliza, NÃO cria agendamento. Serve pra ir acumulando
+//   consumo (bar/produto) durante a visita e pagar tudo no fim.
+// ============================================================
+router.post('/abrir/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
+  try {
+    const { data: ab, error: e0 } = await supabaseAdmin
+      .from('agenda_appbarber').select('*').eq('id', req.params.id).single()
+    if (e0 || !ab) return res.status(404).json({ erro: 'Atendimento importado não encontrado' })
+    if (ab.finalizado) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
+
+    // Já existe comanda ABERTA pra esse importado? Então só devolve ela.
+    if (ab.comanda_id) {
+      const { data: cmd } = await supabaseAdmin
+        .from('comandas').select('*').eq('id', ab.comanda_id).maybeSingle()
+      if (cmd && cmd.status === 'aberta') {
+        const { data: itens } = await supabaseAdmin
+          .from('itens_comanda').select('*').eq('comanda_id', cmd.id).order('id')
+        return res.json({ ok: true, comanda: cmd, itens: itens || [], reaberta: true })
+      }
+    }
+
+    const valorServico = Number(ab.valor || 0)
+
+    // Cria a comanda ABERTA (status nasce 'aberta' por padrão; sem forma_pgto ainda)
+    const { data: cm, error: e1 } = await supabaseAdmin.from('comandas').insert({
+      cliente_id:     ab.cliente_id || null,
+      colaborador_id: ab.colaborador_id,
+      unidade_id:     ab.unidade_id,
+      status:         'aberta',
+      subtotal:       valorServico,
+      desconto:       0,
+      total:          valorServico,
+      observacao:     'Importado do AppBarber',
+      criado_por:     req.usuario.id,
+    }).select().single()
+    if (e1) throw e1
+
+    // Pré-carrega o serviço agendado como item da comanda
+    await supabaseAdmin.from('itens_comanda').insert({
+      comanda_id: cm.id,
+      tipo:       'servico',
+      servico_id: ab.servico_id || null,
+      produto_id: null,
+      descricao:  ab.servico_texto || 'Serviço',
+      quantidade: 1,
+      valor_unit: valorServico,
+    })
+
+    // Liga o importado à comanda aberta (pra reabrir depois e achar a mesma)
+    await supabaseAdmin.from('agenda_appbarber').update({ comanda_id: cm.id }).eq('id', ab.id)
+
+    const { data: itens } = await supabaseAdmin
+      .from('itens_comanda').select('*').eq('comanda_id', cm.id).order('id')
+    return res.json({ ok: true, comanda: cm, itens: itens || [], reaberta: false })
+  } catch (err) {
+    console.error('[appbarber/abrir]', err.message)
+    return res.status(500).json({ erro: 'Erro ao abrir comanda', detalhe: err.message })
   }
 })
 
