@@ -304,14 +304,15 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
   }
 })
 
-// GET /clientes-assinantes-ids — ids dos clientes assinantes (p/ a coroa na agenda)
+// GET /clientes-assinantes-ids — ids E nomes dos clientes assinantes (p/ a coroa na agenda)
 router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
     const { data } = await supabaseAdmin.from('assinaturas')
-      .select('cliente_id').in('status', ['ativa','vencida','suspensa'])
+      .select('cliente_id, clientes(nome)').in('status', ['ativa','vencida','suspensa'])
     const ids = Array.from(new Set((data || []).map(a => a.cliente_id).filter(Boolean)))
-    return res.json(ids)
-  } catch (e) { return res.json([]) }
+    const nomes = Array.from(new Set((data || []).map(a => a.clientes && a.clientes.nome).filter(Boolean)))
+    return res.json({ ids, nomes })
+  } catch (e) { return res.json({ ids: [], nomes: [] }) }
 })
 
 // ============ SERVIÇOS ============
