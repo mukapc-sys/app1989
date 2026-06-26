@@ -385,6 +385,18 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
             }
           })
           await supabaseAdmin.from('itens_comanda').insert(linhas)
+        } else {
+          // Sem itens detalhados -> cria 1 item de SERVIÇO com o valor do atendimento,
+          // pra entrar na comissão e na categorização de serviço (senão some do relatório).
+          await supabaseAdmin.from('itens_comanda').insert({
+            comanda_id: comandaId,
+            tipo:       'servico',
+            servico_id: ab.servico_id || null,
+            produto_id: null,
+            descricao:  'Atendimento (importado do AppBarber)',
+            quantidade: 1,
+            valor_unit: valorFinal,
+          })
         }
       } catch (eItens) {
         console.error('[appbarber/finalizar itens]', eItens.message)
