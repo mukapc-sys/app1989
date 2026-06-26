@@ -50,7 +50,7 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
   const itens = await fetchAll(() => {
     let q = supabaseAdmin
       .from('itens_comanda')
-      .select('tipo, quantidade, valor_unit, comandas!inner(colaborador_id, unidade_id, status, finalizada_em)')
+      .select('tipo, produto_id, quantidade, valor_unit, comandas!inner(colaborador_id, unidade_id, status, finalizada_em)')
       .eq('comandas.status', 'finalizada')
       .gte('comandas.finalizada_em', ini)
       .lt('comandas.finalizada_em', fim)
@@ -58,11 +58,26 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
     return q
   })
 
+  // Produtos de categorias que NÃO pagam comissão (ex.: Bar): contam só no
+  // faturamento da unidade, nunca na comissão do barbeiro.
+  let barProdIds = new Set()
+  {
+    const { data: barCats } = await supabaseAdmin
+      .from('categorias_produto').select('id').eq('paga_comissao', false)
+    const catIds = (barCats || []).map(c => c.id)
+    if (catIds.length) {
+      const { data: bp } = await supabaseAdmin
+        .from('produtos').select('id').in('categoria_id', catIds)
+      barProdIds = new Set((bp || []).map(p => p.id))
+    }
+  }
+
   // Agrega por barbeiro
   const acc = {}
   for (const it of (itens || [])) {
     const cid = it.comandas && it.comandas.colaborador_id
     if (!cid) continue
+    if (it.produto_id && barProdIds.has(it.produto_id)) continue // Bar: não paga comissão
     if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0 }
     const qtd = parseInt(it.quantidade) || 1
     const valor = (parseFloat(it.valor_unit) || 0) * qtd
