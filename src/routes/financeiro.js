@@ -459,6 +459,24 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
     if (uidFiltro) qUni = qUni.eq('id', uidFiltro)
     const { data: unids } = await qUni
 
+    // Produtos de categorias que NÃO pagam comissão (Bar) — identifica por id e por nome.
+    const _normProd = (s) => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim()
+    let barProdIds = new Set(), barProdNomes = new Set()
+    {
+      const { data: barCats } = await supabaseAdmin
+        .from('categorias_produto').select('id').eq('paga_comissao', false)
+      const catIds = (barCats||[]).map(c=>c.id)
+      if (catIds.length) {
+        const { data: bp } = await supabaseAdmin
+          .from('produtos').select('id, nome').in('categoria_id', catIds)
+        barProdIds   = new Set((bp||[]).map(p=>p.id))
+        barProdNomes = new Set((bp||[]).map(p=>_normProd(p.nome)))
+      }
+    }
+    // true = produto de barbearia (paga comissão); false = bar (não paga)
+    const ehBarbearia = (produto_id, descricao) =>
+      !((produto_id && barProdIds.has(produto_id)) || barProdNomes.has(_normProd(descricao)))
+
     const vazio = () => ({ atend:0, prod_qtd:0, valor_serv:0, valor_prod:0,
       prod_barb_qtd:0, prod_barb_valor:0, prod_bar_qtd:0, prod_bar_valor:0 })
 
@@ -481,7 +499,7 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
 
       // Itens (serviço x produto)
       const { data: itens } = await supabaseAdmin.from('itens_comanda')
-        .select('tipo, descricao, valor_unit, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
+        .select('tipo, produto_id, descricao, valor_unit, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
       for (const i of (itens||[])) {
         const c = i.comandas
         if (!c || c.status !== 'finalizada') continue
@@ -490,7 +508,7 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
         const q = parseInt(i.quantidade) || 1
         const v = (parseFloat(i.valor_unit)||0) * q
         if (i.tipo === 'produto') {
-          const barb = ehProdutoBarbearia(i.descricao)
+          const barb = ehBarbearia(i.produto_id, i.descricao)
           const add = (x) => {
             x.valor_prod+=v; x.prod_qtd+=q
             if (barb){ x.prod_barb_valor+=v; x.prod_barb_qtd+=q } else { x.prod_bar_valor+=v; x.prod_bar_qtd+=q }
@@ -520,7 +538,7 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
       for (const p of (abProd||[])) {
         const q = parseInt(p.quantidade) || 1
         const v = (parseFloat(p.valor_unit)||0) * q
-        const barb = ehProdutoBarbearia(p.descricao)
+        const barb = ehBarbearia(null, p.descricao)
         const add = (x) => {
           x.valor_prod+=v; x.prod_qtd+=q
           if (barb){ x.prod_barb_valor+=v; x.prod_barb_qtd+=q } else { x.prod_bar_valor+=v; x.prod_bar_qtd+=q }
