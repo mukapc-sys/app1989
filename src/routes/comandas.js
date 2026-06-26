@@ -14,6 +14,23 @@ function normalizarForma(f) {
   return 'dinheiro'
 }
 
+// Pagamento dividido: [{forma,valor}] só com 2+ formas (valor>0) cuja soma bate
+// com o total (±5 centavos). Senão devolve null = forma única (comportamento atual).
+function montarPagamentos(pagamentos, totalEsperado) {
+  if (!Array.isArray(pagamentos)) return null
+  const linhas = pagamentos
+    .map(p => ({ forma: normalizarForma(p && p.forma), valor: Math.round((Number(p && p.valor) || 0) * 100) / 100 }))
+    .filter(p => p.valor > 0)
+  if (linhas.length < 2) return null
+  const soma = Math.round(linhas.reduce((s, p) => s + p.valor, 0) * 100) / 100
+  if (Math.abs(soma - Number(totalEsperado || 0)) > 0.05) return null
+  return linhas
+}
+function formaPrincipalDe(pags, fallback) {
+  if (!pags || !pags.length) return normalizarForma(fallback)
+  return pags.reduce((a, b) => (b.valor > a.valor ? b : a)).forma
+}
+
 // GET /comandas?unidade_id=xxx&data=2025-05-15&status=aberta
 router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador','caixa'), async (req, res) => {
   try {
@@ -237,9 +254,10 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     }
 
     const total = Math.max(0, subtotal - parseFloat(desconto || 0))
+    const pagsAvulsa = montarPagamentos(req.body.pagamentos, total)
     const { data: fin, error: errF } = await supabaseAdmin
       .from('comandas')
-      .update({ status: 'finalizada', forma_pgto: normalizarForma(forma_pagamento), desconto, subtotal, total, finalizada_em: new Date().toISOString() })
+      .update({ status: 'finalizada', forma_pgto: formaPrincipalDe(pagsAvulsa, forma_pagamento), pagamentos: pagsAvulsa, desconto, subtotal, total, finalizada_em: new Date().toISOString() })
       .eq('id', comanda.id).select().single()
     if (errF) throw errF
 
@@ -311,6 +329,11 @@ router.patch('/:id/itens/:item_id', autenticar, async (req, res) => {
       if (isNaN(v) || v < 0) return res.status(400).json({ erro: 'Valor inválido' })
       patch.valor_unit = v
     }
+    if (req.body.quantidade !== undefined && req.body.quantidade !== null) {
+      const q = parseInt(req.body.quantidade)
+      if (isNaN(q) || q < 1) return res.status(400).json({ erro: 'Quantidade inválida' })
+      patch.quantidade = q
+    }
     if (typeof req.body.descricao === 'string' && req.body.descricao.trim()) {
       patch.descricao = req.body.descricao.trim()
     }
@@ -343,10 +366,11 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
 
     const subtotal = (itens || []).reduce((s, i) => s + (parseFloat(i.valor_unit)||0) * (parseInt(i.quantidade)||1), 0)
     const total    = Math.max(0, subtotal - parseFloat(desconto))
+    const pagsFin  = montarPagamentos(req.body.pagamentos, total)
 
     const { data, error } = await supabaseAdmin
       .from('comandas')
-      .update({ status: 'finalizada', forma_pgto: normalizarForma(forma_pgto), desconto, subtotal, total, finalizada_em: new Date().toISOString() })
+      .update({ status: 'finalizada', forma_pgto: formaPrincipalDe(pagsFin, forma_pgto), pagamentos: pagsFin, desconto, subtotal, total, finalizada_em: new Date().toISOString() })
       .eq('id', id).select().single()
 
     if (error) throw error
