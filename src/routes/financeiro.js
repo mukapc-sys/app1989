@@ -17,7 +17,7 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
 
     let query = supabaseAdmin
       .from('comandas')
-      .select('total, forma_pgto, colaborador_id')
+      .select('total, forma_pgto, pagamentos, colaborador_id')
       .eq('status', 'finalizada')
       .gte('finalizada_em', ini).lte('finalizada_em', fim)
 
@@ -27,10 +27,18 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
     if (error) throw error
 
     const faturamento   = somar(comandas, 'total')
-    const total_credito = somar(comandas.filter(c => c.forma_pgto === 'credito'), 'total')
-    const total_debito  = somar(comandas.filter(c => c.forma_pgto === 'debito'),  'total')
-    const total_pix     = somar(comandas.filter(c => c.forma_pgto === 'pix'),     'total')
-    const total_dinheiro= somar(comandas.filter(c => c.forma_pgto === 'dinheiro'),'total')
+    // soma por forma: se a comanda foi dividida (pagamentos), distribui cada valor
+    // na sua forma; senão, joga o total inteiro na forma_pgto (comportamento de sempre).
+    const porForma = (forma) => comandas.reduce((s, c) => {
+      if (Array.isArray(c.pagamentos) && c.pagamentos.length) {
+        return s + c.pagamentos.reduce((ss, p) => ss + (p && p.forma === forma ? (Number(p.valor) || 0) : 0), 0)
+      }
+      return s + (c.forma_pgto === forma ? (Number(c.total) || 0) : 0)
+    }, 0)
+    const total_credito = porForma('credito')
+    const total_debito  = porForma('debito')
+    const total_pix     = porForma('pix')
+    const total_dinheiro= porForma('dinheiro')
 
     // Comissão por FAIXA (serviço progressivo + produto por unidade) — mesmo motor do Caixa/Dashboard
     let comissoes = 0
@@ -623,7 +631,7 @@ function rangeMesDre(mes) {
 
 // Entrada (por forma) e comissão calculadas automaticamente do sistema
 async function autoDre(ini, fim, uid) {
-  let qc = supabaseAdmin.from('comandas').select('total, forma_pgto, colaborador_id')
+  let qc = supabaseAdmin.from('comandas').select('total, forma_pgto, pagamentos, colaborador_id')
     .eq('status','finalizada').gte('finalizada_em', ini).lt('finalizada_em', fim)
   if (uid) qc = qc.eq('unidade_id', uid)
   const { data: cmds } = await qc
@@ -634,9 +642,16 @@ async function autoDre(ini, fim, uid) {
   const entrada = { dinheiro:0, debito:0, credito:0, pix:0, appbarber:0, outros:0 }
   let comissao = 0
   for (const c of (cmds||[])) {
-    const f = ['dinheiro','debito','credito','pix'].includes(c.forma_pgto) ? c.forma_pgto : 'outros'
     const v = parseFloat(c.total)||0
-    entrada[f] += v
+    if (Array.isArray(c.pagamentos) && c.pagamentos.length) {
+      for (const p of c.pagamentos) {
+        const pf = ['dinheiro','debito','credito','pix'].includes(p && p.forma) ? p.forma : 'outros'
+        entrada[pf] += (parseFloat(p && p.valor) || 0)
+      }
+    } else {
+      const f = ['dinheiro','debito','credito','pix'].includes(c.forma_pgto) ? c.forma_pgto : 'outros'
+      entrada[f] += v
+    }
     comissao += v * (pctMap[c.colaborador_id] || 0.4)
   }
   const ab = await appbarberRealizados(ini, fim, uid)
