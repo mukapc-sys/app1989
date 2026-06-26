@@ -356,6 +356,12 @@ router.get('/produtos', autenticar, SEM_ACESSO, async (req, res) => {
 
 // Helpers
 function getPeriodo(periodo) {
+  // Dia específico: "dia:AAAA-MM-DD" -> aquele dia inteiro (horário de São Paulo)
+  const mDia = String(periodo || '').match(/^dia:(\d{4}-\d{2}-\d{2})$/)
+  if (mDia) {
+    const d = mDia[1]
+    return { ini: d + 'T00:00:00-03:00', fim: d + 'T23:59:59.999-03:00' }
+  }
   const agora = new Date()
   let ini, fim
 
