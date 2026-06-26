@@ -155,5 +155,5 @@ router.post('/esqueci-senha', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao processar solicitação' })
   }
 })
-
+ 
 module.exports = router
