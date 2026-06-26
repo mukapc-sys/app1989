@@ -74,37 +74,86 @@ async function carregarDeParas(unidadeId) {
   return { profMap, servMap }
 }
 
-// Acha um cliente pelo celular (normalizado) ou cria um novo (origem=appbarber).
-// cacheTel evita criar 2x o mesmo cliente no mesmo sync.
-// Retorna { cliente_id, criado } — 'criado' = true se um novo cliente foi cadastrado.
+// Normaliza nome p/ comparação (minúsculo, sem acento, espaços únicos).
+function normalizarNome(s) {
+  return (s || '').toString().trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ')
+}
+
+// Garante que um cliente já existente receba o código AppBarber se ainda não tiver.
+async function garantirCodigo(clienteId, codigo) {
+  if (!codigo || !clienteId) return
+  try {
+    await supabaseAdmin.from('clientes')
+      .update({ appbarber_codigo: codigo }).eq('id', clienteId).is('appbarber_codigo', null)
+  } catch (e) { /* silencioso */ }
+}
+
+// Acha um cliente existente (código AppBarber > telefone > nome+unidade) ou cria um novo.
+// Evita duplicar: só cria quando NENHUMA das chaves casou.
+// cacheTel evita repetir buscas no mesmo sync.
 async function resolverCliente(m, unidadeId, cacheTel) {
   if (m.tipo !== 'agendamento') return { cliente_id: null, criado: false }
   const tel = normalizarTelefone(m.cliente_celular)
+  const tel11 = tel && tel.length >= 11 ? tel.slice(-11) : null
+  const codigo = m.cliente_codigo || null
+  const nomeNorm = normalizarNome(m.cliente_nome)
 
-  if (tel) {
-    if (cacheTel[tel]) return { cliente_id: cacheTel[tel], criado: false }
-    const { data: achados } = await supabaseAdmin
-      .from('clientes').select('id').ilike('whatsapp', `%${tel}%`).limit(1)
-    if (achados && achados.length) {
-      cacheTel[tel] = achados[0].id
-      return { cliente_id: achados[0].id, criado: false }
+  // 1) por CÓDIGO do AppBarber (chave mais confiável)
+  if (codigo) {
+    const ck = 'c:' + codigo
+    if (cacheTel[ck]) return { cliente_id: cacheTel[ck], criado: false }
+    const { data: ach } = await supabaseAdmin
+      .from('clientes').select('id').eq('appbarber_codigo', codigo).limit(1)
+    if (ach && ach.length) { cacheTel[ck] = ach[0].id; return { cliente_id: ach[0].id, criado: false } }
+  }
+
+  // 2) por TELEFONE (últimos 11 dígitos)
+  if (tel11) {
+    const tk = 't:' + tel11
+    if (cacheTel[tk]) { await garantirCodigo(cacheTel[tk], codigo); return { cliente_id: cacheTel[tk], criado: false } }
+    const { data: ach } = await supabaseAdmin
+      .from('clientes').select('id').ilike('whatsapp', `%${tel11}%`).limit(1)
+    if (ach && ach.length) {
+      cacheTel[tk] = ach[0].id
+      await garantirCodigo(ach[0].id, codigo)
+      return { cliente_id: ach[0].id, criado: false }
+    }
+  }
+
+  // 3) sem telefone: por NOME exato na MESMA unidade (evita fantasma)
+  if (nomeNorm) {
+    const nk = 'n:' + unidadeId + ':' + nomeNorm
+    if (cacheTel[nk]) { await garantirCodigo(cacheTel[nk], codigo); return { cliente_id: cacheTel[nk], criado: false } }
+    const { data: ach } = await supabaseAdmin
+      .from('clientes').select('id, nome').eq('unidade_pref', unidadeId).ilike('nome', m.cliente_nome).limit(5)
+    const alvo = (ach || []).find(c => normalizarNome(c.nome) === nomeNorm)
+    if (alvo) {
+      cacheTel[nk] = alvo.id
+      if (tel11) cacheTel['t:' + tel11] = alvo.id
+      await garantirCodigo(alvo.id, codigo)
+      return { cliente_id: alvo.id, criado: false }
     }
   }
 
   if (!m.cliente_nome) return { cliente_id: null, criado: false } // sem nome e sem match -> não cria
 
+  // 4) cria de fato (guardando código, telefone e nome)
   const { data: novo, error } = await supabaseAdmin
     .from('clientes')
     .insert({
       nome: m.cliente_nome,
       whatsapp: m.cliente_celular || null,
+      appbarber_codigo: codigo,
       origem: 'appbarber',
       unidade_pref: unidadeId,
       ativo: true,
     })
     .select('id').single()
   if (error) throw error
-  if (tel) cacheTel[tel] = novo.id
+  if (codigo) cacheTel['c:' + codigo] = novo.id
+  if (tel11) cacheTel['t:' + tel11] = novo.id
+  if (nomeNorm) cacheTel['n:' + unidadeId + ':' + nomeNorm] = novo.id
   return { cliente_id: novo.id, criado: true }
 }
 
