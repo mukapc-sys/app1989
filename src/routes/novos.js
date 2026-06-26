@@ -603,15 +603,16 @@ router.post('/agendamentos/bloquear', autenticar, async (req, res) => {
 
     const ini = new Date(data_hora_ini)
     const fim = new Date(data_hora_fim)
-    const STEP_MS = 30 * 60 * 1000
+    const STEP_MS = 15 * 60 * 1000
     if (!(fim.getTime() > ini.getTime())) return res.status(400).json({ erro: 'Período inválido' })
 
-    // O que já existe nesse intervalo (não duplica e não atropela cliente)
+    // O que já existe nesse intervalo (não duplica e não atropela cliente).
+    // Olha bem antes do início pra pegar atendimento longo que invade o período.
     const { data: existentes } = await supabaseAdmin
       .from('agendamentos')
       .select('data_hora_ini,data_hora_fim,status')
       .eq('colaborador_id', colaborador_id)
-      .gte('data_hora_ini', new Date(ini.getTime() - STEP_MS).toISOString())
+      .gte('data_hora_ini', new Date(ini.getTime() - 4 * 60 * 60 * 1000).toISOString())
       .lt('data_hora_ini', fim.toISOString())
       .not('status', 'eq', 'cancelado')
 
