@@ -45,6 +45,22 @@ function ehBloqueio(raw) {
  * @param {object} ctx  - { unidade_id, profissionais } onde profissionais é
  *                         um mapa { [Pes_Codigo]: Pes_Nome }
  */
+// O AppBarber manda o "título" como "Nome - Telefone - Serviço".
+// Estas funções extraem só o NOME limpo e, se faltar, o telefone.
+function _partesTitulo(title) {
+  return String(title || '').split(/\s+-\s+/).map(s => s.trim()).filter(Boolean)
+}
+function nomeDoTitulo(title) {
+  const p = _partesTitulo(title)
+  return p.length ? p[0] : (String(title || '').trim() || null)
+}
+function telefoneDoTitulo(title) {
+  for (const seg of _partesTitulo(title)) {
+    if (seg.replace(/\D/g, '').length >= 8) return seg
+  }
+  return null
+}
+
 function mapearAgendamento(raw, ctx = {}) {
   const profId = raw.resources != null ? String(raw.resources) : null
   const profNome = (ctx.profissionais && profId && ctx.profissionais[profId]) || null
@@ -60,8 +76,9 @@ function mapearAgendamento(raw, ctx = {}) {
     cod_status: raw.codStatus != null ? Number(raw.codStatus) : null,
 
     // quem
-    cliente_nome: bloqueio ? null : (raw.title || '').trim() || null,
-    cliente_celular: (raw.celular || '').trim() || null,
+    // quem
+    cliente_nome: bloqueio ? null : (nomeDoTitulo(raw.title) || null),
+    cliente_celular: bloqueio ? null : ((raw.celular || '').trim() || telefoneDoTitulo(raw.title) || null),
     cliente_codigo: (raw.codCliente || '') !== '' ? String(raw.codCliente) : null,
 
     // profissional
