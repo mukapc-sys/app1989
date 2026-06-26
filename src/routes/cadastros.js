@@ -158,9 +158,16 @@ router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa
     let query = supabaseAdmin
       .from('clientes')
       .select('id, nome, email, whatsapp, cpf, ativo, criado_em, colaborador_pref, unidade_pref')
-      .eq('ativo', true).order('nome').limit(100)
+      .order('nome').limit(100)
 
-    if (busca) query = query.or(`nome.ilike.%${busca}%,whatsapp.ilike.%${busca}%,cpf.ilike.%${busca}%`)
+    if (busca) {
+      // Buscando por nome/telefone/cpf -> acha TODOS (inclusive inativos),
+      // pra o operador nunca precisar recriar um cadastro que já existe.
+      query = query.or(`nome.ilike.%${busca}%,whatsapp.ilike.%${busca}%,cpf.ilike.%${busca}%`)
+    } else {
+      // Lista padrão (sem digitar nada) -> só ativos, pra não poluir.
+      query = query.eq('ativo', true)
+    }
 
     const { data, error } = await query
     if (error) throw error
