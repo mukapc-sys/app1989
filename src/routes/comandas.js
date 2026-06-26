@@ -65,6 +65,26 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
   }
 })
 
+// GET /comandas/aberta-do-agendamento/:agendamento_id
+// Recupera a comanda ABERTA de um agendamento (já com os itens salvos), se existir.
+// Base da "comanda aberta": ao clicar no agendamento, carrega o que já foi salvo.
+router.get('/aberta-do-agendamento/:agendamento_id', autenticar, async (req, res) => {
+  try {
+    const { agendamento_id } = req.params
+    const { data: rows } = await supabaseAdmin
+      .from('comandas')
+      .select('*, itens_comanda(*)')
+      .eq('agendamento_id', agendamento_id)
+      .eq('status', 'aberta')
+      .order('aberta_em', { ascending: false })
+      .limit(1)
+    const comanda = (rows && rows[0]) || null
+    return res.json({ comanda })
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao buscar comanda aberta do agendamento' })
+  }
+})
+
 // GET /comandas/:id
 router.get('/:id', autenticar, async (req, res) => {
   try {
@@ -278,6 +298,34 @@ router.delete('/:id/itens/:item_id', autenticar, async (req, res) => {
     return res.json({ mensagem: 'Item removido' })
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao remover item' })
+  }
+})
+
+// PATCH /comandas/:id/itens/:item_id — editar valor e/ou nome do item
+// (permite cobrar mais, menos ou zerar; o total da comanda recalcula sozinho)
+router.patch('/:id/itens/:item_id', autenticar, async (req, res) => {
+  try {
+    const patch = {}
+    if (req.body.valor_unit !== undefined && req.body.valor_unit !== null) {
+      const v = parseFloat(req.body.valor_unit)
+      if (isNaN(v) || v < 0) return res.status(400).json({ erro: 'Valor inválido' })
+      patch.valor_unit = v
+    }
+    if (typeof req.body.descricao === 'string' && req.body.descricao.trim()) {
+      patch.descricao = req.body.descricao.trim()
+    }
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ erro: 'Nada para atualizar' })
+    }
+    const { data, error } = await supabaseAdmin
+      .from('itens_comanda').update(patch)
+      .eq('id', req.params.item_id).eq('comanda_id', req.params.id)
+      .select()
+      .single()
+    if (error) throw error
+    return res.json(data)
+  } catch (err) {
+    return res.status(500).json({ erro: 'Erro ao atualizar item' })
   }
 })
 
