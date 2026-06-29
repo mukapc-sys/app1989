@@ -261,7 +261,7 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
         produtosVendidos.push({ produto_id, quantidade: qtd })
       }
       subtotal += parseFloat(valor_unit) * qtd
-      await supabaseAdmin.from('itens_comanda').insert({ comanda_id: comanda.id, tipo, servico_id, produto_id, descricao, quantidade: qtd, valor_unit })
+      await supabaseAdmin.from('itens_comanda').insert({ comanda_id: comanda.id, tipo, servico_id, produto_id, descricao, quantidade: qtd, valor_unit, colaborador_id: (it.colaborador_id || null) })
     }
 
     const total = Math.max(0, subtotal - parseFloat(desconto || 0))
@@ -285,7 +285,7 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
 // POST /comandas/:id/itens — adicionar serviço ou produto
 router.post('/:id/itens', autenticar, async (req, res) => {
   try {
-    const { tipo, servico_id, produto_id, quantidade = 1 } = req.body
+    const { tipo, servico_id, produto_id, quantidade = 1, colaborador_id } = req.body
     const comanda_id = req.params.id
 
     let descricao, valor_unit
@@ -306,7 +306,7 @@ router.post('/:id/itens', autenticar, async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from('itens_comanda')
-      .insert({ comanda_id, tipo, servico_id: servico_id || null, produto_id: produto_id || null, descricao, quantidade, valor_unit })
+      .insert({ comanda_id, tipo, servico_id: servico_id || null, produto_id: produto_id || null, descricao, quantidade, valor_unit, colaborador_id: colaborador_id || null })
       .select()
       .single()
 
