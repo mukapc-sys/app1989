@@ -52,13 +52,62 @@ router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
     const abFaturamento = somar(ab, 'valor')
     const abComissao = 0 // já incluído no cálculo por faixa (vira comanda com itens)
 
-    const faturamentoTotal = faturamento + abFaturamento
+    // ---- Quebra do faturamento: SERVIÇOS / PRODUTOS BARBEARIA / BAR ----
+    // produtos de Bar = categorias que NÃO pagam comissão
+    let barProdIds = new Set()
+    {
+      const { data: barCats } = await supabaseAdmin.from('categorias_produto').select('id').eq('paga_comissao', false)
+      const catIds = (barCats || []).map(c => c.id)
+      if (catIds.length) {
+        const { data: bp } = await supabaseAdmin.from('produtos').select('id').in('categoria_id', catIds)
+        barProdIds = new Set((bp || []).map(p => p.id))
+      }
+    }
+    // itens das comandas finalizadas no período
+    let qItens = supabaseAdmin
+      .from('itens_comanda')
+      .select('tipo, produto_id, quantidade, valor_unit, comandas!inner(unidade_id, status, finalizada_em)')
+      .eq('comandas.status', 'finalizada')
+      .gte('comandas.finalizada_em', ini).lte('comandas.finalizada_em', fim)
+    if (uid) qItens = qItens.eq('comandas.unidade_id', uid)
+    const { data: itensFat } = await qItens
+
+    let fatServicos = 0, fatBarbearia = 0, fatBar = 0
+    ;(itensFat || []).forEach(it => {
+      const v = (parseFloat(it.valor_unit) || 0) * (parseInt(it.quantidade) || 1)
+      const tipo = String(it.tipo || '').toLowerCase()
+      if (tipo.indexOf('produto') !== -1) {
+        if (it.produto_id && barProdIds.has(it.produto_id)) fatBar += v
+        else fatBarbearia += v
+      } else {
+        fatServicos += v   // serviço + plano (mensalidade)
+      }
+    })
+    fatServicos += abFaturamento   // serviços realizados no AppBarber
+
+    // produtos importados do AppBarber (comissao > 0 = barbearia; 0 = bar)
+    let qAbP = supabaseAdmin
+      .from('agenda_appbarber_produtos')
+      .select('quantidade, valor_unit, comissao, unidade_id, data')
+      .gte('data', ini).lte('data', fim)
+    if (uid) qAbP = qAbP.eq('unidade_id', uid)
+    const { data: abProd } = await qAbP
+    ;(abProd || []).forEach(p => {
+      const v = (parseFloat(p.valor_unit) || 0) * (parseInt(p.quantidade) || 1)
+      if ((parseFloat(p.comissao) || 0) > 0) fatBarbearia += v
+      else fatBar += v
+    })
+
+    const faturamentoTotal = fatServicos + fatBarbearia + fatBar
     const comissoesTotal   = comissoes + abComissao
     const atendimentos     = comandas.length + ab.length
 
     return res.json({
       periodo,
       faturamento:    round(faturamentoTotal),
+      fat_servicos:        round(fatServicos),
+      fat_prod_barbearia:  round(fatBarbearia),
+      fat_bar:             round(fatBar),
       comissoes:      round(comissoesTotal),
       liquido:        round(faturamentoTotal - comissoesTotal),
       total_comandas: atendimentos,
