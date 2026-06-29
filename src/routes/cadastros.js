@@ -11,7 +11,9 @@ router.get('/unidades', autenticar, async (req, res) => {
   try {
     const u = req.usuario
     let query = supabaseAdmin.from('unidades').select('*, horarios_unidade(*)').eq('ativa', true).order('nome')
-    if (u.perfil === 'colaborador' || u.perfil === 'caixa') {
+    // Caixa enxerga TODAS as unidades (pode agendar/editar em qualquer uma).
+    // Apenas o barbeiro (colaborador) fica restrito à própria unidade.
+    if (u.perfil === 'colaborador') {
       query = query.eq('id', u.unidade_id)
     }
     const { data, error } = await query
@@ -71,7 +73,9 @@ router.get('/colaboradores', autenticar, async (req, res) => {
       .select('id, nome, email, whatsapp, perfil, comissao_pct, ativo, foto_url, unidade_id, unidades(nome)')
       .eq('ativo', true).order('nome')
 
-    if (u.perfil === 'proprietario') {
+    // Caixa e proprietário enxergam colaboradores de qualquer unidade (p/ agendar em todas).
+    // Gerente e barbeiro ficam restritos à própria unidade.
+    if (u.perfil === 'proprietario' || u.perfil === 'caixa') {
       if (unidade_id) query = query.eq('unidade_id', unidade_id)
     } else {
       query = query.eq('unidade_id', u.unidade_id)
