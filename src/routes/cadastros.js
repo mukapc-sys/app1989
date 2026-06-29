@@ -316,7 +316,8 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
       fichas_usadas = (fus || []).length
     } catch (e) { fichas_usadas = 0 }
     const fichas_total = plano.fichas_bar_mes || 0
-    const fichas_disponiveis = Math.max(0, fichas_total - fichas_usadas)
+    // Plano vencido/inativo não dá direito a fichas no momento.
+    const fichas_disponiveis = em_dia ? Math.max(0, fichas_total - fichas_usadas) : 0
 
     return res.json({
       assinante: true,
