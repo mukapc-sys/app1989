@@ -370,6 +370,13 @@ function getPeriodo(periodo) {
     const d = mDia[1]
     return { ini: d + 'T00:00:00-03:00', fim: d + 'T23:59:59.999-03:00' }
   }
+  // Intervalo livre: "range:AAAA-MM-DD:AAAA-MM-DD" -> do dia 1 (00:00) ao dia 2 (23:59) em SP
+  const mRange = String(periodo || '').match(/^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/)
+  if (mRange) {
+    let d1 = mRange[1], d2 = mRange[2]
+    if (d2 < d1) { const t = d1; d1 = d2; d2 = t }   // inverteu? corrige
+    return { ini: d1 + 'T00:00:00-03:00', fim: d2 + 'T23:59:59.999-03:00' }
+  }
   const agora = new Date()
   let ini, fim
 
