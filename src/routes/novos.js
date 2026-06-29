@@ -524,6 +524,10 @@ router.post('/agendamentos/:id/abrir-comanda', autenticar, async (req, res) => {
       .select('id, colaborador_id, unidade_id, cliente_id, cliente_nome, servico_id, valor')
       .eq('id', req.params.id).single()
     if (!ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
+    // Caixa só pode cobrar/abrir comanda da própria unidade (financeiro é por unidade).
+    if (req.usuario.perfil === 'caixa' && req.usuario.unidade_id && ag.unidade_id && ag.unidade_id !== req.usuario.unidade_id) {
+      return res.status(403).json({ erro: 'Você só pode cobrar comandas da sua unidade.' })
+    }
 
     // Já existe comanda para este agendamento? Reaproveita (com os itens já salvos).
     const { data: existentes } = await supabaseAdmin.from('comandas')
@@ -574,6 +578,10 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
     const { data: ag, error: e0 } = await supabaseAdmin
       .from('agendamentos').select('id, colaborador_id, unidade_id, cliente_id, cliente_nome').eq('id', req.params.id).single()
     if (e0 || !ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
+    // Caixa só finaliza/cobra na própria unidade.
+    if (req.usuario.perfil === 'caixa' && req.usuario.unidade_id && ag.unidade_id && ag.unidade_id !== req.usuario.unidade_id) {
+      return res.status(403).json({ erro: 'Você só pode finalizar comandas da sua unidade.' })
+    }
 
     const lista = Array.isArray(itens) ? itens : []
     const subtotal = lista.reduce((s, it) => s + (parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0) * (parseInt(it.quantidade) || 1), 0)
@@ -810,6 +818,7 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       valor:            a.valor,
       colaborador_id:   a.colaborador_id,
       colaborador_nome: a.colaborador_nome || null,
+      unidade_id:       a.unidade_id || null,
       unidade_nome:     a.unidade_nome || null,
       cliente_id:       a.cliente_id || null,
       cliente_nome:     a.cliente_nome || null,
