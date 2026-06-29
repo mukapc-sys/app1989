@@ -514,6 +514,56 @@ router.post('/agendamentos/:id/corrigir-forma', autenticar, async (req, res) => 
   }
 })
 
+// POST /agendamentos/:id/abrir-comanda — cria (ou reaproveita) uma comanda ABERTA
+// ligada ao agendamento, já com o serviço-base dentro. A partir daí o widget salva
+// tudo na hora (produtos, fichas, zerar do plano). A comanda é finalizada depois.
+router.post('/agendamentos/:id/abrir-comanda', autenticar, async (req, res) => {
+  try {
+    const { data: ag } = await supabaseAdmin
+      .from('agendamentos')
+      .select('id, colaborador_id, unidade_id, cliente_id, cliente_nome, servico_id, valor')
+      .eq('id', req.params.id).single()
+    if (!ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
+
+    // Já existe comanda para este agendamento? Reaproveita (com os itens já salvos).
+    const { data: existentes } = await supabaseAdmin.from('comandas')
+      .select('id, status, itens_comanda(*)')
+      .eq('agendamento_id', ag.id)
+      .order('aberta_em', { ascending: false }).limit(1)
+    if (existentes && existentes.length) {
+      const c = existentes[0]
+      return res.json({ comanda_id: c.id, status: c.status, itens: c.itens_comanda || [] })
+    }
+
+    // Cria a comanda ABERTA + serviço-base do agendamento.
+    const agora = new Date().toISOString()
+    const { data: cm, error: eC } = await supabaseAdmin.from('comandas').insert({
+      agendamento_id: ag.id, cliente_id: ag.cliente_id || null, cliente_nome: ag.cliente_nome || null,
+      colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
+      status: 'aberta', aberta_em: agora, observacao: 'Atendimento de agendamento', criado_por: req.usuario.id
+    }).select().single()
+    if (eC) throw eC
+
+    let nomeServ = 'Serviço'
+    if (ag.servico_id) {
+      const { data: s } = await supabaseAdmin.from('servicos').select('nome').eq('id', ag.servico_id).single()
+      if (s && s.nome) nomeServ = s.nome
+    }
+    await supabaseAdmin.from('itens_comanda').insert({
+      comanda_id: cm.id, tipo: 'servico', servico_id: ag.servico_id || null,
+      descricao: nomeServ, quantidade: 1,
+      valor_unit: parseFloat(ag.valor) || 0, colaborador_id: ag.colaborador_id || null
+    })
+
+    const { data: full } = await supabaseAdmin.from('comandas')
+      .select('id, status, itens_comanda(*)').eq('id', cm.id).single()
+    return res.status(201).json({ comanda_id: cm.id, status: 'aberta', itens: (full && full.itens_comanda) || [] })
+  } catch (err) {
+    console.error('[abrir-comanda]', err.message)
+    return res.status(500).json({ erro: err.message || 'Erro ao abrir comanda do agendamento' })
+  }
+})
+
 // POST /agendamentos/:id/finalizar — conclui o atendimento E grava o detalhe dos itens
 // (serviço/produto + quantidade) numa comanda ligada, para a comissão por faixa.
 // O faturamento continua contando por agendamento.valor (comanda fica com agendamento_id → não duplica).
@@ -541,9 +591,32 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
     let comanda_id = null
     try {
       const { data: jaTemComanda } = await supabaseAdmin.from('comandas')
-        .select('id').eq('agendamento_id', ag.id).limit(1)
+        .select('id, status').eq('agendamento_id', ag.id).order('aberta_em', { ascending: false }).limit(1)
       if (jaTemComanda && jaTemComanda.length) {
         comanda_id = jaTemComanda[0].id
+        // Comanda criada ao ABRIR o agendamento: finaliza usando os itens já salvos.
+        if (jaTemComanda[0].status === 'aberta') {
+          const { data: its } = await supabaseAdmin.from('itens_comanda')
+            .select('valor_unit, quantidade, produto_id, tipo').eq('comanda_id', comanda_id)
+          const sub = (its || []).reduce((s, i) => s + (parseFloat(i.valor_unit) || 0) * (parseInt(i.quantidade) || 1), 0)
+          const tot = Math.max(0, sub - parseFloat(desconto || 0))
+          const pags = (Array.isArray(req.body.pagamentos) && req.body.pagamentos.length) ? req.body.pagamentos : null
+          await supabaseAdmin.from('comandas').update({
+            status: 'finalizada', forma_pgto: normalizarForma(forma_pgto), pagamentos: pags,
+            subtotal: sub, desconto, total: tot, finalizada_em: new Date().toISOString()
+          }).eq('id', comanda_id)
+          // alinha o valor do agendamento ao total real dos itens (respeita zerados do plano)
+          await supabaseAdmin.from('agendamentos').update({ valor: tot }).eq('id', ag.id)
+          // baixa de estoque dos produtos da comanda (best-effort)
+          for (const pi of (its || [])) {
+            if (pi.tipo === 'produto' && pi.produto_id) {
+              await supabaseAdmin.from('movimentacoes_estoque').insert({
+                produto_id: pi.produto_id, unidade_id: ag.unidade_id, tipo: 'saida_venda',
+                quantidade: parseInt(pi.quantidade) || 1, responsavel_id: ag.colaborador_id, referencia_id: comanda_id
+              }).then(() => {}).catch(() => {})
+            }
+          }
+        }
       } else if (lista.length) {
         const { data: cm } = await supabaseAdmin.from('comandas').insert({
           agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
