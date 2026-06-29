@@ -239,13 +239,13 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, async (req, res) => {
 
     const lista = (fx.linhas || []).map(l => ({
       nome: l.nome,
-      unidade: unome(unidDe[l.colaborador_id]),
+      unidade: unome(unidDe[l.colaborador_id]) || l.unidade || '',
       atendimentos: cont[l.colaborador_id] || 0,
       faturado: round(l.servico_total + l.produto_total),
       comissao_pct: l.servico_pct,
       comissao: l.comissao_total,
-      servico_total: l.servico_total, servico_pct: l.servico_pct,
-      produto_total: l.produto_total, produto_unidades: l.produto_unidades, produto_pct: l.produto_pct,
+      servico_total: l.servico_total, servico_pct: l.servico_pct, servico_comissao: l.servico_comissao,
+      produto_total: l.produto_total, produto_unidades: l.produto_unidades, produto_pct: l.produto_pct, produto_comissao: l.produto_comissao,
       ab_faturado: 0
     })).sort((a, b) => b.comissao - a.comissao)
     return res.json(lista)
