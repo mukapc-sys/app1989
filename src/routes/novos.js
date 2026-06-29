@@ -705,7 +705,7 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
     const unidadeId = req.usuario.unidade_id
 
     let q = supabaseAdmin.from('vw_agenda_dia')
-      .select('id,data_hora_ini,data_hora_fim,status,valor,colaborador_id,colaborador_nome,unidade_id,unidade_nome,cliente_nome,servico_nome,duracao_min,canal_origem')
+      .select('id,data_hora_ini,data_hora_fim,status,valor,colaborador_id,colaborador_nome,unidade_id,unidade_nome,cliente_id,cliente_nome,servico_nome,duracao_min,canal_origem')
       .gte('data_hora_ini', dia + 'T00:00:00-03:00')
       .lte('data_hora_ini', dia + 'T23:59:59-03:00')
       .not('status', 'eq', 'cancelado')
@@ -738,6 +738,7 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       colaborador_id:   a.colaborador_id,
       colaborador_nome: a.colaborador_nome || null,
       unidade_nome:     a.unidade_nome || null,
+      cliente_id:       a.cliente_id || null,
       cliente_nome:     a.cliente_nome || null,
       servico_nome:     a.servico_nome || null,
       duracao_min:      a.duracao_min || 30,
