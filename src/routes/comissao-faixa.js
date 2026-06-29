@@ -50,7 +50,7 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
   const itens = await fetchAll(() => {
     let q = supabaseAdmin
       .from('itens_comanda')
-      .select('tipo, produto_id, quantidade, valor_unit, comandas!inner(colaborador_id, unidade_id, status, finalizada_em)')
+      .select('tipo, produto_id, quantidade, valor_unit, colaborador_id, comandas!inner(colaborador_id, unidade_id, status, finalizada_em)')
       .eq('comandas.status', 'finalizada')
       .gte('comandas.finalizada_em', ini)
       .lt('comandas.finalizada_em', fim)
@@ -75,7 +75,9 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
   // Agrega por barbeiro
   const acc = {}
   for (const it of (itens || [])) {
-    const cid = it.comandas && it.comandas.colaborador_id
+    // barbeiro do ITEM (ex.: produto de barbearia vendido por outro barbeiro);
+    // se o item não tiver, cai no barbeiro da comanda (comportamento antigo).
+    const cid = it.colaborador_id || (it.comandas && it.comandas.colaborador_id)
     if (!cid) continue
     if (it.produto_id && barProdIds.has(it.produto_id)) continue // Bar: não paga comissão
     if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0 }
