@@ -250,19 +250,22 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
       const qtd  = parseInt(it.quantidade) || 1
       // valor editado no widget (cobrar mais/menos/zerar); se não veio, usa o de tabela
       const valorCustom = (it.valor !== undefined && it.valor !== null && !isNaN(parseFloat(it.valor))) ? parseFloat(it.valor) : null
-      let descricao, valor_unit, servico_id = null, produto_id = null
+      let descricao, valor_unit, servico_id = null, produto_id = null, fichaBar = false
       if (tipo === 'servico' || tipo === 'plano') {
         const { data: s } = await supabaseAdmin.from('servicos').select('nome, valor').eq('id', it.id).single()
         if (!s) { await supabaseAdmin.from('comandas').delete().eq('id', comanda.id); return res.status(404).json({ erro: 'Serviço não encontrado' }) }
         descricao = s.nome; valor_unit = valorCustom != null ? valorCustom : s.valor; servico_id = it.id
       } else {
-        const { data: p } = await supabaseAdmin.from('produtos').select('nome, valor_venda').eq('id', it.id).single()
+        const { data: p } = await supabaseAdmin.from('produtos').select('nome, valor_venda, categorias_produto(paga_comissao)').eq('id', it.id).single()
         if (!p) { await supabaseAdmin.from('comandas').delete().eq('id', comanda.id); return res.status(404).json({ erro: 'Produto não encontrado' }) }
-        descricao = p.nome; valor_unit = valorCustom != null ? valorCustom : p.valor_venda; produto_id = it.id
+        descricao = p.nome; produto_id = it.id
+        const ehBar = !!(p.categorias_produto && p.categorias_produto.paga_comissao === false)
+        if (it.ficha && ehBar) { valor_unit = Math.max(0, parseFloat(p.valor_venda || 0) - 8); fichaBar = true }
+        else { valor_unit = valorCustom != null ? valorCustom : p.valor_venda }
         produtosVendidos.push({ produto_id, quantidade: qtd })
       }
       subtotal += parseFloat(valor_unit) * qtd
-      await supabaseAdmin.from('itens_comanda').insert({ comanda_id: comanda.id, tipo, servico_id, produto_id, descricao, quantidade: qtd, valor_unit, colaborador_id: (it.colaborador_id || null) })
+      await supabaseAdmin.from('itens_comanda').insert({ comanda_id: comanda.id, tipo, servico_id, produto_id, descricao, quantidade: qtd, valor_unit, colaborador_id: (it.colaborador_id || null), ficha_bar: fichaBar })
     }
 
     const total = Math.max(0, subtotal - parseFloat(desconto || 0))
@@ -286,10 +289,10 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
 // POST /comandas/:id/itens — adicionar serviço ou produto
 router.post('/:id/itens', autenticar, async (req, res) => {
   try {
-    const { tipo, servico_id, produto_id, quantidade = 1, colaborador_id } = req.body
+    const { tipo, servico_id, produto_id, quantidade = 1, colaborador_id, ficha } = req.body
     const comanda_id = req.params.id
 
-    let descricao, valor_unit
+    let descricao, valor_unit, ficha_bar = false
 
     if (tipo === 'servico' && servico_id) {
       const { data: s } = await supabaseAdmin.from('servicos').select('nome, valor').eq('id', servico_id).single()
@@ -297,17 +300,25 @@ router.post('/:id/itens', autenticar, async (req, res) => {
       descricao  = s.nome
       valor_unit = s.valor
     } else if (tipo === 'produto' && produto_id) {
-      const { data: p } = await supabaseAdmin.from('produtos').select('nome, valor_venda').eq('id', produto_id).single()
+      const { data: p } = await supabaseAdmin.from('produtos')
+        .select('nome, valor_venda, categorias_produto(paga_comissao)').eq('id', produto_id).single()
       if (!p) return res.status(404).json({ erro: 'Produto não encontrado' })
       descricao  = p.nome
       valor_unit = p.valor_venda
+      // Ficha de bar: só vale para produto de BAR (categoria que NÃO paga comissão).
+      // Cada ficha cobre até R$8 (≤8 zera; >8 desconta 8 e paga a diferença).
+      const ehBar = !!(p.categorias_produto && p.categorias_produto.paga_comissao === false)
+      if (ficha && ehBar) {
+        valor_unit = Math.max(0, parseFloat(p.valor_venda || 0) - 8)
+        ficha_bar = true
+      }
     } else {
       return res.status(400).json({ erro: 'tipo inválido ou id ausente' })
     }
 
     const { data, error } = await supabaseAdmin
       .from('itens_comanda')
-      .insert({ comanda_id, tipo, servico_id: servico_id || null, produto_id: produto_id || null, descricao, quantidade, valor_unit, colaborador_id: colaborador_id || null })
+      .insert({ comanda_id, tipo, servico_id: servico_id || null, produto_id: produto_id || null, descricao, quantidade, valor_unit, colaborador_id: colaborador_id || null, ficha_bar })
       .select()
       .single()
 
