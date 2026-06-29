@@ -223,13 +223,13 @@ router.post('/', autenticar, exigirPerfil('proprietario','gerente','colaborador'
 // POST /comandas/avulsa — cria e finaliza uma comanda numa única ação (venda no balcão, sem agendamento)
 router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colaborador','caixa'), async (req, res) => {
   try {
-    const { cliente_id, forma_pagamento, desconto = 0, itens } = req.body
+    const { cliente_id, forma_pagamento, desconto = 0, itens, colaborador_id } = req.body
     if (!forma_pagamento) return res.status(400).json({ erro: 'forma_pagamento é obrigatório' })
     if (!Array.isArray(itens) || itens.length === 0) return res.status(400).json({ erro: 'Adicione pelo menos um item' })
 
     const { data: comanda, error: errC } = await supabaseAdmin
       .from('comandas')
-      .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: req.usuario.id, unidade_id: req.usuario.unidade_id, aberta_em: new Date().toISOString(), observacao: 'Comanda avulsa', criado_por: req.usuario.id })
+      .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: colaborador_id || req.usuario.id, unidade_id: req.usuario.unidade_id, aberta_em: new Date().toISOString(), observacao: 'Comanda avulsa', criado_por: req.usuario.id })
       .select().single()
     if (errC) throw errC
 
@@ -238,15 +238,17 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     for (const it of itens) {
       const tipo = it.tipo === 'produto' ? 'produto' : 'servico'
       const qtd  = parseInt(it.quantidade) || 1
+      // valor editado no widget (cobrar mais/menos/zerar); se não veio, usa o de tabela
+      const valorCustom = (it.valor !== undefined && it.valor !== null && !isNaN(parseFloat(it.valor))) ? parseFloat(it.valor) : null
       let descricao, valor_unit, servico_id = null, produto_id = null
       if (tipo === 'servico') {
         const { data: s } = await supabaseAdmin.from('servicos').select('nome, valor').eq('id', it.id).single()
         if (!s) { await supabaseAdmin.from('comandas').delete().eq('id', comanda.id); return res.status(404).json({ erro: 'Serviço não encontrado' }) }
-        descricao = s.nome; valor_unit = s.valor; servico_id = it.id
+        descricao = s.nome; valor_unit = valorCustom != null ? valorCustom : s.valor; servico_id = it.id
       } else {
         const { data: p } = await supabaseAdmin.from('produtos').select('nome, valor_venda').eq('id', it.id).single()
         if (!p) { await supabaseAdmin.from('comandas').delete().eq('id', comanda.id); return res.status(404).json({ erro: 'Produto não encontrado' }) }
-        descricao = p.nome; valor_unit = p.valor_venda; produto_id = it.id
+        descricao = p.nome; valor_unit = valorCustom != null ? valorCustom : p.valor_venda; produto_id = it.id
         produtosVendidos.push({ produto_id, quantidade: qtd })
       }
       subtotal += parseFloat(valor_unit) * qtd
