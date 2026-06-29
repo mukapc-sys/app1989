@@ -226,4 +226,73 @@ router.delete('/retirada/:id', autenticar, ADM, async (req, res) => {
   }
 })
 
+// ============================================================
+// GET /caixa/historico?dias=60  -> sessões (abertas e fechadas) da unidade
+// ============================================================
+router.get('/historico', autenticar, ADM, async (req, res) => {
+  try {
+    const unidade = unidadeDoUsuario(req)
+    const dias = Math.min(parseInt(req.query.dias) || 60, 365)
+    const desde = new Date(Date.now() - dias * 86400000).toISOString()
+    let q = supabaseAdmin.from('caixa_sessoes')
+      .select('id, status, saldo_inicial, aberto_em, aberto_por_nome, fechado_em, fechado_por_nome, dinheiro_conferido, faturamento, observacao')
+      .gte('aberto_em', desde)
+      .order('aberto_em', { ascending: false }).limit(200)
+    if (unidade) q = q.eq('unidade_id', unidade)
+    const { data, error } = await q
+    if (error) throw error
+    return res.json({ sessoes: data || [] })
+  } catch (err) {
+    console.error('[caixa/historico]', err.message)
+    return res.status(500).json({ erro: err.message })
+  }
+})
+
+// soma por forma de pagamento, respeitando pagamentos divididos (jsonb)
+function acumularForma(acc, c) {
+  const pgs = Array.isArray(c.pagamentos) ? c.pagamentos : null
+  if (pgs && pgs.length) {
+    pgs.forEach(function (p) { const f = p.forma || 'outros'; acc[f] = (acc[f] || 0) + (parseFloat(p.valor) || 0) })
+  } else {
+    const f = c.forma_pgto || 'outros'; acc[f] = (acc[f] || 0) + (parseFloat(c.total) || 0)
+  }
+}
+
+// ============================================================
+// GET /caixa/sessao/:id  -> relatório detalhado de uma sessão
+// ============================================================
+router.get('/sessao/:id', autenticar, ADM, async (req, res) => {
+  try {
+    const { data: sessao } = await supabaseAdmin.from('caixa_sessoes').select('*').eq('id', req.params.id).single()
+    if (!sessao) return res.status(404).json({ erro: 'Sessão não encontrada.' })
+
+    const fim = sessao.fechado_em || new Date().toISOString()
+    let qc = supabaseAdmin.from('comandas')
+      .select('total, forma_pgto, pagamentos')
+      .eq('status', 'finalizada')
+      .gte('finalizada_em', sessao.aberto_em).lte('finalizada_em', fim)
+    if (sessao.unidade_id) qc = qc.eq('unidade_id', sessao.unidade_id)
+    const { data: comandas } = await qc
+    const fin = comandas || []
+    const faturamento = fin.reduce(function (s, c) { return s + (parseFloat(c.total) || 0) }, 0)
+    const por_forma = {}
+    fin.forEach(function (c) { acumularForma(por_forma, c) })
+
+    const { data: rets } = await supabaseAdmin.from('caixa_retiradas').select('valor, motivo, criado_em, responsavel_nome').eq('sessao_id', sessao.id).order('criado_em', { ascending: true })
+    const retiradas = rets || []
+    const retiradas_total = retiradas.reduce(function (s, r) { return s + (parseFloat(r.valor) || 0) }, 0)
+
+    const dinheiro_forma = por_forma['dinheiro'] || 0
+    const esperado_dinheiro = (parseFloat(sessao.saldo_inicial) || 0) + dinheiro_forma - retiradas_total
+
+    return res.json({
+      sessao, faturamento, comandas_count: fin.length,
+      por_forma, retiradas, retiradas_total, esperado_dinheiro
+    })
+  } catch (err) {
+    console.error('[caixa/sessao]', err.message)
+    return res.status(500).json({ erro: err.message })
+  }
+})
+
 module.exports = router
