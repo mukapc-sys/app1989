@@ -685,6 +685,14 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
     }
 
     // ===== comanda da mensalidade (finalizada) =====
+    // Se sem_comanda=true, a mensalidade é cobrada noutra comanda (ex: no próprio
+    // atendimento). Aqui só ativamos/renovamos a assinatura.
+    if (req.body.sem_comanda) {
+      return res.status(201).json({
+        ok: true, assinatura, comanda_id: null, valor,
+        plano: plano.nome, data_renovacao: assinatura.data_renovacao, renovou: !!assinatura_id, sem_comanda: true
+      })
+    }
     try {
       const agora = new Date().toISOString()
       const { data: comanda, error: eC } = await supabaseAdmin.from('comandas').insert({
