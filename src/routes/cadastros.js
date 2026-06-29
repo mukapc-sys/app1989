@@ -370,7 +370,7 @@ router.put('/servicos/:id', autenticar, ADMIN, async (req, res) => {
 router.get('/produtos', autenticar, async (req, res) => {
   try {
     const { categoria_id } = req.query
-    let query = supabaseAdmin.from('produtos').select('*, categorias_produto(nome)').eq('ativo', true).order('nome')
+    let query = supabaseAdmin.from('produtos').select('*, categorias_produto(nome, paga_comissao)').eq('ativo', true).order('nome')
     if (categoria_id) query = query.eq('categoria_id', categoria_id)
     const { data, error } = await query
     if (error) throw error
