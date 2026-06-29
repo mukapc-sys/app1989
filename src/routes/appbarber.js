@@ -432,6 +432,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
               descricao:  it.descricao || null,
               quantidade: q,
               valor_unit: vu,
+              colaborador_id: it.colaborador_id || null,
             }
           })
           await supabaseAdmin.from('itens_comanda').insert(linhas)
