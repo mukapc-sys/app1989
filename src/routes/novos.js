@@ -324,6 +324,7 @@ router.post('/agendamentos', autenticar, async (req, res) => {
 
       const { data, error } = await supabaseAdmin.from('agendamentos').insert({
         cliente_id, unidade_id,
+        cliente_nome: cliente_nome || null,
         colaborador_id: item.colaborador_id,
         servico_id: item.servico_id,
         data_hora_ini: ini.toISOString(),
