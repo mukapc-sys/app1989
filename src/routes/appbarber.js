@@ -582,4 +582,27 @@ router.post('/cancelar/:id', autenticar, exigirPerfil('proprietario', 'gerente',
   }
 })
 
+// ============================================================
+// POST /appbarber/status/:id  — marca um importado como
+//   'nao_compareceu' (ausente) ou volta para 'agendado'.
+//   Marca editado_local para o sync não sobrescrever.
+//   body: { status: 'nao_compareceu' | 'agendado' }
+// ============================================================
+router.post('/status/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
+  try {
+    const permitido = ['nao_compareceu', 'agendado']
+    const novo = String((req.body && req.body.status) || '')
+    if (!permitido.includes(novo)) return res.status(400).json({ erro: 'Status inválido.' })
+    const { error } = await supabaseAdmin
+      .from('agenda_appbarber')
+      .update({ status: novo, editado_local: true })
+      .eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true, status: novo })
+  } catch (err) {
+    console.error('[appbarber/status]', err.message)
+    return res.status(500).json({ erro: 'Erro ao atualizar status', detalhe: err.message })
+  }
+})
+
 module.exports = router
