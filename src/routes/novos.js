@@ -736,6 +736,128 @@ router.post('/agendamentos/bloquear', autenticar, async (req, res) => {
   }
 })
 
+// ============================================================
+// BLOQUEIOS RECORRENTES (vários dias da semana + faixa de horário)
+// ============================================================
+// POST /agendamentos/bloquear-recorrente
+router.post('/agendamentos/bloquear-recorrente', autenticar, ADM_GER, async (req, res) => {
+  try {
+    const { colaborador_id, dias_semana, hora_ini, hora_fim, data_ini, data_fim, motivo } = req.body
+    if (!colaborador_id || !Array.isArray(dias_semana) || !dias_semana.length || !hora_ini || !hora_fim || !data_ini || !data_fim) {
+      return res.status(400).json({ erro: 'Preencha barbeiro, dias da semana, horário e período' })
+    }
+    if (hora_fim <= hora_ini) return res.status(400).json({ erro: 'A hora final deve ser maior que a inicial' })
+    if (data_fim < data_ini) return res.status(400).json({ erro: 'A data final deve ser maior ou igual à inicial' })
+
+    const dias = dias_semana.map(Number).filter(d => d >= 0 && d <= 6)
+    if (!dias.length) return res.status(400).json({ erro: 'Dias da semana inválidos' })
+
+    const { data: colab } = await supabaseAdmin
+      .from('colaboradores').select('unidade_id').eq('id', colaborador_id).single()
+    const unidade_id = colab?.unidade_id || null
+
+    const { data: servico } = await supabaseAdmin
+      .from('servicos').select('id').eq('ativo', true).limit(1).single()
+    if (!servico) return res.status(400).json({ erro: 'Nenhum serviço cadastrado para usar como bloqueio' })
+
+    // grava a REGRA
+    const { data: regra, error: er } = await supabaseAdmin.from('bloqueios_recorrentes')
+      .insert({ colaborador_id, unidade_id, dias_semana: dias, hora_ini, hora_fim, data_ini, data_fim, motivo: motivo || null, criado_por: (req.usuario && req.usuario.id) || null })
+      .select('id').single()
+    if (er) throw er
+    const grupo = regra.id
+
+    // agendamentos existentes do colaborador no período (para pular ocupados)
+    const ini0 = new Date(data_ini + 'T00:00:00-03:00')
+    const fim0 = new Date(data_fim + 'T23:59:59-03:00')
+    const { data: existentes } = await supabaseAdmin
+      .from('agendamentos')
+      .select('data_hora_ini,data_hora_fim,status')
+      .eq('colaborador_id', colaborador_id)
+      .gte('data_hora_ini', new Date(ini0.getTime() - 4 * 60 * 60 * 1000).toISOString())
+      .lt('data_hora_ini', new Date(fim0.getTime() + 1000).toISOString())
+      .not('status', 'eq', 'cancelado')
+
+    const STEP_MS = 15 * 60 * 1000
+    function ocupado(t) {
+      return (existentes || []).some(function (a) {
+        const s = new Date(a.data_hora_ini).getTime()
+        const e = a.data_hora_fim ? new Date(a.data_hora_fim).getTime() : s + STEP_MS
+        return s < t + STEP_MS && e > t
+      })
+    }
+    function pad(n) { return String(n).padStart(2, '0') }
+
+    const [hi_h, hi_m] = hora_ini.split(':').map(Number)
+    const [hf_h, hf_m] = hora_fim.split(':').map(Number)
+
+    const linhas = []
+    let pulados = 0, diasContados = 0
+    let cur = new Date(data_ini + 'T12:00:00Z')          // meio-dia UTC = dia de calendário estável
+    const last = new Date(data_fim + 'T12:00:00Z')
+    while (cur.getTime() <= last.getTime()) {
+      const wd = cur.getUTCDay()                          // 0..6 (independente de fuso)
+      if (dias.indexOf(wd) !== -1) {
+        diasContados++
+        const dStr = cur.toISOString().slice(0, 10)
+        const start = new Date(dStr + 'T' + pad(hi_h) + ':' + pad(hi_m) + ':00-03:00').getTime()
+        const end = new Date(dStr + 'T' + pad(hf_h) + ':' + pad(hf_m) + ':00-03:00').getTime()
+        for (let t = start; t < end; t += STEP_MS) {
+          if (ocupado(t)) { pulados++; continue }
+          linhas.push({
+            colaborador_id, unidade_id, servico_id: servico.id,
+            data_hora_ini: new Date(t).toISOString(),
+            data_hora_fim: new Date(t + STEP_MS).toISOString(),
+            status: 'bloqueado', valor: 0, bloqueio_grupo: grupo
+          })
+        }
+      }
+      cur = new Date(cur.getTime() + 24 * 60 * 60 * 1000)
+    }
+
+    let criados = 0
+    for (let i = 0; i < linhas.length; i += 500) {
+      const lote = linhas.slice(i, i + 500)
+      const { data, error } = await supabaseAdmin.from('agendamentos').insert(lote).select('id')
+      if (error) throw error
+      criados += data.length
+    }
+    return res.status(201).json({ ok: true, criados, pulados, dias: diasContados, regra_id: grupo })
+  } catch (err) {
+    console.error('[bloquear-recorrente]', err.message)
+    return res.status(500).json({ erro: err.message || 'Erro ao criar bloqueio recorrente' })
+  }
+})
+
+// GET /bloqueios-recorrentes — lista as regras
+router.get('/bloqueios-recorrentes', autenticar, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('bloqueios_recorrentes')
+      .select('*, colaboradores(id,nome)')
+      .order('criado_em', { ascending: false })
+    if (error) throw error
+    return res.json(data || [])
+  } catch (err) {
+    console.error('[bloqueios-recorrentes:list]', err.message)
+    return res.status(500).json({ erro: 'Erro ao listar bloqueios' })
+  }
+})
+
+// DELETE /bloqueios-recorrentes/:id — remove a regra e desbloqueia os futuros
+router.delete('/bloqueios-recorrentes/:id', autenticar, ADM_GER, async (req, res) => {
+  try {
+    const id = req.params.id
+    await supabaseAdmin.from('agendamentos').delete()
+      .eq('bloqueio_grupo', id).eq('status', 'bloqueado')
+      .gte('data_hora_ini', new Date().toISOString())
+    await supabaseAdmin.from('bloqueios_recorrentes').delete().eq('id', id)
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[bloqueios-recorrentes:del]', err.message)
+    return res.status(500).json({ erro: 'Erro ao remover bloqueio' })
+  }
+})
+
 // POST /colaboradores — criar novo colaborador
 router.post('/colaboradores', autenticar, ADM_GER, async (req, res) => {
   try {
