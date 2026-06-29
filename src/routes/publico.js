@@ -554,7 +554,8 @@ router.put('/eu', autenticarCliente, async (req, res) => {
 router.get('/meu-plano', autenticarCliente, async (req, res) => {
   try {
     const { data: assin } = await supabaseAdmin.from('assinaturas')
-      .select('*, planos(id,nome,valor_mensal)').eq('cliente_id', req.cliente.id)
+      .select('*, planos(id,nome,valor_mensal), colaboradores!vendedor_id(id,nome,unidade_id,unidades(id,nome))')
+      .eq('cliente_id', req.cliente.id)
       .eq('status', 'ativa').limit(1)
     if (!assin || !assin.length) return res.json({ ativo: false })
     const a = assin[0]
@@ -578,7 +579,10 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
       limite_mes: x.limite_mes,
       usado: cont[x.servico_id] || 0,
     }))
-    return res.json({ ativo: true, plano: { nome: plano.nome, valor_mensal: plano.valor_mensal }, servicos })
+    const barb = a.colaboradores || null
+    const barbeiro = barb ? { id: barb.id, nome: barb.nome } : null
+    const unidade = (barb && barb.unidades) ? { id: barb.unidades.id, nome: barb.unidades.nome } : null
+    return res.json({ ativo: true, plano: { id: plano.id, nome: plano.nome, valor_mensal: plano.valor_mensal }, servicos, barbeiro, unidade })
   } catch (e) {
     console.error('[publico/meu-plano]', e.message)
     return res.status(500).json({ erro: 'Erro ao carregar plano' })
