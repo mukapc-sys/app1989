@@ -312,6 +312,10 @@ router.post('/:id/itens', autenticar, async (req, res) => {
         valor_unit = Math.max(0, parseFloat(p.valor_venda || 0) - 8)
         ficha_bar = true
       }
+    } else if (tipo === 'plano') {
+      // Mensalidade de plano lançada no atendimento (valor e descrição vêm do body).
+      descricao  = req.body.descricao || 'Mensalidade de plano'
+      valor_unit = parseFloat(req.body.valor_unit) || 0
     } else {
       return res.status(400).json({ erro: 'tipo inválido ou id ausente' })
     }
