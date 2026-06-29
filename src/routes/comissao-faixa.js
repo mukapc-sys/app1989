@@ -114,6 +114,33 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
     acc[cid].servico_qtd += 1
   }
 
+  // Produtos IMPORTADOS do AppBarber (tabela espelho agenda_appbarber_produtos).
+  // Antes NÃO entravam na comissão. Decisão do cliente:
+  //  - contam só a partir de jun/2026 (não mexe no que o AppBarber já pagou no passado);
+  //  - entram como produto normal e são recalculados pela FAIXA ATUAL do sistema;
+  //  - Bar (comissao = 0) não entra.
+  const PROD_IMPORT_DESDE = new Date('2026-06-01T00:00:00-03:00')   // ⬅️ data de corte (ajuste aqui se precisar)
+  const _loProd = (new Date(ini) > PROD_IMPORT_DESDE ? new Date(ini) : PROD_IMPORT_DESDE).toISOString()
+  if (new Date(_loProd) < new Date(fim)) {
+    const prodsImp = await fetchAll(() => {
+      let qp = supabaseAdmin
+        .from('agenda_appbarber_produtos')
+        .select('quantidade, valor_unit, colaborador_id')
+        .gt('comissao', 0)                       // só barbearia (Bar = 0, não paga)
+        .gte('data', _loProd).lt('data', fim)
+      if (unidade_id) qp = qp.eq('unidade_id', unidade_id)
+      return qp
+    })
+    for (const it of (prodsImp || [])) {
+      const cid = it.colaborador_id
+      if (!cid) continue
+      if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0, servico_qtd: 0 }
+      const qtd = parseInt(it.quantidade) || 1
+      acc[cid].produto_total += (parseFloat(it.valor_unit) || 0) * qtd
+      acc[cid].produto_unid  += qtd
+    }
+  }
+
   // Nomes dos barbeiros
   const ids = Object.keys(acc)
   const nomes = {}, unidadeNome = {}
