@@ -80,7 +80,7 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
     const cid = it.colaborador_id || (it.comandas && it.comandas.colaborador_id)
     if (!cid) continue
     if (it.produto_id && barProdIds.has(it.produto_id)) continue // Bar: não paga comissão
-    if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0 }
+    if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0, servico_qtd: 0 }
     const qtd = parseInt(it.quantidade) || 1
     const valor = (parseFloat(it.valor_unit) || 0) * qtd
     const tipo = String(it.tipo || '').toLowerCase()
@@ -91,6 +91,7 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
       // serviço, corte E plano entram aqui (plano segue a MESMA regra de serviço)
       acc[cid].servico_total += valor
       if (tipo.indexOf('plano') !== -1) acc[cid].plano_total += valor // medição separada
+      else acc[cid].servico_qtd += qtd // atendimentos (plano não conta)
     }
   }
 
@@ -108,16 +109,17 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
   for (const a of (abs || [])) {
     const cid = a.colaborador_id
     if (!cid) continue
-    if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0 }
+    if (!acc[cid]) acc[cid] = { servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0, servico_qtd: 0 }
     acc[cid].servico_total += parseFloat(a.valor || 0)
+    acc[cid].servico_qtd += 1
   }
 
   // Nomes dos barbeiros
   const ids = Object.keys(acc)
-  const nomes = {}
+  const nomes = {}, unidadeNome = {}
   if (ids.length) {
-    const { data: cols } = await supabaseAdmin.from('colaboradores').select('id, nome').in('id', ids)
-    ;(cols || []).forEach(c => { nomes[c.id] = c.nome })
+    const { data: cols } = await supabaseAdmin.from('colaboradores').select('id, nome, unidades(nome)').in('id', ids)
+    ;(cols || []).forEach(c => { nomes[c.id] = c.nome; unidadeNome[c.id] = (c.unidades && c.unidades.nome) || '' })
   }
 
   const linhas = ids.map(cid => {
@@ -129,6 +131,8 @@ async function calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
     return {
       colaborador_id: cid,
       nome: nomes[cid] || '—',
+      unidade: unidadeNome[cid] || '',
+      atendimentos: a.servico_qtd || 0,
       servico_total: round(a.servico_total),
       servico_pct: sPct,
       servico_comissao: round(sCom),
