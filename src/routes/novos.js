@@ -522,7 +522,7 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
   try {
     const { forma_pgto, desconto = 0, itens } = req.body || {}
     const { data: ag, error: e0 } = await supabaseAdmin
-      .from('agendamentos').select('id, colaborador_id, unidade_id, cliente_id').eq('id', req.params.id).single()
+      .from('agendamentos').select('id, colaborador_id, unidade_id, cliente_id, cliente_nome').eq('id', req.params.id).single()
     if (e0 || !ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
 
     const lista = Array.isArray(itens) ? itens : []
@@ -547,6 +547,7 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
       } else if (lista.length) {
         const { data: cm } = await supabaseAdmin.from('comandas').insert({
           agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
+          cliente_nome: ag.cliente_nome || null,
           colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
           status: 'finalizada', forma_pgto: normalizarForma(forma_pgto),
           subtotal, desconto, total,
