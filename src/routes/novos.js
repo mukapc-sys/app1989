@@ -557,7 +557,8 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
         if (cm) {
           comanda_id = cm.id
           for (const it of lista) {
-            const tipo = (String(it.tipo || '').toLowerCase().indexOf('produto') !== -1) ? 'produto' : 'servico'
+            const _tl = String(it.tipo || '').toLowerCase()
+            const tipo = _tl.indexOf('produto') !== -1 ? 'produto' : (_tl.indexOf('plano') !== -1 ? 'plano' : 'servico')
             const qtd = parseInt(it.quantidade) || 1
             const valor_unit = parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0
             await supabaseAdmin.from('itens_comanda').insert({
