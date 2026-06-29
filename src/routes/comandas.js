@@ -227,6 +227,15 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     if (!forma_pagamento) return res.status(400).json({ erro: 'forma_pagamento é obrigatório' })
     if (!Array.isArray(itens) || itens.length === 0) return res.status(400).json({ erro: 'Adicione pelo menos um item' })
 
+    // #1 — produto comissionado (item de barbearia) exige informar o barbeiro da comissão.
+    const prodIds = itens.filter(i => i && i.tipo === 'produto' && i.id).map(i => i.id)
+    if (prodIds.length && !colaborador_id) {
+      const { data: prods } = await supabaseAdmin
+        .from('produtos').select('id, categorias_produto(paga_comissao)').in('id', prodIds)
+      const temComissionado = (prods || []).some(p => p.categorias_produto && p.categorias_produto.paga_comissao)
+      if (temComissionado) return res.status(400).json({ erro: 'Selecione o barbeiro da comissão (há produto de barbearia na venda).' })
+    }
+
     const { data: comanda, error: errC } = await supabaseAdmin
       .from('comandas')
       .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: colaborador_id || req.usuario.id, unidade_id: req.usuario.unidade_id, aberta_em: new Date().toISOString(), observacao: 'Comanda avulsa', criado_por: req.usuario.id })
