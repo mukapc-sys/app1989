@@ -155,7 +155,7 @@ router.get('/horarios-disponiveis', autenticar, async (req, res) => {
 // POST /agendamentos
 router.post('/', autenticar, async (req, res) => {
   try {
-    const { colaborador_id, cliente_id, servico_id, unidade_id, data_hora_ini, observacao } = req.body
+    const { colaborador_id, cliente_id, cliente_nome, servico_id, unidade_id, data_hora_ini, observacao } = req.body
 
     if (!colaborador_id || !servico_id || !unidade_id || !data_hora_ini) {
       return res.status(400).json({ erro: 'Campos obrigatórios: colaborador_id, servico_id, unidade_id, data_hora_ini' })
@@ -187,6 +187,7 @@ router.post('/', autenticar, async (req, res) => {
       .insert({
         colaborador_id,
         cliente_id:    cliente_id || null,
+        cliente_nome:  cliente_nome || null,
         servico_id,
         unidade_id,
         data_hora_ini: ini.toISOString(),
