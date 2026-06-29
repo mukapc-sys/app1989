@@ -294,6 +294,30 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     const em_dia = (a.status === 'ativa') && !venceu
     const pode_zerar = em_dia && (visitas_usadas < visitas_semana)
 
+    // fichas de bar usadas no ciclo atual (não acumulam de um ciclo p/ outro).
+    // Ciclo = do mês anterior à renovação até agora (ou início do mês, se sem renovação).
+    let fichas_usadas = 0
+    try {
+      let cicloIni
+      if (a.data_renovacao) {
+        const dr = new Date(String(a.data_renovacao).slice(0, 10) + 'T00:00:00-03:00')
+        dr.setMonth(dr.getMonth() - 1)
+        cicloIni = dr.toISOString()
+      } else {
+        const n = new Date(Date.now() - 3 * 3600 * 1000)
+        cicloIni = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), 1)).toISOString()
+      }
+      const { data: fus } = await supabaseAdmin.from('itens_comanda')
+        .select('id, comandas!inner(cliente_id,status,finalizada_em)')
+        .eq('comandas.cliente_id', cliente_id)
+        .eq('comandas.status', 'finalizada')
+        .gte('comandas.finalizada_em', cicloIni)
+        .eq('ficha_bar', true)
+      fichas_usadas = (fus || []).length
+    } catch (e) { fichas_usadas = 0 }
+    const fichas_total = plano.fichas_bar_mes || 0
+    const fichas_disponiveis = Math.max(0, fichas_total - fichas_usadas)
+
     return res.json({
       assinante: true,
       assinatura_id: a.id,
@@ -304,7 +328,9 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
       servicos_nomes,
       visitas_semana,
       visitas_usadas,
-      fichas_bar_mes: plano.fichas_bar_mes || 0,
+      fichas_bar_mes: fichas_total,
+      fichas_usadas: fichas_usadas,
+      fichas_disponiveis: fichas_disponiveis,
       barbeiro_titular: (a.colaboradores && a.colaboradores.nome) || null,
       pode_zerar,
       data_renovacao: a.data_renovacao || null
