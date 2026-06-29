@@ -246,12 +246,12 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     let subtotal = 0
     const produtosVendidos = []
     for (const it of itens) {
-      const tipo = it.tipo === 'produto' ? 'produto' : 'servico'
+      const tipo = it.tipo === 'produto' ? 'produto' : (it.tipo === 'plano' ? 'plano' : 'servico')
       const qtd  = parseInt(it.quantidade) || 1
       // valor editado no widget (cobrar mais/menos/zerar); se não veio, usa o de tabela
       const valorCustom = (it.valor !== undefined && it.valor !== null && !isNaN(parseFloat(it.valor))) ? parseFloat(it.valor) : null
       let descricao, valor_unit, servico_id = null, produto_id = null
-      if (tipo === 'servico') {
+      if (tipo === 'servico' || tipo === 'plano') {
         const { data: s } = await supabaseAdmin.from('servicos').select('nome, valor').eq('id', it.id).single()
         if (!s) { await supabaseAdmin.from('comandas').delete().eq('id', comanda.id); return res.status(404).json({ erro: 'Serviço não encontrado' }) }
         descricao = s.nome; valor_unit = valorCustom != null ? valorCustom : s.valor; servico_id = it.id
@@ -348,6 +348,9 @@ router.patch('/:id/itens/:item_id', autenticar, async (req, res) => {
     }
     if (typeof req.body.descricao === 'string' && req.body.descricao.trim()) {
       patch.descricao = req.body.descricao.trim()
+    }
+    if (req.body.tipo === 'plano' || req.body.tipo === 'servico') {
+      patch.tipo = req.body.tipo
     }
     if (!Object.keys(patch).length) {
       return res.status(400).json({ erro: 'Nada para atualizar' })
