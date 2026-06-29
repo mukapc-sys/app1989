@@ -1027,11 +1027,20 @@ router.get('/colaboradores', autenticar, async (req, res) => {
 })
 
 // PUT /agendamentos/mover
-router.put('/agendamentos/mover', autenticar, ADM_GER, async (req, res) => {
+router.put('/agendamentos/mover', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
   try {
     const { agendamento_id, novo_horario, novo_colaborador_id, nova_unidade_id } = req.body
     const updates = {}
-    if (novo_horario)        updates.data_hora_ini = novo_horario
+    if (novo_horario) {
+      updates.data_hora_ini = novo_horario
+      // preserva a duração: desloca o fim junto com o início
+      const { data: atual } = await supabaseAdmin.from('agendamentos')
+        .select('data_hora_ini,data_hora_fim').eq('id', agendamento_id).single()
+      if (atual && atual.data_hora_ini && atual.data_hora_fim) {
+        const dur = new Date(atual.data_hora_fim).getTime() - new Date(atual.data_hora_ini).getTime()
+        if (dur > 0) updates.data_hora_fim = new Date(new Date(novo_horario).getTime() + dur).toISOString()
+      }
+    }
     if (novo_colaborador_id) updates.colaborador_id = novo_colaborador_id
     if (nova_unidade_id)     updates.unidade_id = nova_unidade_id
     const { data, error } = await supabaseAdmin.from('agendamentos').update(updates).eq('id', agendamento_id).select().single()
