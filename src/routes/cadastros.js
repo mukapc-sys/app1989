@@ -255,7 +255,7 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     const cliente_id = req.params.id
     // assinatura mais recente do cliente (qualquer status)
     const { data: assins } = await supabaseAdmin.from('assinaturas')
-      .select('*, planos(id,nome,valor_mensal,visitas_semana,fichas_bar_mes)')
+      .select('*, planos(id,nome,valor_mensal,visitas_semana,fichas_bar_mes), colaboradores!vendedor_id(id,nome)')
       .eq('cliente_id', cliente_id)
       .order('data_renovacao', { ascending: false }).limit(1)
     if (!assins || !assins.length) return res.json({ assinante: false })
@@ -304,6 +304,8 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
       servicos_nomes,
       visitas_semana,
       visitas_usadas,
+      fichas_bar_mes: plano.fichas_bar_mes || 0,
+      barbeiro_titular: (a.colaboradores && a.colaboradores.nome) || null,
       pode_zerar,
       data_renovacao: a.data_renovacao || null
     })
