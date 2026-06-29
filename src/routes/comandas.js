@@ -416,6 +416,14 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
       })
     }
 
+    // Se a comanda é de um agendamento, conclui o agendamento junto (status + valor real).
+    if (data && data.agendamento_id) {
+      await supabaseAdmin.from('agendamentos')
+        .update({ status: 'concluido', valor: total })
+        .eq('id', data.agendamento_id)
+        .then(() => {}).catch(() => {})
+    }
+
     return res.json(data)
   } catch (err) {
     console.error(err)
