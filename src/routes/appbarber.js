@@ -399,6 +399,7 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       const { data: cm, error: e2 } = await supabaseAdmin.from('comandas').insert({
         agendamento_id: ag.id,
         cliente_id:     ab.cliente_id,
+        cliente_nome:   ab.cliente_nome || null,
         colaborador_id: ab.colaborador_id,
         unidade_id:     ab.unidade_id,
         status:         'finalizada',
@@ -506,6 +507,7 @@ router.post('/abrir/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'c
     // Cria a comanda ABERTA (status nasce 'aberta' por padrão; sem forma_pgto ainda)
     const { data: cm, error: e1 } = await supabaseAdmin.from('comandas').insert({
       cliente_id:     ab.cliente_id || null,
+      cliente_nome:   ab.cliente_nome || null,
       colaborador_id: ab.colaborador_id,
       unidade_id:     ab.unidade_id,
       status:         'aberta',
