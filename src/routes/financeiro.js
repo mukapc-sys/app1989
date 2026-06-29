@@ -459,6 +459,18 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
       const prox = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`
       return { ini: `${mes}-01T00:00:00-03:00`, fim: `${prox}-01T00:00:00-03:00` }
     }
+    // Datas livres: fim é INCLUSIVO (conta o dia inteiro) -> usa o dia seguinte como limite exclusivo.
+    const rangeDatas = (iniYMD, fimYMD) => {
+      const f = new Date(fimYMD + 'T12:00:00-03:00'); f.setDate(f.getDate() + 1)
+      const fimExcl = f.toISOString().slice(0, 10)
+      return { ini: `${iniYMD}T00:00:00-03:00`, fim: `${fimExcl}T00:00:00-03:00` }
+    }
+    const usarDatas = !!(req.query.ini1 && req.query.fim1 && req.query.ini2 && req.query.fim2)
+    const range1 = usarDatas ? rangeDatas(req.query.ini1, req.query.fim1) : rangeMes(mes1)
+    const range2 = usarDatas ? rangeDatas(req.query.ini2, req.query.fim2) : rangeMes(mes2)
+    const _fmtBR = (ymd) => { const p = String(ymd).split('-'); return p[2] + '/' + p[1] + '/' + p[0].slice(2) }
+    const periodo1 = usarDatas ? (_fmtBR(req.query.ini1) + '–' + _fmtBR(req.query.fim1)) : null
+    const periodo2 = usarDatas ? (_fmtBR(req.query.ini2) + '–' + _fmtBR(req.query.fim2)) : null
 
     let qCol = supabaseAdmin.from('colaboradores').select('id, nome, unidade_id')
     if (uidFiltro) qCol = qCol.eq('unidade_id', uidFiltro)
@@ -488,8 +500,8 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
     const vazio = () => ({ atend:0, prod_qtd:0, valor_serv:0, valor_prod:0,
       prod_barb_qtd:0, prod_barb_valor:0, prod_bar_qtd:0, prod_bar_valor:0 })
 
-    async function metricasMes(mes) {
-      const { ini, fim } = rangeMes(mes)
+    async function metricasPeriodo(range) {
+      const { ini, fim } = range
       const porColab = {}, porUni = {}
       const eC = (id) => (porColab[id] = porColab[id] || vazio())
       const eU = (id) => (porUni[id]   = porUni[id]   || vazio())
@@ -558,8 +570,8 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
       return { porColab, porUni }
     }
 
-    const M1 = await metricasMes(mes1)
-    const M2 = await metricasMes(mes2)
+    const M1 = await metricasPeriodo(range1)
+    const M2 = await metricasPeriodo(range2)
 
     const finaliza = (m) => ({
       atend: m.atend, prod_qtd: m.prod_qtd,
@@ -609,7 +621,7 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
     }
 
     return res.json({
-      mes1, mes2, barbeiros, unidades,
+      mes1, mes2, periodo1, periodo2, barbeiros, unidades,
       totais: { m1: somar(unidades,'m1'), m2: somar(unidades,'m2') }
     })
   } catch (err) {
