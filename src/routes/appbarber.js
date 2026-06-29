@@ -425,9 +425,11 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
             const q = parseInt(it.quantidade) || 1
             const vu = (it.valor_unit != null) ? Number(it.valor_unit)
                       : (it.valor != null ? Number(it.valor) : 0)
+            const _tl = String(it.tipo || '').toLowerCase()
+            const tp = _tl.indexOf('produto') !== -1 ? 'produto' : (_tl.indexOf('plano') !== -1 ? 'plano' : 'servico')
             return {
               comanda_id: comandaId,
-              tipo:       it.tipo || 'servico',
+              tipo:       tp,
               servico_id: it.servico_id || null,
               produto_id: it.produto_id || null,
               descricao:  it.descricao || null,
