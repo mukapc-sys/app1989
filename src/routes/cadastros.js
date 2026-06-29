@@ -622,6 +622,115 @@ router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
   }
 })
 
+// ============================================================
+// POST /assinaturas/cobrar — VENDE/ATIVA ou RENOVA um plano.
+//   - cria/renova a assinatura (vendedor_id = barbeiro responsável)
+//   - lança a MENSALIDADE como comanda FINALIZADA (item tipo='plano'
+//     = valor_mensal no nome do vendedor): entra no faturamento e
+//     gera comissão, mas NÃO conta como atendimento.
+//   - renovação soma 1 mês a partir do vencimento atual (se ainda
+//     ativo) ou de hoje (se já vencido).
+//   - se a comanda falhar, desfaz a alteração na assinatura (rollback).
+// ============================================================
+router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
+  try {
+    const { cliente_id, plano_id, vendedor_id, forma_pgto, assinatura_id } = req.body
+    if (!cliente_id) return res.status(400).json({ erro: 'Informe o cliente.' })
+    if (!plano_id) return res.status(400).json({ erro: 'Informe o plano.' })
+    if (!vendedor_id) return res.status(400).json({ erro: 'Informe o barbeiro responsável da mensalidade.' })
+    if (!forma_pgto) return res.status(400).json({ erro: 'Informe a forma de pagamento.' })
+
+    const { data: plano } = await supabaseAdmin.from('planos').select('id, nome, valor_mensal').eq('id', plano_id).single()
+    if (!plano) return res.status(404).json({ erro: 'Plano não encontrado.' })
+    const valor = parseFloat(plano.valor_mensal) || 0
+
+    const { data: cli } = await supabaseAdmin.from('clientes').select('id, unidade_pref').eq('id', cliente_id).single()
+    const unidade_id = req.usuario.unidade_id || req.body.unidade_id || (cli && cli.unidade_pref) || null
+    if (!unidade_id) return res.status(400).json({ erro: 'Não consegui identificar a unidade. Selecione a unidade.' })
+
+    const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+    function maisUmMes(baseYMD) {
+      const d = new Date(baseYMD + 'T12:00:00-03:00')
+      d.setMonth(d.getMonth() + 1)
+      return d.toISOString().slice(0, 10)
+    }
+
+    // ===== assinatura: renovar OU criar =====
+    let assinatura, criouNova = false, antes = null
+    if (assinatura_id) {
+      const { data: atual } = await supabaseAdmin.from('assinaturas').select('*').eq('id', assinatura_id).single()
+      if (!atual) return res.status(404).json({ erro: 'Assinatura não encontrada.' })
+      antes = { data_renovacao: atual.data_renovacao, status: atual.status, vendedor_id: atual.vendedor_id, forma_pgto: atual.forma_pgto, plano_id: atual.plano_id }
+      const venceAtivo = atual.data_renovacao && String(atual.data_renovacao).slice(0, 10) >= hoje
+      const base = venceAtivo ? String(atual.data_renovacao).slice(0, 10) : hoje
+      const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
+        plano_id, status: 'ativa', data_renovacao: maisUmMes(base),
+        vendedor_id, forma_pgto, atualizado_em: new Date().toISOString()
+      }).eq('id', assinatura_id).select().single()
+      if (eU) throw eU
+      assinatura = upd
+    } else {
+      const { data: jaTem } = await supabaseAdmin.from('assinaturas')
+        .select('id').eq('cliente_id', cliente_id).eq('status', 'ativa').limit(1)
+      if (jaTem && jaTem.length) {
+        return res.status(409).json({ erro: 'Este cliente já tem uma assinatura ativa. Use a opção Renovar.' })
+      }
+      const { data: nova, error: eN } = await supabaseAdmin.from('assinaturas').insert({
+        cliente_id, plano_id, status: 'ativa',
+        data_inicio: hoje, data_renovacao: maisUmMes(hoje),
+        vendedor_id, forma_pgto
+      }).select().single()
+      if (eN) throw eN
+      assinatura = nova; criouNova = true
+    }
+
+    // ===== comanda da mensalidade (finalizada) =====
+    try {
+      const agora = new Date().toISOString()
+      const { data: comanda, error: eC } = await supabaseAdmin.from('comandas').insert({
+        agendamento_id: null, cliente_id, colaborador_id: vendedor_id, unidade_id,
+        aberta_em: agora, observacao: 'Mensalidade de plano', criado_por: req.usuario.id
+      }).select().single()
+      if (eC) throw eC
+
+      const { error: eI } = await supabaseAdmin.from('itens_comanda').insert({
+        comanda_id: comanda.id, tipo: 'plano',
+        descricao: 'Mensalidade — ' + plano.nome,
+        quantidade: 1, valor_unit: valor, colaborador_id: vendedor_id
+      })
+      if (eI) throw eI
+
+      const pagamentos = [{ forma: forma_pgto, valor: valor }]
+      const { error: eF } = await supabaseAdmin.from('comandas').update({
+        status: 'finalizada', forma_pgto, pagamentos,
+        subtotal: valor, total: valor, desconto: 0, finalizada_em: agora
+      }).eq('id', comanda.id)
+      if (eF) throw eF
+
+      return res.status(201).json({
+        ok: true, assinatura, comanda_id: comanda.id, valor,
+        plano: plano.nome, data_renovacao: assinatura.data_renovacao, renovou: !!assinatura_id
+      })
+    } catch (eComanda) {
+      // rollback da assinatura (não queremos ativar/renovar sem registrar o pagamento)
+      try {
+        if (criouNova && assinatura) {
+          await supabaseAdmin.from('assinaturas').delete().eq('id', assinatura.id)
+        } else if (antes && assinatura_id) {
+          await supabaseAdmin.from('assinaturas').update({
+            data_renovacao: antes.data_renovacao, status: antes.status,
+            vendedor_id: antes.vendedor_id, forma_pgto: antes.forma_pgto, plano_id: antes.plano_id
+          }).eq('id', assinatura_id)
+        }
+      } catch (eRb) { console.error('[assinaturas/cobrar rollback]', eRb.message) }
+      throw eComanda
+    }
+  } catch (err) {
+    console.error('[assinaturas/cobrar]', err.message)
+    return res.status(500).json({ erro: 'Erro ao processar o plano. Nada foi cobrado. ' + (err.message || '') })
+  }
+})
+
 // ============ FERIADOS ============
 // Horário especial 09h-18h (igual sábado). Cadastrados por gerente/proprietário.
 
