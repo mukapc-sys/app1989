@@ -227,13 +227,14 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     if (!forma_pagamento) return res.status(400).json({ erro: 'forma_pagamento é obrigatório' })
     if (!Array.isArray(itens) || itens.length === 0) return res.status(400).json({ erro: 'Adicione pelo menos um item' })
 
-    // #1 — produto comissionado (item de barbearia) exige informar o barbeiro da comissão.
+    // #1 — cada produto comissionado (barbearia) precisa do barbeiro NO ITEM.
     const prodIds = itens.filter(i => i && i.tipo === 'produto' && i.id).map(i => i.id)
-    if (prodIds.length && !colaborador_id) {
+    if (prodIds.length) {
       const { data: prods } = await supabaseAdmin
         .from('produtos').select('id, categorias_produto(paga_comissao)').in('id', prodIds)
-      const temComissionado = (prods || []).some(p => p.categorias_produto && p.categorias_produto.paga_comissao)
-      if (temComissionado) return res.status(400).json({ erro: 'Selecione o barbeiro da comissão (há produto de barbearia na venda).' })
+      const comissSet = new Set((prods || []).filter(p => p.categorias_produto && p.categorias_produto.paga_comissao).map(p => p.id))
+      const faltando = itens.some(i => i && i.tipo === 'produto' && comissSet.has(i.id) && !i.colaborador_id)
+      if (faltando) return res.status(400).json({ erro: 'Informe o barbeiro de cada produto de barbearia.' })
     }
 
     const { data: comanda, error: errC } = await supabaseAdmin
