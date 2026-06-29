@@ -50,7 +50,7 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
     let query = supabaseAdmin
       .from('comandas')
       .select(`
-        id, status, subtotal, desconto, total, forma_pgto, aberta_em, finalizada_em, observacao, colaborador_id,
+        id, status, subtotal, desconto, total, forma_pgto, aberta_em, finalizada_em, observacao, colaborador_id, cliente_nome,
         clientes(nome, whatsapp),
         colaboradores!colaborador_id(id, nome)
       `)
