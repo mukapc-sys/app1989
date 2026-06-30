@@ -173,8 +173,18 @@ router.post('/:id/estornar', autenticar, exigirPerfil('proprietario','gerente','
     }
 
     const { data: cmd, error: e1 } = await supabaseAdmin
-      .from('comandas').select('id, agendamento_id').eq('id', req.params.id).single()
+      .from('comandas').select('id, agendamento_id, cliente_id, pontos_resgatados').eq('id', req.params.id).single()
     if (e1 || !cmd) return res.status(404).json({ erro: 'Comanda não encontrada.' })
+
+    // Devolve os pontos que foram resgatados nesta comanda (se houver) antes de excluir.
+    if (cmd.cliente_id && (cmd.pontos_resgatados || 0) > 0) {
+      const { data: cart } = await supabaseAdmin.from('carteira_pontos')
+        .select('id,saldo').eq('cliente_id', cmd.cliente_id).single()
+      if (cart) {
+        await supabaseAdmin.from('carteira_pontos')
+          .update({ saldo: (cart.saldo || 0) + cmd.pontos_resgatados }).eq('id', cart.id)
+      }
+    }
 
     const { error: e2 } = await supabaseAdmin.from('comandas').delete().eq('id', req.params.id)
     if (e2) throw e2
