@@ -381,6 +381,22 @@ router.get('/agendamentos/disponibilidade', autenticar, async (req, res) => {
 // ============================================================
 // CASHBACK — pontos por serviço
 // ============================================================
+// GET /cashback/saldo/:cliente_id — saldo de pontos do cliente (carteira)
+router.get('/cashback/saldo/:cliente_id', autenticar, async (req, res) => {
+  try {
+    const { cliente_id } = req.params
+    if (!cliente_id) return res.json({ saldo: 0, total_acumulado: 0 })
+    const { data } = await supabaseAdmin.from('carteira_pontos')
+      .select('saldo,total_acumulado').eq('cliente_id', cliente_id).single()
+    return res.json({
+      saldo: (data && data.saldo) ? data.saldo : 0,
+      total_acumulado: (data && data.total_acumulado) ? data.total_acumulado : 0
+    })
+  } catch (err) {
+    return res.json({ saldo: 0, total_acumulado: 0 })
+  }
+})
+
 router.post('/cashback/creditar', autenticar, async (req, res) => {
   try {
     const { cliente_id, valor_servicos } = req.body
