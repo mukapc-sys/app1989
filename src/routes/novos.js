@@ -397,6 +397,43 @@ router.get('/cashback/saldo/:cliente_id', autenticar, async (req, res) => {
   }
 })
 
+// POST /cashback/resgatar — debita pontos do cliente (usados como desconto em produtos).
+// body: { cliente_id, comanda_id?, pontos }. Revalida tudo no servidor (30 pts = R$1).
+router.post('/cashback/resgatar', autenticar, async (req, res) => {
+  try {
+    const { cliente_id, comanda_id } = req.body || {}
+    let pontos = parseInt(req.body && req.body.pontos) || 0
+    if (!cliente_id || pontos <= 0) return res.json({ pontos_usados: 0 })
+    pontos = Math.floor(pontos / 30) * 30   // sempre múltiplo de 30 (30 pts = R$1)
+    if (pontos <= 0) return res.json({ pontos_usados: 0 })
+
+    // Trava: se essa comanda já teve resgate, não debita de novo.
+    if (comanda_id) {
+      const { data: cExist } = await supabaseAdmin.from('comandas')
+        .select('pontos_resgatados').eq('id', comanda_id).single()
+      if (cExist && (cExist.pontos_resgatados || 0) > 0) {
+        return res.json({ pontos_usados: cExist.pontos_resgatados, ja_resgatado: true })
+      }
+    }
+
+    const { data: carteira } = await supabaseAdmin.from('carteira_pontos')
+      .select('id,saldo').eq('cliente_id', cliente_id).single()
+    const saldo = (carteira && carteira.saldo) ? carteira.saldo : 0
+    if (!carteira || saldo <= 0) return res.json({ pontos_usados: 0 })
+    if (pontos > saldo) pontos = Math.floor(saldo / 30) * 30
+    if (pontos <= 0) return res.json({ pontos_usados: 0 })
+
+    await supabaseAdmin.from('carteira_pontos').update({ saldo: saldo - pontos }).eq('id', carteira.id)
+    if (comanda_id) {
+      await supabaseAdmin.from('comandas').update({ pontos_resgatados: pontos }).eq('id', comanda_id)
+    }
+    return res.json({ pontos_usados: pontos, saldo_restante: saldo - pontos })
+  } catch (err) {
+    console.error('[cashback/resgatar]', err.message)
+    return res.status(500).json({ erro: 'Erro ao resgatar pontos' })
+  }
+})
+
 router.post('/cashback/creditar', autenticar, async (req, res) => {
   try {
     const { cliente_id, valor_servicos } = req.body
