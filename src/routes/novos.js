@@ -101,10 +101,20 @@ router.get('/vales-pix', autenticar, ADM_GER, async (req, res) => {
 //   - BAIXA o estoque dos produtos do vale (movimentacoes_estoque tipo 'saida')
 // body: { colaborador_id, valor, itens:[{produto_id,nome,valor,qtd}], senha_gerente }
 // ============================================================
-router.post('/vales', autenticar, ADM_GER, async (req, res) => {
+router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
     const { colaborador_id, itens } = req.body
     if (!colaborador_id) return res.status(400).json({ erro: 'Selecione o colaborador' })
+
+    // Autorização: gerente/proprietário logado autoriza sozinho;
+    // caixa precisa da senha de autorização do gestor.
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha_gerente || req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
 
     const lista = Array.isArray(itens) ? itens : []
     // total recalculado no servidor (não confia no total do front)
@@ -145,8 +155,8 @@ router.post('/vales', autenticar, ADM_GER, async (req, res) => {
         motivo:              'Vale funcionário — ' + (colab.nome || ''),
         responsavel_id:      colaborador_id,
         responsavel_nome:    colab.nome || null,
-        autorizado_por:      req.usuario.id,
-        autorizado_por_nome: req.usuario.nome || null,
+        autorizado_por:      autorizador.id,
+        autorizado_por_nome: autorizador.nome || null,
       }).select().single()
       if (ret) { retirada_id = ret.id; await supabaseAdmin.from('vales').update({ retirada_id }).eq('id', vale.id) }
     } catch (e) { console.error('[vales] caixa:', e.message) }
