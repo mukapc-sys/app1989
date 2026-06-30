@@ -95,6 +95,94 @@ router.get('/vales-pix', autenticar, ADM_GER, async (req, res) => {
 })
 
 // ============================================================
+// VALE NORMAL (consumo do funcionário):
+//   - soma no MESMO saldo do barbeiro (saldo_vales_pix)
+//   - lança SAÍDA no caixa da unidade (caixa_retiradas)
+//   - BAIXA o estoque dos produtos do vale (movimentacoes_estoque tipo 'saida')
+// body: { colaborador_id, valor, itens:[{produto_id,nome,valor,qtd}], senha_gerente }
+// ============================================================
+router.post('/vales', autenticar, ADM_GER, async (req, res) => {
+  try {
+    const { colaborador_id, itens } = req.body
+    if (!colaborador_id) return res.status(400).json({ erro: 'Selecione o colaborador' })
+
+    const lista = Array.isArray(itens) ? itens : []
+    // total recalculado no servidor (não confia no total do front)
+    const valor = lista.reduce((s, it) => s + (parseFloat(it.valor) || 0) * (parseInt(it.qtd) || 1), 0)
+    if (!valor || valor <= 0) return res.status(400).json({ erro: 'O vale precisa ter ao menos um item com valor.' })
+
+    const { data: colab } = await supabaseAdmin
+      .from('colaboradores').select('id,unidade_id,saldo_vales_pix,nome')
+      .eq('id', colaborador_id).single()
+    if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
+    const unidade_id = colab.unidade_id
+
+    // 1) registra o vale
+    const { data: vale, error: eVale } = await supabaseAdmin.from('vales').insert({
+      colaborador_id,
+      unidade_id,
+      valor,
+      itens: lista,
+      criado_por: req.usuario.colaborador_id || req.usuario.id,
+      status: 'pendente',
+    }).select().single()
+    if (eVale) throw eVale
+
+    // 2) saída no caixa da unidade (sessão aberta, se houver)
+    let sessao_id = null
+    try {
+      const { data: abertos } = await supabaseAdmin.from('caixa_sessoes')
+        .select('id').eq('status', 'aberto').eq('unidade_id', unidade_id)
+        .order('aberto_em', { ascending: false }).limit(1)
+      sessao_id = (abertos && abertos[0]) ? abertos[0].id : null
+    } catch (e) {}
+    let retirada_id = null
+    try {
+      const { data: ret } = await supabaseAdmin.from('caixa_retiradas').insert({
+        sessao_id,
+        unidade_id,
+        valor,
+        motivo:              'Vale funcionário — ' + (colab.nome || ''),
+        responsavel_id:      colaborador_id,
+        responsavel_nome:    colab.nome || null,
+        autorizado_por:      req.usuario.id,
+        autorizado_por_nome: req.usuario.nome || null,
+      }).select().single()
+      if (ret) { retirada_id = ret.id; await supabaseAdmin.from('vales').update({ retirada_id }).eq('id', vale.id) }
+    } catch (e) { console.error('[vales] caixa:', e.message) }
+
+    // 3) soma no saldo do barbeiro (mesmo saldo do PIX)
+    try {
+      await supabaseAdmin.from('colaboradores').update({
+        saldo_vales_pix: (parseFloat(colab.saldo_vales_pix) || 0) + valor
+      }).eq('id', colaborador_id)
+    } catch (e) { console.error('[vales] saldo:', e.message) }
+
+    // 4) baixa de estoque (só itens com produto_id)
+    const movs = lista
+      .filter(it => it.produto_id)
+      .map(it => ({
+        produto_id:     it.produto_id,
+        unidade_id,
+        tipo:           'saida',
+        quantidade:     parseInt(it.qtd) || 1,
+        valor_unitario: parseFloat(it.valor) || 0,
+        responsavel_id: req.usuario.id,
+        observacao:     'Vale funcionário — ' + (colab.nome || ''),
+      }))
+    if (movs.length) {
+      try { await supabaseAdmin.from('movimentacoes_estoque').insert(movs) }
+      catch (e) { console.error('[vales] estoque:', e.message) }
+    }
+
+    return res.status(201).json({ ok: true, vale, retirada_id, baixou_estoque: movs.length })
+  } catch (err) {
+    console.error('[vales]', err.message)
+    return res.status(500).json({ erro: 'Erro ao registrar vale: ' + err.message })
+  }
+})
+
+// ============================================================
 // REABRIR COMANDA (senha do gerente)
 // ============================================================
 router.post('/comandas/:id/reabrir', autenticar, async (req, res) => {
