@@ -70,7 +70,7 @@ router.get('/colaboradores', autenticar, async (req, res) => {
     const u = req.usuario
     let query = supabaseAdmin
       .from('colaboradores')
-      .select('id, nome, email, whatsapp, perfil, comissao_pct, ativo, foto_url, unidade_id, unidades(nome)')
+      .select('id, nome, email, whatsapp, perfil, comissao_pct, salario, ativo, foto_url, unidade_id, unidades(nome)')
       .eq('ativo', true).order('nome')
 
     // Caixa e proprietário enxergam colaboradores de qualquer unidade (p/ agendar em todas).
@@ -90,7 +90,7 @@ router.get('/colaboradores', autenticar, async (req, res) => {
 
 router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
   try {
-    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
+    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
 
     // Gerente: força a própria unidade e não pode criar proprietário
     let unidadeFinal = unidade_id
@@ -100,15 +100,29 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
       if (perfilFinal === 'proprietario') perfilFinal = 'colaborador'
     }
 
-    // Cria user no Auth
-    const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
-      email, password: senha_temp || 'Troque123!', email_confirm: true
-    })
-    if (authErr) throw authErr
+    const ehFuncionario = (perfilFinal === 'funcionario')
+
+    // Funcionário não comissionado NÃO tem login (sem user no Auth).
+    let userId = null
+    if (!ehFuncionario) {
+      const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
+        email, password: senha_temp || 'Troque123!', email_confirm: true
+      })
+      if (authErr) throw authErr
+      userId = authData.user.id
+    }
+
+    const registro = {
+      user_id: userId, nome, whatsapp, cpf, data_nasc,
+      perfil: perfilFinal, unidade_id: unidadeFinal, foto_url, foto_url_2,
+      comissao_pct: ehFuncionario ? 0 : comissao_pct,
+    }
+    if (email) registro.email = email
+    if (ehFuncionario) registro.salario = parseFloat(salario) || 0
 
     const { data: colab, error } = await supabaseAdmin
       .from('colaboradores')
-      .insert({ user_id: authData.user.id, nome, email, whatsapp, cpf, data_nasc, perfil: perfilFinal, unidade_id: unidadeFinal, comissao_pct, foto_url, foto_url_2 })
+      .insert(registro)
       .select().single()
     if (error) throw error
 
