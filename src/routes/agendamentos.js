@@ -242,4 +242,38 @@ router.put('/:id/status', autenticar, async (req, res) => {
   }
 })
 
+// ITEM 3 — alterar a duração (tempo de atendimento) de um agendamento.
+// body: { duracao } em minutos. Recalcula data_hora_fim a partir do início.
+router.put('/:id/duracao', autenticar, async (req, res) => {
+  try {
+    const { id } = req.params
+    const dur = parseInt(req.body && req.body.duracao)
+    const u = req.usuario
+    if (!dur || dur < 5 || dur > 480) {
+      return res.status(400).json({ erro: 'Informe uma duração entre 5 e 480 minutos.' })
+    }
+
+    const { data: ag } = await supabaseAdmin.from('agendamentos')
+      .select('colaborador_id, data_hora_ini, unidade_id').eq('id', id).single()
+    if (!ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
+
+    // Colaborador só altera os próprios; gerente/caixa/proprietário podem todos.
+    if (u.perfil === 'colaborador' && ag.colaborador_id !== u.id) {
+      return res.status(403).json({ erro: 'Sem permissão para alterar este agendamento' })
+    }
+
+    const ini = new Date(ag.data_hora_ini)
+    const fim = new Date(ini.getTime() + dur * 60000)
+
+    const { data, error } = await supabaseAdmin
+      .from('agendamentos').update({ data_hora_fim: fim.toISOString() }).eq('id', id).select().single()
+    if (error) throw error
+    pingAgenda(data && data.unidade_id)
+    return res.json({ ok: true, duracao: dur, data_hora_fim: fim.toISOString() })
+  } catch (err) {
+    console.error('[agendamentos/duracao]', err.message)
+    return res.status(500).json({ erro: 'Erro ao alterar tempo de atendimento' })
+  }
+})
+
 module.exports = router
