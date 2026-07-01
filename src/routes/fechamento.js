@@ -69,21 +69,35 @@ async function valesDoPeriodo(colaborador_id, iniStr, fimStr) {
 async function montarFechamento(colaborador_id, iniStr, fimStr) {
   // unidade do colaborador
   const { data: colab } = await supabaseAdmin.from('colaboradores')
-    .select('id, nome, unidade_id, saldo_vales_pix, unidades(nome)')
+    .select('id, nome, perfil, salario, unidade_id, saldo_vales_pix, unidades(nome)')
     .eq('id', colaborador_id).single()
   if (!colab) return null
 
+  const ehFuncionario = (colab.perfil === 'funcionario')
+
   const { ini, fim } = intervalo(iniStr, fimStr)
-  const com = await comissaoColaborador(colaborador_id, ini, fim, colab.unidade_id)
   const vales = await valesDoPeriodo(colaborador_id, iniStr, fimStr)
 
-  const comissao_bruta   = round(com.servico_comissao + com.produto_comissao)
+  // Funcionário não comissionado: bruto = salário. Barbeiro: bruto = comissão.
+  let com, comissao_bruta, salario
+  if (ehFuncionario) {
+    salario = round(colab.salario)
+    comissao_bruta = salario  // "bruto" do contracheque é o salário
+    com = { servico_total:0, servico_pct:0, servico_comissao:0, produto_total:0, produto_pct:0, produto_comissao:0, atendimentos:0 }
+  } else {
+    com = await comissaoColaborador(colaborador_id, ini, fim, colab.unidade_id)
+    salario = 0
+    comissao_bruta = round(com.servico_comissao + com.produto_comissao)
+  }
+
   const total_descontos  = round(vales.total_adiantamento + vales.total_produtos)
   const liquido          = round(comissao_bruta - total_descontos)
 
   return {
     colaborador_id,
     colaborador_nome: colab.nome,
+    eh_funcionario: ehFuncionario,
+    salario: salario,
     unidade_id: colab.unidade_id,
     unidade_nome: (colab.unidades && colab.unidades.nome) || '',
     periodo_ini: iniStr,
