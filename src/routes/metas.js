@@ -8,9 +8,11 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { exigirTela } = require('./permissoes')
 
 const GESTOR = exigirPerfil('proprietario', 'gerente')
 const PROP   = exigirPerfil('proprietario')
+const TELA_METAS = exigirTela('metas')
 
 function round(n) { return Math.round((parseFloat(n) || 0) * 100) / 100 }
 function mesAtual() { return new Date(Date.now() - 3*3600*1000).toISOString().slice(0,7) }
@@ -129,7 +131,7 @@ async function realizadoMes(mes, unidade_id) {
 // ------------------------------------------------------------
 // GET /metas/unidade?mes=AAAA-MM[&unidade_id=..]  -> meta(s) cadastrada(s)
 // ------------------------------------------------------------
-router.get('/unidade', autenticar, GESTOR, async (req, res) => {
+router.get('/unidade', autenticar, GESTOR, TELA_METAS, async (req, res) => {
   try {
     const mes = req.query.mes || mesAtual()
     let q = supabaseAdmin.from('metas_unidade').select('*').eq('mes', mes)
@@ -148,7 +150,7 @@ router.get('/unidade', autenticar, GESTOR, async (req, res) => {
 // POST /metas/unidade  { unidade_id, mes, clientes, faturamento, produtos, planos, bar }
 // Só proprietário cadastra a meta da unidade.
 // ------------------------------------------------------------
-router.post('/unidade', autenticar, PROP, async (req, res) => {
+router.post('/unidade', autenticar, PROP, TELA_METAS, async (req, res) => {
   try {
     const { unidade_id, mes } = req.body
     if (!unidade_id || !mes) return res.status(400).json({ erro: 'Informe unidade_id e mes.' })
@@ -175,7 +177,7 @@ router.post('/unidade', autenticar, PROP, async (req, res) => {
 // ------------------------------------------------------------
 // GET /metas/colaboradores?mes=AAAA-MM[&unidade_id=..]  -> divisão por barbeiro
 // ------------------------------------------------------------
-router.get('/colaboradores', autenticar, GESTOR, async (req, res) => {
+router.get('/colaboradores', autenticar, GESTOR, TELA_METAS, async (req, res) => {
   try {
     const mes = req.query.mes || mesAtual()
     let uni = req.query.unidade_id
@@ -194,7 +196,7 @@ router.get('/colaboradores', autenticar, GESTOR, async (req, res) => {
 // POST /metas/colaborador  { colaborador_id, unidade_id, mes, clientes, faturamento, produtos, planos, bar }
 // Gerente distribui (livre). Proprietário também pode.
 // ------------------------------------------------------------
-router.post('/colaborador', autenticar, GESTOR, async (req, res) => {
+router.post('/colaborador', autenticar, GESTOR, TELA_METAS, async (req, res) => {
   try {
     const { colaborador_id, mes } = req.body
     let unidade_id = req.body.unidade_id
