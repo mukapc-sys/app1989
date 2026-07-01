@@ -37,8 +37,6 @@ app.use('/financeiro',   require('./routes/financeiro'))
 app.use('/relatorios',   require('./routes/financeiro'))
 app.use('/assistente',   require('./routes/assistente'))
 app.use('/appbarber',    require('./routes/appbarber'))
-app.use('/appbarber-raw', require('./routes/appbarber-raw'))
-app.use('/fechamento', require('./routes/fechamento'))
 app.use('/publico',      require('./routes/publico'))
 app.use('/',             require('./routes/cadastros'))
 app.use('/',             require('./routes/novos'))
@@ -108,6 +106,17 @@ cron.schedule('0 8 * * *', async () => {
     console.log(`[CRON] ${(agendamentos || []).length} lembretes enfileirados`)
   } catch (err) {
     console.error('[CRON] Erro ao processar lembretes:', err)
+  }
+}, { timezone: 'America/Sao_Paulo' })
+
+// Todo dia às 3h — expira pontos de clientes 90 dias sem serviço (item 6)
+cron.schedule('0 3 * * *', async () => {
+  try {
+    const { data, error } = await supabaseAdmin.rpc('expirar_pontos_inativos')
+    if (error) throw error
+    console.log('[CRON] Expiração de pontos executada. Carteiras zeradas:', data)
+  } catch (err) {
+    console.error('[CRON] Erro ao expirar pontos:', err.message)
   }
 }, { timezone: 'America/Sao_Paulo' })
 
