@@ -21,6 +21,22 @@ function normalizarTelefone(s) {
   return t || null
 }
 
+// Detecta telefone "lixo" (placeholder) que NÃO deve ser usado para casar clientes.
+// Ex.: 00000000000, 0000000000, 51999999999, 99999999999, 5195599559, sequências repetidas.
+// Quando o telefone é lixo, o sync trata como "sem telefone" e casa por nome+unidade,
+// evitando recriar o mesmo cliente em loop.
+function telefoneValido(tel) {
+  if (!tel) return false
+  const t = String(tel).replace(/\D/g, '')
+  if (t.length < 10 || t.length > 11) return false
+  if (/^0+$/.test(t)) return false                 // só zeros
+  if (/^(\d)\1+$/.test(t)) return false            // todos os dígitos iguais (0000, 9999...)
+  if (t === '51999999999' || t === '5195599559') return false // lixos conhecidos
+  // celular com muitos 9 seguidos após o DDD (padrão de placeholder)
+  if (/^\d{2}9{8,9}$/.test(t)) return false        // ex: 51 + 999999999
+  return true
+}
+
 // Monta o registro EXATAMENTE com as colunas da tabela agenda_appbarber.
 // (função pura — fácil de testar)
 function construirRegistro(m, vinc) {
@@ -95,7 +111,9 @@ async function garantirCodigo(clienteId, codigo) {
 async function resolverCliente(m, unidadeId, cacheTel) {
   if (m.tipo !== 'agendamento') return { cliente_id: null, criado: false }
   const tel = normalizarTelefone(m.cliente_celular)
-  const tel11 = tel && tel.length >= 11 ? tel.slice(-11) : null
+  // Só usa o telefone para casar se for VÁLIDO (não placeholder). Lixo -> casa por nome.
+  const telOk = telefoneValido(tel)
+  const tel11 = (telOk && tel && tel.length >= 11) ? tel.slice(-11) : null
   const codigo = m.cliente_codigo || null
   const nomeNorm = normalizarNome(m.cliente_nome)
 
@@ -139,11 +157,13 @@ async function resolverCliente(m, unidadeId, cacheTel) {
   if (!m.cliente_nome) return { cliente_id: null, criado: false } // sem nome e sem match -> não cria
 
   // 4) cria de fato (guardando código, telefone e nome)
+  // Se o telefone for lixo/placeholder, salva NULL (não polui a base nem cria falso match).
+  const whatsappSalvar = telOk ? (m.cliente_celular || null) : null
   const { data: novo, error } = await supabaseAdmin
     .from('clientes')
     .insert({
       nome: m.cliente_nome,
-      whatsapp: m.cliente_celular || null,
+      whatsapp: whatsappSalvar,
       appbarber_codigo: codigo,
       origem: 'appbarber',
       unidade_pref: unidadeId,
