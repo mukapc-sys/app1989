@@ -5,9 +5,13 @@ const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { calcularComissaoFaixa, limitesMes } = require('./comissao-faixa')
 
 const SEM_ACESSO = exigirPerfil('proprietario', 'gerente')
+const { exigirTela } = require('./permissoes')
+const TELA_FIN = exigirTela('financeiro')
+const TELA_DRE = exigirTela('dre')
+const TELA_COMP = exigirTela('comparativo')
 
 // GET /financeiro/resumo?unidade_id=xxx&periodo=mes
-router.get('/resumo', autenticar, SEM_ACESSO, async (req, res) => {
+router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
   try {
     const { unidade_id, periodo = 'mes' } = req.query
     const u = req.usuario
@@ -305,7 +309,7 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, async (req, res) => {
 })
 
 // GET /financeiro/por-unidade?periodo=mes — faturamento e atendimentos reais por unidade
-router.get('/por-unidade', autenticar, SEM_ACESSO, async (req, res) => {
+router.get('/por-unidade', autenticar, SEM_ACESSO, TELA_COMP, async (req, res) => {
   try {
     const { periodo = 'mes' } = req.query
     const u = req.usuario
@@ -773,7 +777,7 @@ function finalizaDre(mes, unidade_id, dre, consolidado) {
 }
 
 // GET /financeiro/dre?mes=2026-06[&unidade_id=xxx]  (sem unidade = consolidado de todas)
-router.get('/dre', autenticar, SEM_ACESSO, async (req, res) => {
+router.get('/dre', autenticar, SEM_ACESSO, TELA_DRE, async (req, res) => {
   try {
     const u = req.usuario
     const mes = req.query.mes || new Date().toISOString().slice(0,7)
