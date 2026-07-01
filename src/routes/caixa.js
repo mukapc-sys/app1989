@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { exigirFuncao } = require('./permissoes')
 const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 
 // Quem pode abrir/fechar o caixa
@@ -116,7 +117,7 @@ router.post('/fechar', autenticar, ADM, async (req, res) => {
 //   Caixa pode lançar, mas precisa da senha de autorização.
 //   Gerente/proprietário logado autoriza sozinho.
 // ============================================================
-router.post('/retirada', autenticar, ADM, async (req, res) => {
+router.post('/retirada', autenticar, ADM, exigirFuncao('retirada_caixa'), async (req, res) => {
   try {
     const unidade = unidadeDoUsuario(req)
     const valor = parseFloat(req.body.valor)

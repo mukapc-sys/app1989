@@ -3,6 +3,7 @@ const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
+const { exigirFuncao, podeFuncao } = require('./permissoes')
 
 // Normaliza a forma de pagamento para os valores que o banco aceita.
 function normalizarForma(f) {
@@ -162,7 +163,7 @@ router.post('/:id/corrigir-forma', autenticar, exigirPerfil('proprietario','gere
 
 // POST /comandas/:id/estornar — estorna/exclui uma comanda lançada errada.
 // Tira do caixa e do faturamento. Gestor autoriza sozinho; caixa precisa de senha.
-router.post('/:id/estornar', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
+router.post('/:id/estornar', autenticar, exigirPerfil('proprietario','gerente','caixa'), exigirFuncao('estornar_comanda'), async (req, res) => {
   try {
     let autorizador = null
     if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
@@ -236,6 +237,10 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     const { cliente_id, forma_pagamento, desconto = 0, itens, colaborador_id } = req.body
     if (!forma_pagamento) return res.status(400).json({ erro: 'forma_pagamento é obrigatório' })
     if (!Array.isArray(itens) || itens.length === 0) return res.status(400).json({ erro: 'Adicione pelo menos um item' })
+    // Camada 2: quem não pode dar desconto não pode enviar desconto > 0
+    if ((parseFloat(desconto) || 0) > 0 && !(await podeFuncao(req.usuario.perfil, 'desconto', req.usuario.perfil_base))) {
+      return res.status(403).json({ erro: 'Seu perfil não pode dar desconto.' })
+    }
 
     // #1 — cada produto comissionado (barbearia) precisa do barbeiro NO ITEM.
     const prodIds = itens.filter(i => i && i.tipo === 'produto' && i.id).map(i => i.id)
@@ -399,6 +404,10 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
     const { id } = req.params
 
     if (!forma_pgto) return res.status(400).json({ erro: 'forma_pgto é obrigatório' })
+    // Camada 2: quem não pode dar desconto não pode enviar desconto > 0
+    if ((parseFloat(desconto) || 0) > 0 && !(await podeFuncao(req.usuario.perfil, 'desconto', req.usuario.perfil_base))) {
+      return res.status(403).json({ erro: 'Seu perfil não pode dar desconto.' })
+    }
 
     // Recalcula total com desconto
     const { data: itens } = await supabaseAdmin

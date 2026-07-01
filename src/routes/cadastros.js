@@ -4,7 +4,7 @@ const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
 const ADMIN = exigirPerfil('proprietario', 'gerente')
-const { exigirTela } = require('./permissoes')
+const { exigirTela, exigirFuncao } = require('./permissoes')
 const TELA_ESTOQUE = exigirTela('estoque')
 
 // resolve o "base" de um perfil (perfis novos herdam de um fixo)
@@ -100,7 +100,7 @@ router.get('/colaboradores', autenticar, async (req, res) => {
   }
 })
 
-router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
+router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
     const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
 
@@ -150,7 +150,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
   }
 })
 
-router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
+router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
     const { servico_ids, senha_temp, ...campos } = req.body
 
@@ -650,7 +650,7 @@ router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
 //     ativo) ou de hoje (se já vencido).
 //   - se a comanda falhar, desfaz a alteração na assinatura (rollback).
 // ============================================================
-router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
+router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), exigirFuncao('vender_plano'), async (req, res) => {
   try {
     const { cliente_id, plano_id, vendedor_id, forma_pgto, assinatura_id } = req.body
     if (!cliente_id) return res.status(400).json({ erro: 'Informe o cliente.' })

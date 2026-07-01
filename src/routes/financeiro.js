@@ -5,7 +5,7 @@ const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { calcularComissaoFaixa, limitesMes } = require('./comissao-faixa')
 
 const SEM_ACESSO = exigirPerfil('proprietario', 'gerente')
-const { exigirTela } = require('./permissoes')
+const { exigirTela, exigirFuncao } = require('./permissoes')
 const TELA_FIN = exigirTela('financeiro')
 const TELA_DRE = exigirTela('dre')
 const TELA_COMP = exigirTela('comparativo')
@@ -150,7 +150,7 @@ router.get('/comissoes-faixa', autenticar, async (req, res) => {
 })
 
 // GET /financeiro/comissoes?periodo=mes
-router.get('/comissoes', autenticar, SEM_ACESSO, async (req, res) => {
+router.get('/comissoes', autenticar, SEM_ACESSO, exigirFuncao('ver_comissoes'), async (req, res) => {
   try {
     const { periodo = 'mes', unidade_id } = req.query
     const u = req.usuario
@@ -268,7 +268,7 @@ router.get('/relatorios/estoque', autenticar, exigirPerfil('proprietario','geren
 })
 
 // GET /financeiro/comissoes-barbeiro?periodo=mes&unidade_id=xxx — comissão real por barbeiro
-router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, async (req, res) => {
+router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, exigirFuncao('ver_comissoes'), async (req, res) => {
   try {
     const { periodo = 'mes', unidade_id } = req.query
     const u = req.usuario
@@ -812,7 +812,7 @@ router.get('/dre', autenticar, SEM_ACESSO, TELA_DRE, async (req, res) => {
 })
 
 // POST /financeiro/dre/salvar  { unidade_id, mes, entrada:[{categoria,valor}], despesas:[{categoria,valor}] }
-router.post('/dre/salvar', autenticar, SEM_ACESSO, async (req, res) => {
+router.post('/dre/salvar', autenticar, SEM_ACESSO, exigirFuncao('lancar_despesa'), async (req, res) => {
   try {
     const u = req.usuario
     const { mes, entrada = [], despesas = [] } = req.body

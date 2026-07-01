@@ -8,7 +8,7 @@ const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
-const { exigirTela } = require('./permissoes')
+const { exigirTela, exigirFuncao } = require('./permissoes')
 const CONTADOR = exigirPerfil('proprietario', 'gerente', 'caixa') // quem conta/envia
 const PROP     = exigirPerfil('proprietario')                     // quem aprova
 const TELA_BAL = exigirTela('balanco')
@@ -127,7 +127,7 @@ router.post('/', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
 // ------------------------------------------------------------
 // GET /balanco/pendentes  — proprietário: balanços aguardando aprovação
 // ------------------------------------------------------------
-router.get('/pendentes', autenticar, PROP, async (req, res) => {
+router.get('/pendentes', autenticar, exigirFuncao('aprovar_balanco'), async (req, res) => {
   try {
     const { data } = await supabaseAdmin.from('balancos')
       .select('id, unidade_id, criado_por_nome, criado_em, unidades(nome)')
@@ -145,7 +145,7 @@ router.get('/pendentes', autenticar, PROP, async (req, res) => {
 })
 
 // contagem simples de pendentes (para o card do dashboard)
-router.get('/pendentes/contagem', autenticar, PROP, async (req, res) => {
+router.get('/pendentes/contagem', autenticar, exigirFuncao('aprovar_balanco'), async (req, res) => {
   try {
     const { count } = await supabaseAdmin.from('balancos')
       .select('id', { count: 'exact', head: true }).eq('status', 'pendente')
@@ -186,7 +186,7 @@ router.get('/:id', autenticar, CONTADOR, async (req, res) => {
 // ------------------------------------------------------------
 // POST /balanco/item/:id/aprovar  — PROP aprova: ajusta o estoque para o físico
 // ------------------------------------------------------------
-router.post('/item/:id/aprovar', autenticar, PROP, async (req, res) => {
+router.post('/item/:id/aprovar', autenticar, exigirFuncao('aprovar_balanco'), async (req, res) => {
   try {
     const { data: item } = await supabaseAdmin.from('balanco_itens')
       .select('*, balancos(unidade_id)').eq('id', req.params.id).single()
@@ -233,7 +233,7 @@ router.post('/item/:id/aprovar', autenticar, PROP, async (req, res) => {
 // POST /balanco/item/:id/reprovar  — mantém PENDENTE (proprietário decide depois).
 // Não ajusta nada; apenas garante que o item continua pendente.
 // ------------------------------------------------------------
-router.post('/item/:id/reprovar', autenticar, PROP, async (req, res) => {
+router.post('/item/:id/reprovar', autenticar, exigirFuncao('aprovar_balanco'), async (req, res) => {
   try {
     const { data: item } = await supabaseAdmin.from('balanco_itens')
       .select('id, status').eq('id', req.params.id).single()
