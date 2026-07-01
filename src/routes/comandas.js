@@ -430,6 +430,20 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
       })
     }
 
+    // ITEM 7: consome fichas de bar acumuladas (FIFO, respeita validade 90 dias)
+    try {
+      const { data: cmdInfo } = await supabaseAdmin
+        .from('comandas').select('cliente_id').eq('id', id).single()
+      if (cmdInfo && cmdInfo.cliente_id) {
+        const { data: fichaItens } = await supabaseAdmin
+          .from('itens_comanda').select('quantidade').eq('comanda_id', id).eq('ficha_bar', true)
+        const qtdFichas = (fichaItens || []).reduce((s, i) => s + (parseInt(i.quantidade) || 1), 0)
+        if (qtdFichas > 0) {
+          await supabaseAdmin.rpc('consumir_fichas', { p_cliente: cmdInfo.cliente_id, p_qtd: qtdFichas })
+        }
+      }
+    } catch (e) { console.error('[fichas-plano] consumir:', e.message) }
+
     // Se a comanda é de um agendamento, conclui o agendamento junto (status + valor real).
     if (data && data.agendamento_id) {
       await supabaseAdmin.from('agendamentos')
