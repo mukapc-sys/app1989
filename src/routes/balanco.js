@@ -8,8 +8,10 @@ const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
+const { exigirTela } = require('./permissoes')
 const CONTADOR = exigirPerfil('proprietario', 'gerente', 'caixa') // quem conta/envia
 const PROP     = exigirPerfil('proprietario')                     // quem aprova
+const TELA_BAL = exigirTela('balanco')
 
 // ---- saldo de estoque (mesma regra do módulo de estoque) ----
 function _saldoPorProduto(movs) {
@@ -47,7 +49,7 @@ function unidadeDoUsuario(req) {
 // GET /balanco/produtos?unidade_id=..
 // Lista todos os produtos ativos + saldo do sistema (para a contagem).
 // ------------------------------------------------------------
-router.get('/produtos', autenticar, CONTADOR, async (req, res) => {
+router.get('/produtos', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
   try {
     const unidade_id = unidadeDoUsuario(req)
     if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade.' })
@@ -72,7 +74,7 @@ router.get('/produtos', autenticar, CONTADOR, async (req, res) => {
 // POST /balanco  { unidade_id, itens:[{produto_id, produto_nome, contagem_fisica}], observacao }
 // Cria o balanço (status pendente). Recalcula saldo_sistema no envio. NÃO ajusta nada.
 // ------------------------------------------------------------
-router.post('/', autenticar, CONTADOR, async (req, res) => {
+router.post('/', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
   try {
     const unidade_id = unidadeDoUsuario(req)
     const itens = req.body.itens || []
