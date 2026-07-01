@@ -298,30 +298,17 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     const em_dia = (a.status === 'ativa') && !venceu
     const pode_zerar = em_dia && (visitas_usadas < visitas_semana)
 
-    // fichas de bar usadas no ciclo atual (não acumulam de um ciclo p/ outro).
-    // Ciclo = do mês anterior à renovação até agora (ou início do mês, se sem renovação).
-    let fichas_usadas = 0
+    // ITEM 7: fichas ACUMULAM e expiram em 90 dias (tabela fichas_plano).
+    // Disponíveis = soma dos lotes válidos (não expirados) ainda com saldo.
+    let fichas_disponiveis = 0
     try {
-      let cicloIni
-      if (a.data_renovacao) {
-        const dr = new Date(String(a.data_renovacao).slice(0, 10) + 'T00:00:00-03:00')
-        dr.setMonth(dr.getMonth() - 1)
-        cicloIni = dr.toISOString()
-      } else {
-        const n = new Date(Date.now() - 3 * 3600 * 1000)
-        cicloIni = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), 1)).toISOString()
-      }
-      const { data: fus } = await supabaseAdmin.from('itens_comanda')
-        .select('id, comandas!inner(cliente_id,status,finalizada_em)')
-        .eq('comandas.cliente_id', cliente_id)
-        .eq('comandas.status', 'finalizada')
-        .gte('comandas.finalizada_em', cicloIni)
-        .eq('ficha_bar', true)
-      fichas_usadas = (fus || []).length
-    } catch (e) { fichas_usadas = 0 }
+      const { data: fd } = await supabaseAdmin.rpc('fichas_disponiveis_cliente', { p_cliente: cliente_id })
+      fichas_disponiveis = parseInt(fd) || 0
+    } catch (e) { fichas_disponiveis = 0 }
     const fichas_total = plano.fichas_bar_mes || 0
-    // Plano vencido/inativo não dá direito a fichas no momento.
-    const fichas_disponiveis = em_dia ? Math.max(0, fichas_total - fichas_usadas) : 0
+    // Plano vencido/inativo não dá direito a usar fichas no momento.
+    if (!em_dia) fichas_disponiveis = 0
+    const fichas_usadas = 0  // (compat: o saldo já vem líquido da tabela)
 
     return res.json({
       assinante: true,
@@ -645,7 +632,7 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
     if (!vendedor_id) return res.status(400).json({ erro: 'Informe o barbeiro responsável da mensalidade.' })
     if (!forma_pgto) return res.status(400).json({ erro: 'Informe a forma de pagamento.' })
 
-    const { data: plano } = await supabaseAdmin.from('planos').select('id, nome, valor_mensal').eq('id', plano_id).single()
+    const { data: plano } = await supabaseAdmin.from('planos').select('id, nome, valor_mensal, fichas_bar_mes').eq('id', plano_id).single()
     if (!plano) return res.status(404).json({ erro: 'Plano não encontrado.' })
     const valor = parseFloat(plano.valor_mensal) || 0
 
@@ -688,6 +675,25 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       if (eN) throw eN
       assinatura = nova; criouNova = true
     }
+
+    // ===== ITEM 7: gera lote de fichas de bar (acumulam, validade 90 dias) =====
+    try {
+      const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
+      if (qtdFichas > 0) {
+        const agora = new Date()
+        const expira = new Date(agora.getTime() + 90 * 24 * 3600 * 1000)
+        await supabaseAdmin.from('fichas_plano').insert({
+          cliente_id,
+          assinatura_id: assinatura.id,
+          plano_id,
+          quantidade: qtdFichas,
+          usadas: 0,
+          gerada_em: agora.toISOString(),
+          expira_em: expira.toISOString(),
+          origem: assinatura_id ? 'renovacao' : 'nova_assinatura',
+        })
+      }
+    } catch (e) { console.error('[fichas-plano] gerar:', e.message) }
 
     // ===== comanda da mensalidade (finalizada) =====
     // Se sem_comanda=true, a mensalidade é cobrada noutra comanda (ex: no próprio
