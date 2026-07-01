@@ -79,6 +79,31 @@ router.post('/minha-senha/login', autenticar, async (req, res) => {
   }
 })
 
+// TEMPORÁRIA — proprietário define a senha de login de um colaborador pelo e-mail.
+// Usada para casos em que não há acesso ao e-mail do colaborador.
+// REMOVER esta rota depois de usar.
+router.post('/admin/definir-senha', autenticar, ADMIN, async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase()
+    const nova  = String(req.body.senha || '')
+    if (!email || nova.length < 6) {
+      return res.status(400).json({ erro: 'Informe email e uma senha de ao menos 6 caracteres.' })
+    }
+    // acha o colaborador e o user_id (auth) pelo e-mail
+    const { data: colab } = await supabaseAdmin
+      .from('colaboradores').select('id, nome, user_id, email').ilike('email', email).single()
+    if (!colab || !colab.user_id) {
+      return res.status(404).json({ erro: 'Colaborador (ou login) não encontrado para esse e-mail.' })
+    }
+    const { error } = await supabaseAdmin.auth.admin.updateUserById(colab.user_id, { password: nova })
+    if (error) throw error
+    return res.json({ ok: true, colaborador: colab.nome })
+  } catch (err) {
+    console.error('[admin/definir-senha]', err.message)
+    return res.status(500).json({ erro: 'Erro ao definir senha: ' + err.message })
+  }
+})
+
 
 // ============================================================
 // VALE PIX
