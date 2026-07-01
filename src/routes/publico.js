@@ -9,6 +9,33 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { supabaseAdmin } = require('../config/supabase')
 
+// ============================================================
+// Busca de cliente por telefone — normalização robusta.
+// Mesmo critério do sync do AppBarber (tira DDI 55, compara 11 dígitos).
+// Evita duplicar cadastro e casa com o cliente importado do AppBarber.
+// ============================================================
+function normalizarTel(s) {
+  if (!s) return null
+  let t = String(s).replace(/\D/g, '')          // só dígitos
+  if (t.length >= 12 && t.startsWith('55')) t = t.slice(2) // tira DDI 55
+  return t || null
+}
+// Retorna o cliente que casa pelo telefone, ou null. Tenta 11 dígitos e cai pra 10.
+async function acharClientePorTel(whatsapp, campos) {
+  const tel = normalizarTel(whatsapp)
+  if (!tel || tel.length < 10) return null
+  const sel = campos || 'id,nome,whatsapp,senha_hash,ativo'
+  // 1) tenta pelos últimos 11 dígitos (celular com 9)
+  if (tel.length >= 11) {
+    const { data } = await supabaseAdmin.from('clientes').select(sel).ilike('whatsapp', '%' + tel.slice(-11) + '%').limit(1)
+    if (data && data.length) return data[0]
+  }
+  // 2) cai pros últimos 10 (fixo ou celular antigo sem 9)
+  const { data: d2 } = await supabaseAdmin.from('clientes').select(sel).ilike('whatsapp', '%' + tel.slice(-10) + '%').limit(1)
+  if (d2 && d2.length) return d2[0]
+  return null
+}
+
 // ---- Token do cliente (mesmo JWT_SECRET do sistema) ----
 // Horário de funcionamento da barbearia (minutos desde 00:00). Retorna null se fechado.
 //  Seg-Sex: 10h-20h · Sábado e feriados: 9h-18h · Domingo: fechado
@@ -290,17 +317,16 @@ router.post('/agendar', async (req, res) => {
       return res.status(409).json({ erro: 'Esse horário acabou de ser ocupado. Escolha outro, por favor.' })
     }
 
-    // cliente: acha por WhatsApp (últimos 8 dígitos) ou cria
+    // cliente: acha por WhatsApp (normalizado) ou cria
     const tel = String(whatsapp).replace(/\D/g, '')
     let cliente_id = null
     if (tel.length >= 8) {
-      const { data: achados } = await supabaseAdmin.from('clientes')
-        .select('id').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
-      if (achados && achados.length) cliente_id = achados[0].id
+      const achado = await acharClientePorTel(whatsapp, 'id')
+      if (achado) cliente_id = achado.id
     }
     if (!cliente_id) {
       const { data: novo, error: ec } = await supabaseAdmin.from('clientes')
-        .insert({ nome: String(nome).trim(), whatsapp: tel, origem: 'online', unidade_pref: col.unidade_id, ativo: true })
+        .insert({ nome: String(nome).trim(), whatsapp: normalizarTel(whatsapp) || tel, origem: 'online', unidade_pref: col.unidade_id, ativo: true })
         .select('id').single()
       if (ec) throw ec
       cliente_id = novo.id
@@ -362,10 +388,9 @@ router.get('/meus-agendamentos', async (req, res) => {
     if (!cliente_id) {
       const tel = String(req.query.whatsapp || '').replace(/\D/g, '')
       if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
-      const { data: cli } = await supabaseAdmin.from('clientes')
-        .select('id').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
-      if (!cli || !cli.length) return res.json([])
-      cliente_id = cli[0].id
+      const cli = await acharClientePorTel(req.query.whatsapp, 'id')
+      if (!cli) return res.json([])
+      cliente_id = cli.id
     }
 
     const { data, error } = await supabaseAdmin.from('agendamentos')
@@ -394,15 +419,14 @@ router.post('/registrar', async (req, res) => {
 
     const hash = bcrypt.hashSync(String(senha), 10)
 
-    // já existe um cliente com esse WhatsApp?
-    const { data: achados } = await supabaseAdmin.from('clientes')
-      .select('id,nome,whatsapp,senha_hash').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
+    // já existe um cliente com esse WhatsApp? (normalizado — casa com importados do AppBarber)
+    const cliAchado = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash')
 
     let cli
-    if (achados && achados.length) {
-      cli = achados[0]
+    if (cliAchado) {
+      cli = cliAchado
       if (cli.senha_hash) return res.status(409).json({ erro: 'Já existe uma conta com esse WhatsApp. Faça login.' })
-      // cliente já existia (criou agendando antes) e ainda não tinha senha -> define agora
+      // cliente já existia (importado do AppBarber ou criou agendando) e ainda não tinha senha -> define agora
       const { data: up, error: eu } = await supabaseAdmin.from('clientes')
         .update({ nome: String(nome).trim(), senha_hash: hash }).eq('id', cli.id)
         .select('id,nome,whatsapp').single()
@@ -410,7 +434,7 @@ router.post('/registrar', async (req, res) => {
       cli = up
     } else {
       const { data: novo, error: en } = await supabaseAdmin.from('clientes')
-        .insert({ nome: String(nome).trim(), whatsapp: tel, senha_hash: hash, origem: 'app', ativo: true })
+        .insert({ nome: String(nome).trim(), whatsapp: normalizarTel(whatsapp) || tel, senha_hash: hash, origem: 'app', ativo: true })
         .select('id,nome,whatsapp').single()
       if (en) throw en
       cli = novo
@@ -432,9 +456,7 @@ router.post('/login', async (req, res) => {
     const tel = String(whatsapp).replace(/\D/g, '')
     if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
 
-    const { data: achados } = await supabaseAdmin.from('clientes')
-      .select('id,nome,whatsapp,senha_hash,ativo').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
-    const cli = achados && achados[0]
+    const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash,ativo')
     if (!cli || !cli.senha_hash) return res.status(401).json({ erro: 'Conta não encontrada. Crie uma conta.' })
     if (cli.ativo === false) return res.status(401).json({ erro: 'Conta inativa. Fale com a barbearia.' })
     if (!bcrypt.compareSync(String(senha), cli.senha_hash)) return res.status(401).json({ erro: 'WhatsApp ou senha incorretos' })
@@ -455,9 +477,7 @@ router.post('/senha/esqueci', async (req, res) => {
     const tel = String(whatsapp || '').replace(/\D/g, '')
     if (tel.length < 10) return res.status(400).json({ erro: 'Informe o WhatsApp com DDD' })
 
-    const { data: achados } = await supabaseAdmin.from('clientes')
-      .select('id,nome,whatsapp,senha_hash').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
-    const cli = achados && achados[0]
+    const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash')
 
     // Só envia se existir uma conta com senha. Mesmo assim, responde sempre "ok"
     // para não revelar se o número tem conta ou não.
@@ -493,9 +513,7 @@ router.post('/senha/redefinir', async (req, res) => {
     if (tel.length < 10 || !cod) return res.status(400).json({ erro: 'Informe o WhatsApp e o código' })
     if (String(senha || '').length < 4) return res.status(400).json({ erro: 'A nova senha precisa de pelo menos 4 caracteres' })
 
-    const { data: achados } = await supabaseAdmin.from('clientes')
-      .select('id,nome,whatsapp,reset_codigo,reset_expira').ilike('whatsapp', '%' + tel.slice(-8) + '%').limit(1)
-    const cli = achados && achados[0]
+    const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,reset_codigo,reset_expira')
     if (!cli || !cli.reset_codigo) return res.status(400).json({ erro: 'Código inválido. Peça um novo.' })
     if (cli.reset_expira && new Date(cli.reset_expira).getTime() < Date.now()) {
       return res.status(400).json({ erro: 'Código expirado. Peça um novo.' })
