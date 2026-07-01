@@ -193,6 +193,122 @@ router.get('/minhas', autenticar, async (req, res) => {
   }
 })
 
+// ============================================================
+// CAMADA 2 — Funcoes sensiveis (acoes especificas)
+// Padrao: quem ja podia hoje continua podendo (por BASE do perfil).
+// ============================================================
+const FUNCOES = [
+  { chave:'desconto',          nome:'Dar desconto na comanda',   padrao:['gerente','caixa','colaborador'] },
+  { chave:'retirada_caixa',    nome:'Retirada / saida de caixa', padrao:['gerente'] },
+  { chave:'estornar_comanda',  nome:'Cancelar / estornar comanda', padrao:['gerente','caixa'] },
+  { chave:'lancar_despesa',    nome:'Lancar despesa no DRE',     padrao:['gerente'] },
+  { chave:'aprovar_balanco',   nome:'Aprovar balanco de estoque', padrao:[] },
+  { chave:'gerir_colaborador', nome:'Cadastrar / editar colaborador', padrao:['gerente'] },
+  { chave:'ver_comissoes',     nome:'Ver comissao dos outros',   padrao:['gerente'] },
+  { chave:'vender_plano',      nome:'Vender / renovar plano',    padrao:['gerente','caixa'] },
+]
+const FUNC_CHAVES = FUNCOES.map(f => f.chave)
+
+function padraoPermiteFuncao(base, funcao) {
+  if (base === 'proprietario') return true
+  const f = FUNCOES.find(x => x.chave === funcao)
+  if (!f) return true
+  return f.padrao.includes(base)
+}
+
+async function podeFuncao(perfilChave, funcao, baseConhecida) {
+  if (perfilChave === 'proprietario') return true
+  const { data } = await supabaseAdmin.from('permissoes_funcao')
+    .select('permitido').eq('perfil', perfilChave).eq('funcao', funcao).maybeSingle()
+  if (data && typeof data.permitido === 'boolean') return data.permitido
+  const base = baseConhecida || await baseDoPerfil(perfilChave)
+  return padraoPermiteFuncao(base, funcao)
+}
+
+function exigirFuncao(chave) {
+  return async (req, res, next) => {
+    try {
+      const perfil = req.usuario && req.usuario.perfil
+      const base = req.usuario && req.usuario.perfil_base
+      if (!perfil) return res.status(401).json({ erro: 'Nao autenticado' })
+      if (perfil === 'proprietario' || base === 'proprietario') return next()
+      const ok = await podeFuncao(perfil, chave, base)
+      if (!ok) return res.status(403).json({ erro: 'Acao nao permitida para seu perfil.' })
+      return next()
+    } catch (e) {
+      if (padraoPermiteFuncao(req.usuario && req.usuario.perfil_base, chave)) return next()
+      return res.status(403).json({ erro: 'Acao nao permitida.' })
+    }
+  }
+}
+
+router.get('/funcoes', autenticar, ADMIN, async (req, res) => {
+  try {
+    const perfis = (await listarPerfis()).filter(p => p.chave !== 'proprietario')
+    const { data: salvas } = await supabaseAdmin.from('permissoes_funcao').select('perfil, funcao, permitido')
+    const mapa = {}
+    ;(salvas || []).forEach(r => { mapa[r.perfil + '|' + r.funcao] = r.permitido })
+    const grade = {}
+    perfis.forEach(p => {
+      grade[p.chave] = {}
+      FUNC_CHAVES.forEach(fn => {
+        const k = p.chave + '|' + fn
+        grade[p.chave][fn] = (k in mapa) ? mapa[k] : padraoPermiteFuncao(p.base, fn)
+      })
+    })
+    return res.json({ funcoes: FUNCOES, perfis, grade })
+  } catch (err) {
+    console.error('[permissoes/funcoes GET]', err.message)
+    return res.status(500).json({ erro: 'Erro ao carregar funcoes' })
+  }
+})
+
+router.post('/funcoes', autenticar, ADMIN, async (req, res) => {
+  try {
+    const grade = req.body.grade || {}
+    const linhas = []
+    Object.keys(grade).forEach(perfil => {
+      if (perfil === 'proprietario') return
+      const g = grade[perfil] || {}
+      FUNC_CHAVES.forEach(fn => {
+        if (fn in g) linhas.push({ perfil, funcao: fn, permitido: !!g[fn], atualizado_em: new Date().toISOString() })
+      })
+    })
+    if (!linhas.length) return res.status(400).json({ erro: 'Nada para salvar.' })
+    const { error } = await supabaseAdmin.from('permissoes_funcao').upsert(linhas, { onConflict: 'perfil,funcao' })
+    if (error) throw error
+    return res.json({ ok: true, salvas: linhas.length })
+  } catch (err) {
+    console.error('[permissoes/funcoes POST]', err.message)
+    return res.status(500).json({ erro: 'Erro ao salvar funcoes: ' + err.message })
+  }
+})
+
+router.get('/minhas-funcoes', autenticar, async (req, res) => {
+  try {
+    const perfil = req.usuario.perfil
+    const base = req.usuario.perfil_base
+    const out = {}
+    if (perfil === 'proprietario' || base === 'proprietario') {
+      FUNC_CHAVES.forEach(f => out[f] = true)
+      return res.json({ perfil, funcoes: out })
+    }
+    const { data: salvas } = await supabaseAdmin.from('permissoes_funcao')
+      .select('funcao, permitido').eq('perfil', perfil)
+    const mapa = {}
+    ;(salvas || []).forEach(r => { mapa[r.funcao] = r.permitido })
+    FUNC_CHAVES.forEach(fn => { out[fn] = (fn in mapa) ? mapa[fn] : padraoPermiteFuncao(base, fn) })
+    return res.json({ perfil, funcoes: out })
+  } catch (err) {
+    const out = {}
+    FUNC_CHAVES.forEach(fn => out[fn] = padraoPermiteFuncao(req.usuario && req.usuario.perfil_base, fn))
+    return res.json({ perfil: req.usuario && req.usuario.perfil, funcoes: out })
+  }
+})
+
 module.exports = router
 module.exports.exigirTela = exigirTela
+module.exports.exigirFuncao = exigirFuncao
 module.exports.TELAS = TELAS
+module.exports.FUNCOES = FUNCOES
+module.exports.podeFuncao = podeFuncao
