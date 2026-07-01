@@ -313,5 +313,26 @@ router.get('/dashboard/agenda/:unidade_id', autenticar, async (req, res) => {
   }
 })
 
-module.exports = router
+// ITEM 11 — contagem de clientes: total, importados (AppBarber) e com login no app
+router.get('/clientes/contagem', autenticar, async (req, res) => {
+  try {
+    async function conta(filtro) {
+      let q = supabaseAdmin.from('clientes').select('id', { count: 'exact', head: true }).eq('ativo', true)
+      if (filtro) q = filtro(q)
+      const { count } = await q
+      return count || 0
+    }
+    const total       = await conta(null)
+    const importados  = await conta(q => q.in('origem', ['appbarber', 'appbarber-assinante']))
+    const sistema     = await conta(q => q.eq('origem', 'sistema'))
+    const autocad     = await conta(q => q.in('origem', ['app', 'online']))
+    const com_login   = await conta(q => q.not('senha_hash', 'is', null))
 
+    return res.json({ total, importados, sistema, autocadastro: autocad, com_login_app: com_login })
+  } catch (err) {
+    console.error('[clientes/contagem]', err.message)
+    return res.status(500).json({ erro: 'Erro ao contar clientes' })
+  }
+})
+
+module.exports = router
