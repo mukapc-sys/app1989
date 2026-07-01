@@ -5,6 +5,16 @@ const { autenticar, exigirPerfil } = require('../middleware/auth')
 
 const ADMIN = exigirPerfil('proprietario', 'gerente')
 
+// resolve o "base" de um perfil (perfis novos herdam de um fixo)
+const PERFIS_FIXOS_CAD = ['proprietario','gerente','caixa','colaborador','funcionario','cliente']
+async function baseDoPerfilCad(perfil) {
+  if (!perfil || PERFIS_FIXOS_CAD.includes(perfil)) return perfil
+  try {
+    const { data } = await supabaseAdmin.from('perfis_acesso').select('base').eq('chave', perfil).maybeSingle()
+    return (data && data.base) || 'colaborador'
+  } catch (e) { return 'colaborador' }
+}
+
 // ============ UNIDADES ============
 
 router.get('/unidades', autenticar, async (req, res) => {
@@ -100,7 +110,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
       if (perfilFinal === 'proprietario') perfilFinal = 'colaborador'
     }
 
-    const ehFuncionario = (perfilFinal === 'funcionario')
+    const ehFuncionario = (perfilFinal === 'funcionario') || (await baseDoPerfilCad(perfilFinal) === 'funcionario')
 
     // Funcionário não comissionado NÃO tem login (sem user no Auth).
     let userId = null
