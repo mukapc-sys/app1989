@@ -503,6 +503,7 @@ router.post('/cashback/resgatar', autenticar, async (req, res) => {
     let pontos = parseInt(req.body && req.body.pontos) || 0
     if (!cliente_id || pontos <= 0) return res.json({ pontos_usados: 0 })
     pontos = Math.floor(pontos / 30) * 30   // sempre múltiplo de 30 (30 pts = R$1)
+    if (pontos > 600) pontos = 600          // teto por comanda: 600 pts (= R$20)
     if (pontos <= 0) return res.json({ pontos_usados: 0 })
 
     // Trava: se essa comanda já teve resgate, não debita de novo.
