@@ -4,6 +4,8 @@ const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
 const ADMIN = exigirPerfil('proprietario', 'gerente')
+const { exigirTela } = require('./permissoes')
+const TELA_ESTOQUE = exigirTela('estoque')
 
 // resolve o "base" de um perfil (perfis novos herdam de um fixo)
 const PERFIS_FIXOS_CAD = ['proprietario','gerente','caixa','colaborador','funcionario','cliente']
@@ -502,7 +504,7 @@ function _saldoPorProduto(movs) {
 }
 
 // GET /estoque/saldo?unidade_id=xxx — saldo atual de cada produto ativo na unidade
-router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
+router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','caixa'), TELA_ESTOQUE, async (req, res) => {
   try {
     const unidade_id = req.usuario.perfil === 'proprietario' ? (req.query.unidade_id || null) : req.usuario.unidade_id
     if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade' })
