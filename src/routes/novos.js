@@ -51,6 +51,34 @@ router.get('/autorizacao/status', autenticar, async (req, res) => {
   }
 })
 
+// ITEM 8 — troca da PRÓPRIA senha de LOGIN (qualquer usuário logado).
+// Exige a senha atual pra confirmar identidade.
+router.post('/minha-senha/login', autenticar, async (req, res) => {
+  try {
+    const atual = String(req.body.senha_atual || '')
+    const nova  = String(req.body.senha_nova || '')
+    if (nova.length < 4) return res.status(400).json({ erro: 'A nova senha precisa ter ao menos 4 caracteres.' })
+
+    const { data: colab } = await supabaseAdmin
+      .from('colaboradores').select('senha_hash').eq('id', req.usuario.id).single()
+    if (!colab) return res.status(404).json({ erro: 'Usuário não encontrado.' })
+
+    // se já tem senha, confere a atual; se não tem (1ª vez), permite definir
+    if (colab.senha_hash) {
+      const ok = await bcrypt.compare(atual, colab.senha_hash)
+      if (!ok) return res.status(403).json({ erro: 'Senha atual incorreta.' })
+    }
+    const hash = await bcrypt.hash(nova, 10)
+    const { error } = await supabaseAdmin
+      .from('colaboradores').update({ senha_hash: hash }).eq('id', req.usuario.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[minha-senha/login]', err.message)
+    return res.status(500).json({ erro: 'Erro ao alterar senha de login' })
+  }
+})
+
 
 // ============================================================
 // VALE PIX
