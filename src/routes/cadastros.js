@@ -106,7 +106,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
     let userId = null
     if (!ehFuncionario) {
       const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
-        email, password: senha_temp || 'Troque123!', email_confirm: true
+        email, password: senha_temp || 'Barber1989!', email_confirm: true
       })
       if (authErr) throw authErr
       userId = authData.user.id
