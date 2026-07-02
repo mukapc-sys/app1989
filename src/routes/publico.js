@@ -405,13 +405,37 @@ router.get('/meus-agendamentos', async (req, res) => {
       cliente_id = cli.id
     }
 
-    const { data, error } = await supabaseAdmin.from('agendamentos')
-      .select('id,data_hora_ini,data_hora_fim,status,valor,servicos(nome),colaboradores(nome),unidades(nome)')
+    // Busca os agendamentos SEM join embutido (evita erro de relação no Supabase).
+    const { data: ags, error } = await supabaseAdmin.from('agendamentos')
+      .select('id,data_hora_ini,data_hora_fim,status,valor,servico_id,colaborador_id,unidade_id')
       .eq('cliente_id', cliente_id)
       .order('data_hora_ini', { ascending: false })
       .limit(30)
     if (error) throw error
-    return res.json(data || [])
+    const lista = ags || []
+    if (!lista.length) return res.json([])
+
+    // Preenche nomes com buscas separadas (mesmo padrão do resto do sistema).
+    const ids = (arr, campo) => [...new Set(arr.map(x => x[campo]).filter(Boolean))]
+    const [svcs, cols, unis] = await Promise.all([
+      supabaseAdmin.from('servicos').select('id,nome').in('id', ids(lista, 'servico_id')),
+      supabaseAdmin.from('colaboradores').select('id,nome').in('id', ids(lista, 'colaborador_id')),
+      supabaseAdmin.from('unidades').select('id,nome').in('id', ids(lista, 'unidade_id')),
+    ])
+    const mapa = (r) => Object.fromEntries(((r && r.data) || []).map(x => [x.id, x.nome]))
+    const mSvc = mapa(svcs), mCol = mapa(cols), mUni = mapa(unis)
+
+    const out = lista.map(a => ({
+      id: a.id,
+      data_hora_ini: a.data_hora_ini,
+      data_hora_fim: a.data_hora_fim,
+      status: a.status,
+      valor: a.valor,
+      servicos: { nome: mSvc[a.servico_id] || 'Serviço' },
+      colaboradores: { nome: mCol[a.colaborador_id] || '' },
+      unidades: { nome: mUni[a.unidade_id] || '' },
+    }))
+    return res.json(out)
   } catch (e) {
     console.error('[publico/meus-agendamentos]', e.message)
     return res.status(500).json({ erro: 'Erro ao buscar agendamentos' })
