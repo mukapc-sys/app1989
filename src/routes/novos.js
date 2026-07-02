@@ -166,28 +166,9 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
     }).select().single()
     if (eVale) throw eVale
 
-    // 2) saída no caixa da unidade (sessão aberta, se houver)
-    let sessao_id = null
-    try {
-      const { data: abertos } = await supabaseAdmin.from('caixa_sessoes')
-        .select('id').eq('status', 'aberto').eq('unidade_id', unidade_id)
-        .order('aberto_em', { ascending: false }).limit(1)
-      sessao_id = (abertos && abertos[0]) ? abertos[0].id : null
-    } catch (e) {}
-    let retirada_id = null
-    try {
-      const { data: ret } = await supabaseAdmin.from('caixa_retiradas').insert({
-        sessao_id,
-        unidade_id,
-        valor,
-        motivo:              'Vale funcionário — ' + (colab.nome || ''),
-        responsavel_id:      colaborador_id,
-        responsavel_nome:    colab.nome || null,
-        autorizado_por:      autorizador.id,
-        autorizado_por_nome: autorizador.nome || null,
-      }).select().single()
-      if (ret) { retirada_id = ret.id; await supabaseAdmin.from('vales').update({ retirada_id }).eq('id', vale.id) }
-    } catch (e) { console.error('[vales] caixa:', e.message) }
+    // (Vale de funcionário NÃO gera saída de caixa — o valor é descontado da
+    //  comissão do funcionário, não sai dinheiro do caixa. Só registra o vale,
+    //  soma no saldo dele e baixa o estoque.)
 
     // 3) soma no saldo do barbeiro (mesmo saldo do PIX)
     try {
@@ -213,7 +194,7 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
       catch (e) { console.error('[vales] estoque:', e.message) }
     }
 
-    return res.status(201).json({ ok: true, vale, retirada_id, baixou_estoque: movs.length })
+    return res.status(201).json({ ok: true, vale, baixou_estoque: movs.length })
   } catch (err) {
     console.error('[vales]', err.message)
     return res.status(500).json({ erro: 'Erro ao registrar vale: ' + err.message })
