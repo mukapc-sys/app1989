@@ -722,10 +722,36 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
       limite_mes: x.limite_mes,
       usado: cont[x.servico_id] || 0,
     }))
+
+    // FICHAS DE BAR: disponíveis (acumulam, expiram em 90 dias) + validade do próximo lote
+    let fichas_disponiveis = 0
+    try {
+      const { data: fd } = await supabaseAdmin.rpc('fichas_disponiveis_cliente', { p_cliente: req.cliente.id })
+      fichas_disponiveis = parseInt(fd) || 0
+    } catch (_) { fichas_disponiveis = 0 }
+    // próxima validade: lote não expirado, ainda com saldo, que expira primeiro
+    let fichas_validade = null
+    try {
+      const agoraISO = new Date().toISOString()
+      const { data: lotes } = await supabaseAdmin.from('fichas_plano')
+        .select('quantidade,usadas,expira_em')
+        .eq('cliente_id', req.cliente.id)
+        .gt('expira_em', agoraISO)
+        .order('expira_em', { ascending: true })
+      const loteComSaldo = (lotes || []).find(l => ((l.quantidade || 0) - (l.usadas || 0)) > 0)
+      if (loteComSaldo) fichas_validade = loteComSaldo.expira_em
+    } catch (_) {}
+
     const barb = a.colaboradores || null
     const barbeiro = barb ? { id: barb.id, nome: barb.nome } : null
     const unidade = (barb && barb.unidades) ? { id: barb.unidades.id, nome: barb.unidades.nome } : null
-    return res.json({ ativo: true, plano: { id: plano.id, nome: plano.nome, valor_mensal: plano.valor_mensal }, servicos, barbeiro, unidade })
+    return res.json({
+      ativo: true,
+      plano: { id: plano.id, nome: plano.nome, valor_mensal: plano.valor_mensal },
+      servicos, barbeiro, unidade,
+      fichas_disponiveis,
+      fichas_validade
+    })
   } catch (e) {
     console.error('[publico/meu-plano]', e.message)
     return res.status(500).json({ erro: 'Erro ao carregar plano' })
