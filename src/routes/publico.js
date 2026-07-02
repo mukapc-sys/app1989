@@ -1,6 +1,6 @@
 // ============================================================
-//  ROTAS PÚBLICAS (sem login) — usadas pelo front do cliente
-//  (agendar.barbearia1989.com.br)
+//  ROTAS PÚBLICAS (sem login) — usadas pelo app do cliente
+//  (barbearia1989.com.br)
 //  Não exigem token. Mantêm validação para evitar abuso básico.
 // ============================================================
 const express = require('express')
@@ -439,6 +439,38 @@ router.get('/meus-agendamentos', async (req, res) => {
   } catch (e) {
     console.error('[publico/meus-agendamentos]', e.message)
     return res.status(500).json({ erro: 'Erro ao buscar agendamentos' })
+  }
+})
+
+// ============================================================
+// GET /publico/meus-pontos — saldo de cashback do cliente logado
+// ============================================================
+router.get('/meus-pontos', async (req, res) => {
+  try {
+    let cliente_id = null
+    const h = req.headers.authorization || ''
+    const t = h.replace('Bearer ', '').trim()
+    if (t) {
+      try {
+        const d = jwt.verify(t, process.env.JWT_SECRET)
+        if (d.tipo === 'cliente') cliente_id = d.id
+      } catch (_) {}
+    }
+    if (!cliente_id) {
+      const cli = await acharClientePorTel(req.query.whatsapp, 'id')
+      if (!cli) return res.json({ saldo: 0, total_acumulado: 0 })
+      cliente_id = cli.id
+    }
+    const { data } = await supabaseAdmin.from('carteira_pontos')
+      .select('saldo,total_acumulado,expira_em').eq('cliente_id', cliente_id).maybeSingle()
+    return res.json({
+      saldo: (data && data.saldo) ? data.saldo : 0,
+      total_acumulado: (data && data.total_acumulado) ? data.total_acumulado : 0,
+      expira_em: (data && data.expira_em) ? data.expira_em : null
+    })
+  } catch (e) {
+    console.error('[publico/meus-pontos]', e.message)
+    return res.json({ saldo: 0, total_acumulado: 0, expira_em: null })
   }
 })
 
