@@ -264,6 +264,18 @@ router.post('/agendar', async (req, res) => {
       return res.status(400).json({ erro: 'Preencha nome, WhatsApp, barbeiro, serviço e horário' })
     }
 
+    // Se o cliente está LOGADO, o token é a fonte da verdade do cliente_id.
+    // (evita agendamento cair em cadastro duplicado e sumir do histórico)
+    let clienteIdToken = null
+    try {
+      const h = req.headers.authorization || ''
+      const t = h.replace('Bearer ', '').trim()
+      if (t) {
+        const d = jwt.verify(t, process.env.JWT_SECRET)
+        if (d.tipo === 'cliente') clienteIdToken = d.id
+      }
+    } catch (_) { /* token inválido -> segue por whatsapp */ }
+
     // barbeiro -> unidade
     const { data: col } = await supabaseAdmin.from('colaboradores')
       .select('id,unidade_id,nome,ativo').eq('id', colaborador_id).single()
@@ -317,10 +329,10 @@ router.post('/agendar', async (req, res) => {
       return res.status(409).json({ erro: 'Esse horário acabou de ser ocupado. Escolha outro, por favor.' })
     }
 
-    // cliente: acha por WhatsApp (normalizado) ou cria
+    // cliente: token (logado) tem prioridade; senão acha por WhatsApp; senão cria
     const tel = String(whatsapp).replace(/\D/g, '')
-    let cliente_id = null
-    if (tel.length >= 8) {
+    let cliente_id = clienteIdToken || null
+    if (!cliente_id && tel.length >= 8) {
       const achado = await acharClientePorTel(whatsapp, 'id')
       if (achado) cliente_id = achado.id
     }
@@ -403,6 +415,63 @@ router.get('/meus-agendamentos', async (req, res) => {
   } catch (e) {
     console.error('[publico/meus-agendamentos]', e.message)
     return res.status(500).json({ erro: 'Erro ao buscar agendamentos' })
+  }
+})
+
+// ============================================================
+// POST /publico/cancelar-agendamento — cliente cancela o próprio horário
+// Regra: só até 15 minutos ANTES do horário marcado.
+// ============================================================
+router.post('/cancelar-agendamento', async (req, res) => {
+  try {
+    const { agendamento_id } = req.body || {}
+    if (!agendamento_id) return res.status(400).json({ erro: 'Agendamento não informado' })
+
+    // identifica o cliente: token (logado) ou whatsapp
+    let cliente_id = null
+    const h = req.headers.authorization || ''
+    const t = h.replace('Bearer ', '').trim()
+    if (t) {
+      try {
+        const d = jwt.verify(t, process.env.JWT_SECRET)
+        if (d.tipo === 'cliente') cliente_id = d.id
+      } catch (_) {}
+    }
+    if (!cliente_id) {
+      const cli = await acharClientePorTel(req.body.whatsapp, 'id')
+      if (!cli) return res.status(401).json({ erro: 'Não foi possível identificar você. Faça login.' })
+      cliente_id = cli.id
+    }
+
+    // busca o agendamento e confere que é DESTE cliente
+    const { data: ag } = await supabaseAdmin.from('agendamentos')
+      .select('id,cliente_id,data_hora_ini,status,canal_origem')
+      .eq('id', agendamento_id).single()
+    if (!ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
+    if (ag.cliente_id !== cliente_id) return res.status(403).json({ erro: 'Esse agendamento não é seu.' })
+
+    // já cancelado/concluído?
+    if (['cancelado', 'concluido', 'nao_compareceu'].includes(ag.status)) {
+      return res.status(400).json({ erro: 'Esse agendamento não pode mais ser cancelado.' })
+    }
+
+    // REGRA DOS 15 MINUTOS
+    const agora = new Date()
+    const inicio = new Date(ag.data_hora_ini)
+    const limite = new Date(inicio.getTime() - 15 * 60 * 1000) // 15 min antes
+    if (agora > limite) {
+      return res.status(400).json({ erro: 'O prazo para cancelar (até 15 minutos antes) já passou. Fale com a barbearia.' })
+    }
+
+    // cancela
+    const { error: eu } = await supabaseAdmin.from('agendamentos')
+      .update({ status: 'cancelado' }).eq('id', agendamento_id)
+    if (eu) throw eu
+
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[publico/cancelar-agendamento]', e.message)
+    return res.status(500).json({ erro: 'Erro ao cancelar' })
   }
 })
 
