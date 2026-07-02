@@ -585,6 +585,79 @@ router.post('/cashback/creditar', autenticar, async (req, res) => {
   }
 })
 
+// ============================================================
+// POST /cashback/ajustar — ajuste MANUAL de pontos (credita ou debita)
+// Uso: corrigir divergências (importação, débito equivocado).
+// Exige motivo. Grava histórico com o responsável. Não deixa saldo negativo.
+// Acesso: proprietário, gerente e caixa.
+// ============================================================
+router.post('/cashback/ajustar', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
+  try {
+    const { cliente_id, pontos, motivo } = req.body || {}
+    const qtd = parseInt(pontos)
+    if (!cliente_id) return res.status(400).json({ erro: 'Cliente não informado.' })
+    if (!qtd || isNaN(qtd) || qtd === 0) return res.status(400).json({ erro: 'Informe uma quantidade de pontos diferente de zero.' })
+    if (!motivo || !String(motivo).trim()) return res.status(400).json({ erro: 'O motivo é obrigatório.' })
+
+    // saldo atual (cria a carteira se não existir)
+    let { data: carteira } = await supabaseAdmin.from('carteira_pontos')
+      .select('id,saldo,total_acumulado').eq('cliente_id', cliente_id).maybeSingle()
+    if (!carteira) {
+      const { data: nova, error: en } = await supabaseAdmin.from('carteira_pontos')
+        .insert({ cliente_id, saldo: 0, total_acumulado: 0 }).select('id,saldo,total_acumulado').single()
+      if (en) throw en
+      carteira = nova
+    }
+
+    const saldoAtual = carteira.saldo || 0
+    const novoSaldo = saldoAtual + qtd
+    // débito não pode deixar negativo
+    if (novoSaldo < 0) {
+      return res.status(400).json({ erro: `Saldo insuficiente. O cliente tem ${saldoAtual} pontos; não é possível debitar ${Math.abs(qtd)}.` })
+    }
+
+    // total_acumulado só sobe quando credita (não desce ao debitar)
+    const novoTotal = qtd > 0 ? (carteira.total_acumulado || 0) + qtd : (carteira.total_acumulado || 0)
+
+    const { error: eu } = await supabaseAdmin.from('carteira_pontos')
+      .update({ saldo: novoSaldo, total_acumulado: novoTotal, atualizado_em: new Date().toISOString() })
+      .eq('id', carteira.id)
+    if (eu) throw eu
+
+    // grava no histórico (auditoria): quem, quanto, motivo
+    const responsavel = (req.usuario && req.usuario.nome) ? req.usuario.nome : 'sistema'
+    const sinal = qtd > 0 ? '+' : ''
+    await supabaseAdmin.from('historico_pontos').insert({
+      cliente_id,
+      tipo: 'ajuste',
+      pontos: qtd,
+      descricao: `Ajuste manual (${sinal}${qtd}) por ${responsavel}: ${String(motivo).trim()}`,
+    }).select('id').maybeSingle()
+
+    return res.json({ ok: true, saldo_anterior: saldoAtual, saldo_novo: novoSaldo, ajuste: qtd })
+  } catch (err) {
+    console.error('[cashback/ajustar]', err.message)
+    return res.status(500).json({ erro: 'Erro ao ajustar pontos: ' + err.message })
+  }
+})
+
+// GET /cashback/historico/:cliente_id — histórico de movimentações de pontos
+router.get('/cashback/historico/:cliente_id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
+  try {
+    const { cliente_id } = req.params
+    if (!cliente_id) return res.json([])
+    const { data } = await supabaseAdmin.from('historico_pontos')
+      .select('tipo,pontos,descricao,criado_em')
+      .eq('cliente_id', cliente_id)
+      .order('criado_em', { ascending: false })
+      .limit(50)
+    return res.json(data || [])
+  } catch (err) {
+    console.error('[cashback/historico]', err.message)
+    return res.json([])
+  }
+})
+
 router.post('/cashback/resgatar-produto', autenticar, async (req, res) => {
   try {
     const { cliente_id, produto_id } = req.body
