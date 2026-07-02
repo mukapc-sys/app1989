@@ -83,16 +83,27 @@ router.post('/minha-senha/login', autenticar, async (req, res) => {
 // ============================================================
 // VALE PIX
 // ============================================================
-router.post('/vales-pix', autenticar, ADM_GER, async (req, res) => {
+router.post('/vales-pix', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
   try {
     const { colaborador_id, valor, descricao } = req.body
+
+    // Autorização: gerente/proprietário logado autoriza sozinho;
+    // caixa precisa da senha de autorização do gestor. (mesmo fluxo do /vales)
+    let autorizador = null
+    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
+      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
+    } else {
+      autorizador = await validarSenhaAutorizacao(req.body.senha_gerente || req.body.senha)
+      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
+    }
+
     const { data: colab } = await supabaseAdmin.from('colaboradores').select('id,unidade_id,saldo_vales_pix,nome').eq('id', colaborador_id).single()
     if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
 
     const { data, error } = await supabaseAdmin.from('vales_pix').insert({
       colaborador_id, valor, descricao,
       unidade_id: colab.unidade_id,
-      criado_por: req.usuario.colaborador_id,
+      criado_por: req.usuario.colaborador_id || req.usuario.id,
       status: 'pendente'
     }).select().single()
     if (error) throw error
