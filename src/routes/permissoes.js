@@ -199,7 +199,7 @@ router.get('/minhas', autenticar, async (req, res) => {
 // ============================================================
 const FUNCOES = [
   { chave:'desconto',          nome:'Dar desconto na comanda',   padrao:['gerente','caixa','colaborador'] },
-  { chave:'retirada_caixa',    nome:'Retirada / saida de caixa', padrao:['gerente'] },
+  { chave:'retirada_caixa',    nome:'Retirada / saida de caixa', padrao:['gerente','caixa'] },
   { chave:'estornar_comanda',  nome:'Cancelar / estornar comanda', padrao:['gerente','caixa'] },
   { chave:'lancar_despesa',    nome:'Lancar despesa no DRE',     padrao:['gerente'] },
   { chave:'aprovar_balanco',   nome:'Aprovar balanco de estoque', padrao:[] },
