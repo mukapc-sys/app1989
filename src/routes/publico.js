@@ -537,29 +537,52 @@ router.post('/cancelar-agendamento', async (req, res) => {
 router.post('/registrar', async (req, res) => {
   try {
     const { nome, whatsapp, senha } = req.body || {}
+    const email = (req.body && req.body.email ? String(req.body.email).trim().toLowerCase() : '')
     if (!nome || !whatsapp || !senha) return res.status(400).json({ erro: 'Preencha nome, WhatsApp e senha' })
     if (String(senha).length < 4) return res.status(400).json({ erro: 'A senha precisa de pelo menos 4 caracteres' })
     const tel = String(whatsapp).replace(/\D/g, '')
     if (tel.length < 10) return res.status(400).json({ erro: 'WhatsApp inválido (use DDD + número)' })
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ erro: 'Digite um e-mail válido' })
 
     const hash = bcrypt.hashSync(String(senha), 10)
 
+    // O e-mail já pertence a OUTRO cadastro? (respeita a unicidade do banco)
+    // Se sim, não gravamos no campo email (guardamos em emails_extras) pra não quebrar.
+    let emailLivre = true
+    try {
+      const { data: donoEmail } = await supabaseAdmin.from('clientes')
+        .select('id').ilike('email', email).limit(1)
+      if (donoEmail && donoEmail.length) emailLivre = false
+    } catch (_) {}
+
     // já existe um cliente com esse WhatsApp? (normalizado — casa com importados do AppBarber)
-    const cliAchado = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash')
+    const cliAchado = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash,email,emails_extras')
 
     let cli
     if (cliAchado) {
       cli = cliAchado
       if (cli.senha_hash) return res.status(409).json({ erro: 'Já existe uma conta com esse WhatsApp. Faça login.' })
       // cliente já existia (importado do AppBarber ou criou agendando) e ainda não tinha senha -> define agora
+      const upd = { nome: String(nome).trim(), senha_hash: hash }
+      // e-mail: se o campo principal está vazio e o e-mail está livre, grava nele;
+      // senão, guarda em emails_extras (sem duplicar) pra não perder o dado.
+      if (emailLivre && (!cli.email || cli.email === '')) {
+        upd.email = email
+      } else if (email && (!cli.email || cli.email.toLowerCase() !== email)) {
+        const extras = Array.isArray(cli.emails_extras) ? cli.emails_extras : []
+        if (extras.indexOf(email) === -1) upd.emails_extras = extras.concat([email])
+      }
       const { data: up, error: eu } = await supabaseAdmin.from('clientes')
-        .update({ nome: String(nome).trim(), senha_hash: hash }).eq('id', cli.id)
+        .update(upd).eq('id', cli.id)
         .select('id,nome,whatsapp').single()
       if (eu) throw eu
       cli = up
     } else {
+      const insert = { nome: String(nome).trim(), whatsapp: normalizarTel(whatsapp) || tel, senha_hash: hash, origem: 'app', ativo: true }
+      if (emailLivre) insert.email = email
+      else insert.emails_extras = [email]   // e-mail já usado por outro -> guarda como extra
       const { data: novo, error: en } = await supabaseAdmin.from('clientes')
-        .insert({ nome: String(nome).trim(), whatsapp: normalizarTel(whatsapp) || tel, senha_hash: hash, origem: 'app', ativo: true })
+        .insert(insert)
         .select('id,nome,whatsapp').single()
       if (en) throw en
       cli = novo
@@ -576,15 +599,30 @@ router.post('/registrar', async (req, res) => {
 // ============================================================
 router.post('/login', async (req, res) => {
   try {
-    const { whatsapp, senha } = req.body || {}
-    if (!whatsapp || !senha) return res.status(400).json({ erro: 'Informe WhatsApp e senha' })
-    const tel = String(whatsapp).replace(/\D/g, '')
-    if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
+    // aceita 'identificador' (novo: e-mail ou whats) ou 'whatsapp' (compatibilidade)
+    const bruto = String((req.body && (req.body.identificador || req.body.whatsapp || req.body.email)) || '').trim()
+    const senha = req.body && req.body.senha
+    if (!bruto || !senha) return res.status(400).json({ erro: 'Informe e-mail ou WhatsApp e a senha' })
 
-    const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash,ativo')
+    const ehEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bruto)
+    let cli = null
+    if (ehEmail) {
+      const email = bruto.toLowerCase()
+      // busca pelo e-mail principal OU nos e-mails extras
+      const { data: porEmail } = await supabaseAdmin.from('clientes')
+        .select('id,nome,whatsapp,senha_hash,ativo')
+        .or(`email.ilike.${email},emails_extras.cs.{${email}}`)
+        .limit(1)
+      cli = (porEmail && porEmail[0]) || null
+    } else {
+      const tel = bruto.replace(/\D/g, '')
+      if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
+      cli = await acharClientePorTel(bruto, 'id,nome,whatsapp,senha_hash,ativo')
+    }
+
     if (!cli || !cli.senha_hash) return res.status(401).json({ erro: 'Conta não encontrada. Crie uma conta.' })
     if (cli.ativo === false) return res.status(401).json({ erro: 'Conta inativa. Fale com a barbearia.' })
-    if (!bcrypt.compareSync(String(senha), cli.senha_hash)) return res.status(401).json({ erro: 'WhatsApp ou senha incorretos' })
+    if (!bcrypt.compareSync(String(senha), cli.senha_hash)) return res.status(401).json({ erro: 'E-mail/WhatsApp ou senha incorretos' })
 
     return res.json({ token: tokenCliente(cli), cliente: { id: cli.id, nome: cli.nome, whatsapp: cli.whatsapp } })
   } catch (e) {
