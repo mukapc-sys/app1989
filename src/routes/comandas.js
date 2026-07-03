@@ -83,6 +83,34 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
   }
 })
 
+// GET /comandas/resumo-do-agendamento/:agendamento_id
+// Resumo leve da comanda FINALIZADA (total + forma de pagamento) para o
+// preview ao passar o mouse no agendamento concluído na agenda.
+router.get('/resumo-do-agendamento/:agendamento_id', autenticar, async (req, res) => {
+  try {
+    const { agendamento_id } = req.params
+    const { data: rows } = await supabaseAdmin
+      .from('comandas')
+      .select('id, total, forma_pgto, pagamentos, finalizada_em, status')
+      .eq('agendamento_id', agendamento_id)
+      .eq('status', 'finalizada')
+      .order('finalizada_em', { ascending: false })
+      .limit(1)
+    const c = (rows && rows[0]) || null
+    if (!c) return res.json({ encontrada: false })
+    return res.json({
+      encontrada: true,
+      total: c.total || 0,
+      forma_pgto: c.forma_pgto || null,
+      pagamentos: c.pagamentos || null,
+      finalizada_em: c.finalizada_em || null
+    })
+  } catch (err) {
+    console.error('[comandas/resumo-do-agendamento]', err.message)
+    return res.json({ encontrada: false })
+  }
+})
+
 // GET /comandas/aberta-do-agendamento/:agendamento_id
 // Recupera a comanda ABERTA de um agendamento (já com os itens salvos), se existir.
 // Base da "comanda aberta": ao clicar no agendamento, carrega o que já foi salvo.
