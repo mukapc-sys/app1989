@@ -258,6 +258,62 @@ async function processarAgendamentos(unidadeId, bruto) {
     }
   }
 
+  // ============================================================
+  // CANCELAMENTO POR AUSÊNCIA (item 2):
+  // Quando o cliente cancela no AppBarber, o horário SOME de lá.
+  // Detectamos os agendamentos que estavam no espelho para este dia/unidade
+  // mas NÃO vieram nesta captura -> foram cancelados na origem.
+  // Regras defensivas:
+  //  - só roda se a captura trouxe agendamentos (evita captura falha/vazia apagar tudo)
+  //  - só mexe em tipo 'agendamento' com status 'agendado' (não toca em realizado/concluído)
+  //  - respeita finalizado/editado_local (não mexe no que já foi atendido/pago no sistema)
+  let cancelados_por_ausencia = 0
+  try {
+    // ids de agendamentos (não bloqueios) que VIERAM nesta captura
+    const idsVindos = new Set(
+      registrosUnicos
+        .filter(r => r.tipo === 'agendamento' && r.appbarber_id)
+        .map(r => String(r.appbarber_id))
+    )
+    // profissionais que apareceram na captura (só cancelamos ausências DESTES,
+    // pra não afetar barbeiros que por acaso não vieram numa captura parcial)
+    const profsVindos = new Set(
+      registrosUnicos
+        .filter(r => r.tipo === 'agendamento' && r.colaborador_id)
+        .map(r => String(r.colaborador_id))
+    )
+    // intervalo de datas coberto pela captura (do menor ao maior 'inicio')
+    const inicios = registrosUnicos.map(r => r.inicio).filter(Boolean).sort()
+    if (idsVindos.size > 0 && inicios.length > 0 && profsVindos.size > 0) {
+      const diaIni = inicios[0].slice(0, 10) + ' 00:00:00'
+      const diaFim = inicios[inicios.length - 1].slice(0, 10) + ' 23:59:59'
+      // busca no espelho os agendamentos daquele dia/unidade ainda 'agendado'
+      const { data: noEspelho } = await supabaseAdmin
+        .from('agenda_appbarber')
+        .select('id, appbarber_id, colaborador_id')
+        .eq('unidade_id', unidadeId)
+        .eq('tipo', 'agendamento')
+        .eq('status', 'agendado')
+        .is('finalizado', false)
+        .is('editado_local', false)
+        .gte('inicio', diaIni)
+        .lte('inicio', diaFim)
+      const sumidos = (noEspelho || []).filter(e =>
+        !idsVindos.has(String(e.appbarber_id))              // não veio na captura
+        && e.colaborador_id                                  // tem barbeiro vinculado
+        && profsVindos.has(String(e.colaborador_id))         // e o barbeiro FOI capturado
+      )
+      if (sumidos.length) {
+        const idsSumidos = sumidos.map(s => s.id)
+        const { error: ec } = await supabaseAdmin
+          .from('agenda_appbarber')
+          .update({ status: 'cancelado' })
+          .in('id', idsSumidos)
+        if (!ec) cancelados_por_ausencia = idsSumidos.length
+      }
+    }
+  } catch (e) { /* não trava o sync se a detecção falhar */ }
+
   return {
     total: bruto.length,
     agendamentos,
@@ -265,6 +321,7 @@ async function processarAgendamentos(unidadeId, bruto) {
     novos_clientes: novosClientes,
     pendentes_de_vinculo: pendentes,
     gravados,
+    cancelados_por_ausencia,
     falhas: falhas.length,
     detalhe_falhas: falhas.slice(0, 3),
   }
