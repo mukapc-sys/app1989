@@ -87,15 +87,8 @@ router.post('/vales-pix', autenticar, exigirPerfil('proprietario', 'gerente', 'c
   try {
     const { colaborador_id, valor, descricao } = req.body
 
-    // Autorização: gerente/proprietário logado autoriza sozinho;
-    // caixa precisa da senha de autorização do gestor. (mesmo fluxo do /vales)
-    let autorizador = null
-    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
-      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
-    } else {
-      autorizador = await validarSenhaAutorizacao(req.body.senha_gerente || req.body.senha)
-      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
-    }
+    // Vale PIX: qualquer operador autorizado (inclui caixa) registra livremente.
+    const autorizador = { id: req.usuario.id, nome: req.usuario.nome }
 
     const { data: colab } = await supabaseAdmin.from('colaboradores').select('id,unidade_id,saldo_vales_pix,nome').eq('id', colaborador_id).single()
     if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
@@ -145,15 +138,9 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
     const { colaborador_id, itens } = req.body
     if (!colaborador_id) return res.status(400).json({ erro: 'Selecione o colaborador' })
 
-    // Autorização: gerente/proprietário logado autoriza sozinho;
-    // caixa precisa da senha de autorização do gestor.
-    let autorizador = null
-    if (['gerente', 'proprietario'].includes(req.usuario.perfil)) {
-      autorizador = { id: req.usuario.id, nome: req.usuario.nome }
-    } else {
-      autorizador = await validarSenhaAutorizacao(req.body.senha_gerente || req.body.senha)
-      if (!autorizador) return res.status(403).json({ erro: 'Senha de autorização inválida.' })
-    }
+    // Vale de funcionário: qualquer operador autorizado (inclui caixa) registra livremente.
+    // O responsável é o próprio usuário logado.
+    const autorizador = { id: req.usuario.id, nome: req.usuario.nome }
 
     const lista = Array.isArray(itens) ? itens : []
     // total recalculado no servidor (não confia no total do front)
