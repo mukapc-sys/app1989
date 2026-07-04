@@ -115,10 +115,20 @@ router.get('/horarios-disponiveis', autenticar, async (req, res) => {
         .gte('data_ini', ini).lte('data_ini', fim)
     ])
 
-    // Gera slots de 30 min das 8h às 20h
+    // Horário de funcionamento por dia da semana:
+    //  Seg-Sex: 10h-20h · Sábado: 9h-18h · Domingo: fechado
+    const partesData = String(data).split('-').map(Number)
+    const dow = new Date(Date.UTC(partesData[0], partesData[1] - 1, partesData[2])).getUTCDay() // 0=Dom ... 6=Sáb
+    let inicio, fimDia
+    if (dow === 0) {
+      // Domingo fechado -> não gera nenhum slot
+      return res.json([])
+    } else if (dow === 6) {
+      inicio = 9 * 60; fimDia = 18 * 60   // Sábado
+    } else {
+      inicio = 10 * 60; fimDia = 20 * 60  // Seg-Sex
+    }
     const slots = []
-    const inicio = 8 * 60
-    const fimDia = 20 * 60
     const passo = 30
 
     for (let min = inicio; min + parseInt(duracao) <= fimDia; min += passo) {
