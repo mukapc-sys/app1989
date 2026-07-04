@@ -360,14 +360,22 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
 })
 
 // GET /clientes-assinantes-ids — ids E nomes dos clientes assinantes (p/ a coroa na agenda)
+// Retorna também quem está VENCIDO/SUSPENSO (p/ a bolinha vermelha ao lado da coroa).
 router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
     const { data } = await supabaseAdmin.from('assinaturas')
-      .select('cliente_id, clientes(nome)').in('status', ['ativa','vencida','suspensa'])
-    const ids = Array.from(new Set((data || []).map(a => a.cliente_id).filter(Boolean)))
-    const nomes = Array.from(new Set((data || []).map(a => a.clientes && a.clientes.nome).filter(Boolean)))
-    return res.json({ ids, nomes })
-  } catch (e) { return res.json({ ids: [], nomes: [] }) }
+      .select('cliente_id, status, clientes(nome)').in('status', ['ativa','vencida','suspensa'])
+    const linhas = data || []
+    const ids = Array.from(new Set(linhas.map(a => a.cliente_id).filter(Boolean)))
+    const nomes = Array.from(new Set(linhas.map(a => a.clientes && a.clientes.nome).filter(Boolean)))
+    // Vencidos = quem NÃO tem nenhuma assinatura 'ativa' (só vencida/suspensa).
+    // Um cliente pode ter mais de uma linha; se tiver ao menos uma ativa, conta como ativo.
+    const ativosSet = new Set(linhas.filter(a => a.status === 'ativa').map(a => a.cliente_id))
+    const vencidos = linhas.filter(a => a.status !== 'ativa' && !ativosSet.has(a.cliente_id))
+    const ids_vencidos = Array.from(new Set(vencidos.map(a => a.cliente_id).filter(Boolean)))
+    const nomes_vencidos = Array.from(new Set(vencidos.map(a => a.clientes && a.clientes.nome).filter(Boolean)))
+    return res.json({ ids, nomes, ids_vencidos, nomes_vencidos })
+  } catch (e) { return res.json({ ids: [], nomes: [], ids_vencidos: [], nomes_vencidos: [] }) }
 })
 
 // ============ SERVIÇOS ============
