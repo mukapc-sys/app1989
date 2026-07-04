@@ -83,7 +83,9 @@ router.get('/colaboradores', autenticar, async (req, res) => {
     let query = supabaseAdmin
       .from('colaboradores')
       .select('id, nome, email, whatsapp, perfil, comissao_pct, salario, ativo, foto_url, unidade_id, unidades(nome)')
-      .eq('ativo', true).order('nome')
+      .eq('ativo', true)
+      .in('perfil', ['colaborador','gerente'])   // só quem ATENDE (nunca o caixa)
+      .order('nome')
 
     // Caixa e proprietário enxergam colaboradores de qualquer unidade (p/ agendar em todas).
     // Gerente e barbeiro ficam restritos à própria unidade.
