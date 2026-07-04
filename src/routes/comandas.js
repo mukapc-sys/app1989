@@ -71,6 +71,13 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
       const ini = new Date(data + 'T00:00:00-03:00').toISOString()
       const fim = new Date(data + 'T23:59:59-03:00').toISOString()
       query = query.gte('aberta_em', ini).lte('aberta_em', fim)
+    } else if (req.query.data_ini || req.query.data_fim) {
+      // Período (busca de comandas de outros dias). Usa o começo/fim informado.
+      const di = req.query.data_ini || req.query.data_fim
+      const df = req.query.data_fim || req.query.data_ini
+      const ini = new Date(di + 'T00:00:00-03:00').toISOString()
+      const fim = new Date(df + 'T23:59:59-03:00').toISOString()
+      query = query.gte('aberta_em', ini).lte('aberta_em', fim)
     }
 
     if (u.perfil === 'colaborador') query = query.eq('colaborador_id', u.id)
