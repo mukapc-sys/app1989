@@ -179,17 +179,21 @@ router.post('/', autenticar, async (req, res) => {
     const ini = new Date(data_hora_ini)
     const fim = new Date(ini.getTime() + servico.duracao_min * 60000)
 
-    // Verifica conflito
-    const { data: conflito } = await supabaseAdmin
-      .from('agendamentos')
-      .select('id')
-      .eq('colaborador_id', colaborador_id)
-      .in('status', ['agendado','confirmado','andamento'])
-      .lt('data_hora_ini', fim.toISOString())
-      .gt('data_hora_fim', ini.toISOString())
+    // ENCAIXE é a exceção: sobrepõe qualquer horário (agendamento existente,
+    // antes de abrir, depois de fechar). Só valida conflito quando NÃO é encaixe.
+    const ehEncaixe = !!(req.body.encaixe)
+    if (!ehEncaixe) {
+      const { data: conflito } = await supabaseAdmin
+        .from('agendamentos')
+        .select('id')
+        .eq('colaborador_id', colaborador_id)
+        .in('status', ['agendado','confirmado','andamento'])
+        .lt('data_hora_ini', fim.toISOString())
+        .gt('data_hora_fim', ini.toISOString())
 
-    if (conflito && conflito.length > 0) {
-      return res.status(409).json({ erro: 'Horário já ocupado para este profissional' })
+      if (conflito && conflito.length > 0) {
+        return res.status(409).json({ erro: 'Horário já ocupado para este profissional' })
+      }
     }
 
     const { data: novo, error } = await supabaseAdmin
@@ -204,6 +208,8 @@ router.post('/', autenticar, async (req, res) => {
         data_hora_fim: fim.toISOString(),
         valor:         servico.valor,
         observacao:    observacao || null,
+        encaixe:       ehEncaixe,
+        status:        'agendado',
         canal_origem:  req.usuario.perfil === 'cliente' ? 'pwa' : 'sistema',
         criado_por:    req.usuario.perfil !== 'cliente' ? req.usuario.id : null
       })
