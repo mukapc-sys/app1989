@@ -1218,6 +1218,26 @@ router.get('/colaboradores-todos', autenticar, TODOS, async (req, res) => {
   } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
 })
 
+// Colaboradores da UNIDADE do usuário logado (folgas, vales — ações operacionais
+// que devem ficar restritas à unidade do caixa/gerente). Proprietário vê todas
+// (ou filtra por ?unidade_id=). Barbeiro/gerente/caixa: só a própria unidade.
+router.get('/colaboradores-minha-unidade', autenticar, async (req, res) => {
+  try {
+    const u = req.usuario
+    const { unidade_id } = req.query
+    let q = supabaseAdmin.from('colaboradores')
+      .select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,unidades(nome)')
+      .eq('ativo', true).order('nome')
+    if (u.perfil === 'proprietario') {
+      if (unidade_id) q = q.eq('unidade_id', unidade_id)
+    } else {
+      q = q.eq('unidade_id', u.unidade_id)   // caixa/gerente/barbeiro: só a própria
+    }
+    const { data } = await q
+    return res.json(data || [])
+  } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
+})
+
 router.get('/clientes', autenticar, async (req, res) => {
   try {
     const limit  = parseInt(req.query.limit) || 50
