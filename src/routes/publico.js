@@ -786,6 +786,7 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
     return res.json({
       ativo: true,
       plano: { id: plano.id, nome: plano.nome, valor_mensal: plano.valor_mensal },
+      data_renovacao: a.data_renovacao || null,   // vencimento do plano
       servicos, barbeiro, unidade,
       fichas_disponiveis,
       fichas_validade
