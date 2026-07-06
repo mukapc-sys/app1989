@@ -630,7 +630,7 @@ router.patch('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerent
 })
 
 // DELETE /assinaturas/:id — remove uma assinatura
-router.delete('/assinaturas/:id', autenticar, ADMIN, async (req, res) => {
+router.delete('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
     const { error } = await supabaseAdmin.from('assinaturas').delete().eq('id', req.params.id)
     if (error) throw error
@@ -663,6 +663,10 @@ router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
 router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), exigirFuncao('vender_plano'), async (req, res) => {
   try {
     const { cliente_id, plano_id, vendedor_id, forma_pgto, assinatura_id } = req.body
+    // data de vencimento escolhida manualmente (opcional). Se vier, usa ela;
+    // senão, calcula automático (+1 mês). Aceita 'YYYY-MM-DD'.
+    const dataVencManual = (req.body.data_renovacao && /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.data_renovacao)))
+      ? String(req.body.data_renovacao).slice(0, 10) : null
     if (!cliente_id) return res.status(400).json({ erro: 'Informe o cliente.' })
     if (!plano_id) return res.status(400).json({ erro: 'Informe o plano.' })
     if (!vendedor_id) return res.status(400).json({ erro: 'Informe o barbeiro responsável da mensalidade.' })
@@ -691,8 +695,9 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       antes = { data_renovacao: atual.data_renovacao, status: atual.status, vendedor_id: atual.vendedor_id, forma_pgto: atual.forma_pgto, plano_id: atual.plano_id }
       const venceAtivo = atual.data_renovacao && String(atual.data_renovacao).slice(0, 10) >= hoje
       const base = venceAtivo ? String(atual.data_renovacao).slice(0, 10) : hoje
+      const novaData = dataVencManual || maisUmMes(base)   // manual tem prioridade
       const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
-        plano_id, status: 'ativa', data_renovacao: maisUmMes(base),
+        plano_id, status: 'ativa', data_renovacao: novaData,
         vendedor_id, forma_pgto, atualizado_em: new Date().toISOString()
       }).eq('id', assinatura_id).select().single()
       if (eU) throw eU
@@ -705,7 +710,7 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       }
       const { data: nova, error: eN } = await supabaseAdmin.from('assinaturas').insert({
         cliente_id, plano_id, status: 'ativa',
-        data_inicio: hoje, data_renovacao: maisUmMes(hoje),
+        data_inicio: hoje, data_renovacao: dataVencManual || maisUmMes(hoje),
         vendedor_id, forma_pgto
       }).select().single()
       if (eN) throw eN
