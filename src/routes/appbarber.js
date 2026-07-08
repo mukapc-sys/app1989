@@ -458,6 +458,35 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
       } // fim do else: criar comanda nova quando NÃO há comanda aberta
     }
 
+    // ===== BAIXA DE ESTOQUE (faltava neste caminho!) =====
+    // Baixa TODOS os produtos da comanda finalizada, INCLUSIVE os de valor zero
+    // (consumo de barbeiro / cortesia) — porque o produto sai fisicamente do
+    // estoque independente de ter sido cobrado. Cobre os dois casos acima
+    // (comanda aberta reaproveitada e comanda nova). Best-effort: não quebra
+    // a finalização se falhar.
+    if (comandaId) {
+      try {
+        const { data: prodItens } = await supabaseAdmin
+          .from('itens_comanda')
+          .select('produto_id, quantidade')
+          .eq('comanda_id', comandaId)
+          .eq('tipo', 'produto')
+          .not('produto_id', 'is', null)
+        for (const item of (prodItens || [])) {
+          await supabaseAdmin.from('movimentacoes_estoque').insert({
+            produto_id:     item.produto_id,
+            unidade_id:     ab.unidade_id,
+            tipo:           'saida_venda',
+            quantidade:     parseInt(item.quantidade) || 1,
+            responsavel_id: ab.colaborador_id,
+            referencia_id:  comandaId
+          })
+        }
+      } catch (eEstoque) {
+        console.error('[appbarber/finalizar estoque]', eEstoque.message)
+      }
+    }
+
     // ===== liga os criados ao importado (o 'finalizado' já foi marcado no claim) =====
     const { error: e3 } = await supabaseAdmin.from('agenda_appbarber')
       .update({ agendamento_id: ag.id, comanda_id: comandaId })
