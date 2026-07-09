@@ -72,9 +72,10 @@ function normalizeNumero(raw) {
 }
 
 // ============================================================
-// Busca ou cria conversa
+// Busca ou cria conversa — protegido contra duplicatas
 // ============================================================
 async function getOrCreateConversa(numero, nomeContato) {
+  // Tenta buscar conversa aberta existente
   const { data: existente } = await supabaseAdmin
     .from('whatsapp_conversas')
     .select('*')
@@ -85,36 +86,53 @@ async function getOrCreateConversa(numero, nomeContato) {
     .maybeSingle()
 
   if (existente) {
-    await supabaseAdmin.from('whatsapp_conversas')
-      .update({ nome_contato: nomeContato, ultima_msg_em: new Date().toISOString() })
-      .eq('id', existente.id)
-    // Tenta vincular cliente se ainda null
+    const upd = { nome_contato: nomeContato, ultima_msg_em: new Date().toISOString() }
     if (!existente.cliente_id) {
       const cli = await buscarClientePorNumero(numero)
-      if (cli) {
-        await supabaseAdmin.from('whatsapp_conversas').update({ cliente_id: cli.id }).eq('id', existente.id)
-        existente.cliente_id = cli.id
-      }
+      if (cli) { upd.cliente_id = cli.id; existente.cliente_id = cli.id }
     }
+    await supabaseAdmin.from('whatsapp_conversas').update(upd).eq('id', existente.id)
     return existente
   }
 
+  // Não existe conversa aberta → cria uma nova
+  // Usa upsert com índice único para evitar race condition
   const cli = await buscarClientePorNumero(numero)
-  const { data: nova } = await supabaseAdmin.from('whatsapp_conversas')
-    .insert({
-      numero,
-      nome_contato:  nomeContato,
-      cliente_id:    cli ? cli.id : null,
-      status:        'aberta',
-      atendente:     'ia',
-      estado_ia:     'inicial',
-      dados_ia:      {},
-      requer_humano: false,
-      ultima_msg_em: new Date().toISOString()
+  const nova = {
+    numero,
+    nome_contato:  nomeContato,
+    cliente_id:    cli ? cli.id : null,
+    status:        'aberta',
+    atendente:     'ia',
+    estado_ia:     'inicial',
+    dados_ia:      {},
+    requer_humano: false,
+    ultima_msg_em: new Date().toISOString()
+  }
+
+  // onConflict garante que se outra requisição criou ao mesmo tempo, reutiliza
+  const { data: criada } = await supabaseAdmin.from('whatsapp_conversas')
+    .upsert(nova, {
+      onConflict:       'numero',        // índice único WHERE status='aberta' garante isso
+      ignoreDuplicates: false
     })
     .select('*')
     .single()
-  return nova
+
+  // Fallback: se o upsert não retornou (já existia), busca novamente
+  if (!criada) {
+    const { data: recuperada } = await supabaseAdmin
+      .from('whatsapp_conversas')
+      .select('*')
+      .eq('numero', numero)
+      .eq('status', 'aberta')
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    return recuperada
+  }
+
+  return criada
 }
 
 // ============================================================
