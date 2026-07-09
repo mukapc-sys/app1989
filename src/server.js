@@ -44,6 +44,20 @@ app.use('/balanco',      require('./routes/balanco'))
 app.use('/permissoes',   require('./routes/permissoes'))
 app.use('/publico',      require('./routes/publico'))
 app.use('/whatsapp',     require('./routes/whatsapp'))
+
+// ---- Configurações do sistema ----
+const { createClient } = require('@supabase/supabase-js')
+app.get('/config/:chave', async (req, res) => {
+  const sb = require('./config/supabase').supabaseAdmin
+  const { data } = await sb.from('configuracoes').select('valor').eq('chave', req.params.chave).single()
+  res.json({ chave: req.params.chave, valor: data?.valor || null })
+})
+app.put('/config/:chave', async (req, res) => {
+  const sb = require('./config/supabase').supabaseAdmin
+  const { valor } = req.body || {}
+  await sb.from('configuracoes').upsert({ chave: req.params.chave, valor: String(valor), atualizado_em: new Date().toISOString() })
+  res.json({ ok: true })
+})
 app.use('/',             require('./routes/cadastros'))
 app.use('/',             require('./routes/novos'))
 app.use('/',             require('./routes/dashboard'))
