@@ -944,15 +944,17 @@ JSON:`
 
 
 // ============================================================
-// Busca slots disponíveis — usa o mesmo endpoint do app
+// Busca slots disponíveis
 // ============================================================
 async function buscarSlots(dados) {
   try {
     const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+    const duracaoMin = dados.servico_duracao || 30
 
-    // Determina a data base
-    let dataBase = new Date()
-    dataBase.setHours(0,0,0,0)
+    // Determina data base (em horário de Brasília)
+    const agora   = new Date()
+    const agoraBR = new Date(agora.getTime() - 3 * 60 * 60 * 1000)
+    let dataBase  = new Date(agoraBR.toISOString().slice(0,10) + 'T00:00:00')
     if (dados.data_raw) {
       const d = new Date(dados.data_raw + 'T12:00:00')
       if (!isNaN(d)) dataBase = d
@@ -960,79 +962,103 @@ async function buscarSlots(dados) {
       dataBase.setDate(dataBase.getDate() + 1)
     }
 
+    const diaSemana = dataBase.getDay()  // 0=Dom, 6=Sáb
+    if (diaSemana === 0) return []       // Domingo fechado
+
+    // Horário de funcionamento
+    const inicioDia = diaSemana === 6 ? 9 * 60 : 10 * 60  // Sáb 9h, Seg-Sex 10h
+    const fimDia    = diaSemana === 6 ? 18 * 60 : 20 * 60  // Sáb 18h, Seg-Sex 20h
+    const passo     = duracaoMin
+
+    // Gera todos os horários possíveis do dia
+    const todosHorarios = []
+    for (let t = inicioDia; t + duracaoMin <= fimDia; t += passo) {
+      todosHorarios.push(`${String(Math.floor(t/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`)
+    }
+
+    // Filtra por período se pedido
+    let horariosBase = todosHorarios
+    if (!dados.hora_raw) {
+      if (dados.periodo === 'manha') horariosBase = todosHorarios.filter(h => h < '12:00')
+      else if (dados.periodo === 'tarde') horariosBase = todosHorarios.filter(h => h >= '12:00' && h < '18:00')
+      else if (dados.periodo === 'noite') horariosBase = todosHorarios.filter(h => h >= '18:00')
+    }
+
+    // Se hoje, remove horários que já passaram (+ 15 min de margem)
     const dataStr = dataBase.toISOString().slice(0,10)
-    const fmt = `${diasSemana[dataBase.getDay()]} ${String(dataBase.getDate()).padStart(2,'0')}/${String(dataBase.getMonth()+1).padStart(2,'0')}`
+    const ehHoje  = dataStr === agoraBR.toISOString().slice(0,10)
+    if (ehHoje) {
+      const margem = agoraBR.getUTCHours() * 60 + agoraBR.getUTCMinutes() + 15
+      const margStr = `${String(Math.floor(margem/60)).padStart(2,'0')}:${String(margem%60).padStart(2,'0')}`
+      horariosBase = horariosBase.filter(h => h >= margStr)
+      if (horariosBase.length === 0) {
+        dados._sem_horario_hoje = true
+        // Busca para amanhã
+        const amanha = new Date(dataBase)
+        amanha.setDate(amanha.getDate() + 1)
+        return await buscarSlots({ ...dados, data_raw: amanha.toISOString().slice(0,10), hora_raw: null, _sem_horario_hoje: undefined })
+      }
+    }
 
-    // Chama o endpoint interno de horários disponíveis (mesma lógica do app)
-    const baseUrl = `http://localhost:${process.env.PORT || 3001}`
-    const params  = new URLSearchParams({
-      data:          dataStr,
-      ...(dados.unidade_id    ? { unidade_id:    dados.unidade_id }    : {}),
-      ...(dados.barbeiro_id   ? { colaborador_id: dados.barbeiro_id }   : {}),
-      ...(dados.servico_id    ? { servico_id:    dados.servico_id }    : {}),
-    })
+    // Busca colaboradores disponíveis
+    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true)
+    if (dados.unidade_id)  colQuery = colQuery.eq('unidade_id', dados.unidade_id)
+    if (dados.barbeiro_id) colQuery = colQuery.eq('id', dados.barbeiro_id)
+    const { data: cols } = await colQuery
+    if (!cols || cols.length === 0) return []
 
-    const resp = await fetch(`${baseUrl}/agendamentos/horarios-disponiveis?${params}`)
-    if (!resp.ok) throw new Error(`endpoint retornou ${resp.status}`)
-    const horarios = await resp.json()
+    // Função: slots livres de um colaborador num dia
+    async function slotsLivresDia(col, dStr) {
+      const { data: agds } = await supabaseAdmin.from('agendamentos')
+        .select('data_hora_ini')
+        .eq('colaborador_id', col.id)
+        .gte('data_hora_ini', dStr + 'T00:00:00')
+        .lte('data_hora_ini', dStr + 'T23:59:59')
+        .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
 
-    // Horários vêm como array de strings "HH:MM" ou objetos com { hora, colaborador_id, ... }
-    // Normaliza para o formato interno
-    let slots = []
-    const listaHoras = Array.isArray(horarios) ? horarios : (horarios.horarios || horarios.slots || [])
+      const ocupSet = new Set((agds||[]).map(a => {
+        const d  = new Date(a.data_hora_ini)
+        const br = new Date(d.getTime() - 3 * 60 * 60 * 1000)
+        return `${String(br.getUTCHours()).padStart(2,'0')}:${String(br.getUTCMinutes()).padStart(2,'0')}`
+      }))
 
-    for (const item of listaHoras) {
-      const horaStr = typeof item === 'string' ? item : (item.hora || item.hora_inicio || item.time)
-      if (!horaStr) continue
+      const dObj = new Date(dStr + 'T12:00:00')
+      const fmt  = `${diasSemana[dObj.getDay()]} ${String(dObj.getDate()).padStart(2,'0')}/${String(dObj.getMonth()+1).padStart(2,'0')}`
 
-      const horaIso = horaStr.slice(0,5) // "HH:MM"
-
-      // Filtra por período se solicitado
-      if (dados.periodo === 'manha'  && horaIso >= '12:00') continue
-      if (dados.periodo === 'tarde'  && (horaIso < '12:00' || horaIso >= '18:00')) continue
-      if (dados.periodo === 'noite'  && horaIso < '18:00') continue
-
-      const colId   = item.colaborador_id || dados.barbeiro_id
-      const colNome = item.colaborador_nome || item.nome_colaborador || dados.barbeiro_nome || ''
-
-      slots.push({
-        colaborador_id: colId,
-        barbeiro_nome:  colNome,
-        data_iso:       dataStr,
-        hora_iso:       horaIso,
+      return horariosBase.filter(h => !ocupSet.has(h)).map(h => ({
+        colaborador_id: col.id,
+        barbeiro_nome:  col.nome,
+        data_iso:       dStr,
+        hora_iso:       h,
         data_fmt:       fmt,
-        hora_fmt:       horaIso,
-        label:          `${horaIso} — ${colNome} (${fmt})`
-      })
+        hora_fmt:       h,
+        label:          `${h} — ${col.nome} (${fmt})`
+      }))
     }
 
-    // Se pediu hora específica, ordena por proximidade
-    if (dados.hora_raw) {
-      slots.sort((a, b) => {
-        const da = Math.abs(parseInt(a.hora_iso.replace(':','')) - parseInt(dados.hora_raw.replace(':','')))
-        const db = Math.abs(parseInt(b.hora_iso.replace(':','')) - parseInt(dados.hora_raw.replace(':','')))
-        return da - db
-      })
+    // Coleta slots
+    const col  = cols[0]
+    const slots = await slotsLivresDia(col, dataStr)
+
+    // Se tem hora específica — ordena por proximidade
+    if (dados.hora_raw && slots.length > 0) {
+      const exato = slots.find(s => s.hora_iso === dados.hora_raw)
+      if (exato) return [exato, ...slots.filter(s => s.hora_iso > dados.hora_raw).slice(0,2)]
+      const prox = slots.filter(s => s.hora_iso > dados.hora_raw).slice(0,2)
+      const ante = slots.filter(s => s.hora_iso < dados.hora_raw).reverse().slice(0,1)
+      // Mesmo horário dia seguinte
+      const dia2 = new Date(dataBase); dia2.setDate(dia2.getDate()+1)
+      const slots2 = await slotsLivresDia(col, dia2.toISOString().slice(0,10))
+      const exato2 = slots2.find(s => s.hora_iso === dados.hora_raw) || slots2.find(s => s.hora_iso >= dados.hora_raw)
+      return [...prox, ...ante, ...(exato2 ? [exato2] : [])].slice(0,3)
     }
 
-    // Marca se não tinha horário hoje e moveu para amanhã
-    if (slots.length === 0 && dados.data_raw) {
-      // tenta amanhã
-      const amanha = new Date(dataBase)
-      amanha.setDate(amanha.getDate() + 1)
-      const dadosAmanha = { ...dados, data_raw: amanha.toISOString().slice(0,10), hora_raw: null }
-      const slotsAmanha = await buscarSlots(dadosAmanha)
-      if (slotsAmanha.length > 0) dados._sem_horario_hoje = true
-      return slotsAmanha
-    }
-
-    return slots.slice(0, 6)
-  } catch (e) {
-    console.error('[whatsapp/buscarSlots]', e.message)
+    return slots.slice(0,6)
+  } catch(e) {
+    console.error('[buscarSlots]', e.message)
     return []
   }
 }
-
 
 // Busca outros barbeiros no mesmo horário pedido
 async function buscarOutrosBarbeirosNoHorario(dados) {
