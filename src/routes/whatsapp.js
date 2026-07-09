@@ -216,386 +216,452 @@ router.post('/webhook', async (req, res) => {
 })
 
 // ============================================================
-// MÁQUINA DE ESTADOS — fluxo roteirizado
+// FLUXO EM 4 FASES
 // ============================================================
 async function processarFluxo(conversa, mensagemCliente) {
-  const estado  = conversa.estado_ia || 'inicial'
-  const dados   = conversa.dados_ia  || {}
-  const erros   = dados._erros || 0
+  const fase  = conversa.estado_ia || 'fase1'
+  const dados = conversa.dados_ia  || {}
+  const nome  = dados._nome || dados._nome_cliente || null
 
-  console.log(`[fluxo] estado=${estado} msg=${mensagemCliente?.slice(0,50)}`)
+  console.log(`[fluxo] fase=${fase} msg="${mensagemCliente?.slice(0,50)}"`)
 
   try {
-    // ── ESTADO: inicial → tenta extrair tudo de uma vez antes de pedir etapa por etapa
-    if (estado === 'inicial') {
-      const tudo = await extrairTudo(mensagemCliente)
-      if (tudo.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
-      // Preenche o que já veio na primeira mensagem
-      if (tudo.servico)  { dados.servico_raw = tudo.servico;   dados.servico_nome = nomearServico(tudo.servico) }
-      if (tudo.unidade)  { dados.unidade_raw = tudo.unidade;   dados.unidade_nome = nomearUnidade(tudo.unidade) }
-      if (tudo.barbeiro && tudo.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = tudo.barbeiro
-      if (tudo.data)     dados.data_raw  = tudo.data
-      if (tudo.hora)     dados.hora_raw  = tudo.hora
-      if (tudo.periodo)  dados.periodo   = tudo.periodo
+    // ══════════════════════════════════════════════════════
+    // FASE 1 — SAUDAÇÃO E IDENTIFICAÇÃO
+    // ══════════════════════════════════════════════════════
 
-      // Busca unidade_id se unidade foi informada
-      if (dados.unidade_raw) {
-        const { data: uni } = await supabaseAdmin.from('unidades')
-          .select('id,nome').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
-        if (uni) dados.unidade_id = uni.id
-      }
+    if (fase === 'fase1') {
+      // Tenta extrair info da mensagem já na abertura
+      const ext = await extrairTudo(mensagemCliente)
+      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
-      // Busca barbeiro_id se barbeiro foi informado
-      if (dados.barbeiro_raw) {
-        const q = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${dados.barbeiro_raw}%`).limit(1)
-        if (dados.unidade_id) q.eq('unidade_id', dados.unidade_id)
-        const { data: col } = await q.maybeSingle()
-        if (col) { dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome }
-      }
+      // Preenche o que veio na primeira mensagem
+      if (ext.servico)  { dados.servico_raw = ext.servico;  dados.servico_nome  = nomearServico(ext.servico) }
+      if (ext.unidade)  { dados.unidade_raw = ext.unidade;  dados.unidade_nome  = nomearUnidade(ext.unidade) }
+      if (ext.barbeiro && ext.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = ext.barbeiro
+      if (ext.data)     dados.data_raw  = ext.data
+      if (ext.hora)     dados.hora_raw  = ext.hora
+      if (ext.periodo)  dados.periodo   = ext.periodo
 
-      // Avança direto para o passo que falta
-      if (!dados.servico_raw) {
-        await enviar(conversa, MSG.boas_vindas)
-        await setEstado(conversa.id, 'aguardando_servico', dados)
-        return
-      }
-      if (!dados.unidade_raw) {
-        await enviar(conversa, `Olá! 😊 Serviço: *\${dados.servico_nome}*. \${MSG.pede_unidade}`)
-        await setEstado(conversa.id, 'aguardando_unidade', dados)
-        return
-      }
-      if (!dados.barbeiro_raw && dados.barbeiro_id === undefined) {
-        await enviar(conversa, MSG.pede_barbeiro(dados._nome_cliente))
-        await setEstado(conversa.id, 'aguardando_barbeiro', dados)
-        return
-      }
-      if (!dados.data_raw && !dados.hora_raw && !dados.periodo) {
-        await enviar(conversa, MSG.pede_data(dados._nome_cliente))
-        await setEstado(conversa.id, 'aguardando_data', dados)
-        return
-      }
-      // Tem tudo! Busca slots direto
-      const slots = await buscarSlots(dados)
-      if (!slots || slots.length === 0) {
-        await enviar(conversa, MSG.sem_horarios)
-        await setEstado(conversa.id, 'aguardando_data', dados)
-      } else {
-        dados.slots = slots
-        const temHorarioExato = dados.hora_raw && slots.some(s => s.hora_iso === dados.hora_raw)
-        const podeBuscarOutro = !temHorarioExato && dados.hora_raw && !!dados.barbeiro_id
-        dados._pode_buscar_outro = podeBuscarOutro
-        const msgSlots = !temHorarioExato && dados.hora_raw
-          ? MSG.horario_indisponivel(slots, podeBuscarOutro)
-          : MSG.mostra_horarios(slots)
-        await enviar(conversa, msgSlots)
-        await setEstado(conversa.id, 'escolhendo_horario', dados)
-      }
-      return
-    }
+      // Cliente identificado pelo número?
+      if (conversa.cliente_id) {
+        const ctx = await buscarContextoCliente(conversa.cliente_id)
+        if (ctx) {
+          dados._nome = ctx.nome
+          // Pré-preenche histórico se cliente não mandou preferências
+          if (!dados.servico_raw  && ctx.ultimo_servico)   { dados.servico_raw  = 'historico'; dados.servico_nome  = ctx.ultimo_servico }
+          if (!dados.unidade_raw  && ctx.ultima_unidade)   { dados.unidade_raw  = ctx.ultima_unidade.toLowerCase(); dados.unidade_nome  = ctx.ultima_unidade; dados.unidade_id   = ctx.ultima_unidade_id }
+          if (!dados.barbeiro_raw && ctx.ultimo_barbeiro)  { dados.barbeiro_raw = ctx.ultimo_barbeiro; dados.barbeiro_nome = ctx.ultimo_barbeiro; dados.barbeiro_id  = ctx.ultimo_barbeiro_id }
+          dados._usando_historico = true
 
-    // ── ESTADO: aguardando_nome
-    if (estado === 'aguardando_nome') {
-      const nome = mensagemCliente.trim().split(' ').slice(0,2).join(' ') // pega até 2 palavras
-      if (nome && nome.length > 1) {
-        dados._nome_cliente = nome
-        dados._erros = 0
-        await enviar(conversa, MSG.boas_vindas_com_nome(nome))
-        await setEstado(conversa.id, 'aguardando_servico', dados)
-      } else {
-        await erroOuEscalar(conversa, dados, `Não entendi seu nome 😅 Pode me dizer como se chama?`)
-      }
-      return
-    }
-
-    // ── ESTADO: aguardando_servico
-    if (estado === 'aguardando_servico') {
-      // Tenta extrair tudo (cliente pode ter mandado info completa numa resposta posterior)
-      const tudo = await extrairTudo(mensagemCliente)
-      if (tudo.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
-      const servico = tudo.servico
-      if (servico) {
-        dados.servico_raw  = servico
-        dados.servico_nome = nomearServico(servico)
-        // Aproveita o que mais veio
-        if (tudo.unidade)  { dados.unidade_raw = tudo.unidade; dados.unidade_nome = nomearUnidade(tudo.unidade) }
-        if (tudo.barbeiro) dados.barbeiro_raw = tudo.barbeiro
-        if (tudo.data)     dados.data_raw  = tudo.data
-        if (tudo.hora)     dados.hora_raw  = tudo.hora
-        if (tudo.periodo)  dados.periodo   = tudo.periodo
-        dados._erros = 0
-        if (!dados.unidade_raw) {
-          await enviar(conversa, MSG.pede_unidade)
-          await setEstado(conversa.id, 'aguardando_unidade', dados)
-        } else {
-          await enviar(conversa, MSG.pede_barbeiro(dados._nome_cliente))
-          await setEstado(conversa.id, 'aguardando_barbeiro', dados)
+          // Se tem histórico completo → oferece repetir
+          if (dados._usando_historico && ctx.ultimo_servico && ctx.ultima_unidade && ctx.ultimo_barbeiro && !ext.data && !ext.hora && !ext.periodo) {
+            await enviar(conversa, MSG.boas_vindas_historico(ctx.nome, ctx.ultimo_servico, ctx.ultima_unidade, ctx.ultimo_barbeiro))
+            await setFase(conversa.id, 'fase3', dados)
+            return
+          }
         }
-      } else {
-        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
       }
+
+      // Não identificado → pede nome (se mensagem só tem saudação)
+      if (!dados._nome && !dados.servico_raw && !dados.unidade_raw) {
+        await enviar(conversa, MSG.pede_nome)
+        await setFase(conversa.id, 'fase1_nome', dados)
+        return
+      }
+
+      // Tem nome ou info suficiente → vai pra fase 2
+      await irParaFase2(conversa, dados)
       return
     }
 
-    // ── ESTADO: aguardando_unidade
-    if (estado === 'aguardando_unidade') {
-      const ext = await extrairTudo(mensagemCliente)
-      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
-      if (ext.unidade) {
-        dados.unidade_raw  = ext.unidade
-        dados.unidade_nome = nomearUnidade(ext.unidade)
-        // Busca unidade_id no banco
-        const { data: uni } = await supabaseAdmin.from('unidades')
-          .select('id,nome').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
-        if (uni) dados.unidade_id = uni.id
-        dados._erros = 0
-        await enviar(conversa, MSG.pede_barbeiro(dados._nome_cliente))
-        await setEstado(conversa.id, 'aguardando_barbeiro', dados)
-      } else {
-        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
-      }
+    if (fase === 'fase1_nome') {
+      const nome = mensagemCliente.trim().split(' ').slice(0,2).join(' ')
+      if (nome.length < 2) { await erroOuEscalar(conversa, dados, `Não entendi seu nome 😅 Como você se chama?`); return }
+      dados._nome = nome
+      dados._erros = 0
+      await irParaFase2(conversa, dados)
       return
     }
 
-    // ── ESTADO: aguardando_barbeiro
-    if (estado === 'aguardando_barbeiro') {
+    // ══════════════════════════════════════════════════════
+    // FASE 2 — SERVIÇO + UNIDADE + BARBEIRO
+    // ══════════════════════════════════════════════════════
+
+    if (fase === 'fase2_servico') {
       const ext = await extrairTudo(mensagemCliente)
       if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+      if (!ext.servico) { await erroOuEscalar(conversa, dados, MSG.nao_entendeu); return }
+      dados.servico_raw  = ext.servico
+      dados.servico_nome = nomearServico(ext.servico)
+      if (ext.unidade)  { dados.unidade_raw = ext.unidade; dados.unidade_nome = nomearUnidade(ext.unidade) }
+      if (ext.barbeiro && ext.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = ext.barbeiro
+      if (ext.data)     dados.data_raw = ext.data
+      if (ext.hora)     dados.hora_raw = ext.hora
+      if (ext.periodo)  dados.periodo  = ext.periodo
+      dados._erros = 0
+      await irParaFase2(conversa, dados)
+      return
+    }
+
+    if (fase === 'fase2_unidade') {
+      const ext = await extrairTudo(mensagemCliente)
+      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+      if (!ext.unidade) { await erroOuEscalar(conversa, dados, MSG.nao_entendeu); return }
+      dados.unidade_raw  = ext.unidade
+      dados.unidade_nome = nomearUnidade(ext.unidade)
+      const { data: uni } = await supabaseAdmin.from('unidades').select('id').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
+      if (uni) dados.unidade_id = uni.id
+      if (ext.barbeiro && ext.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = ext.barbeiro
+      if (ext.data)    dados.data_raw = ext.data
+      if (ext.hora)    dados.hora_raw = ext.hora
+      if (ext.periodo) dados.periodo  = ext.periodo
+      dados._erros = 0
+      // Verifica se tinha barbeiro pendente de outra unidade
+      if (dados._barbeiro_pendente_id && dados._barbeiro_pendente_uni === dados.unidade_nome) {
+        dados.barbeiro_id   = dados._barbeiro_pendente_id
+        dados.barbeiro_nome = dados._barbeiro_pendente_nome
+        dados._barbeiro_pendente_id = null; dados._barbeiro_pendente_nome = null; dados._barbeiro_pendente_uni = null
+      }
+      await irParaFase2(conversa, dados)
+      return
+    }
+
+    if (fase === 'fase2_barbeiro') {
+      const msg = mensagemCliente.toLowerCase()
+      const ext = await extrairTudo(mensagemCliente)
+      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+
+      // Cliente diz que TEM preferência mas não falou o nome
+      if (/\btenho\b|\bquero\b|\bprefiro\b/.test(msg) && !ext.barbeiro) {
+        await enviar(conversa, `Qual o nome do barbeiro? 😊`)
+        return
+      }
 
       const nomeBarbeiro = ext.barbeiro
-      const msg = mensagemCliente.toLowerCase()
-
-      // Cliente diz que TEM preferência mas não falou o nome → pede o nome
-      const querBarbeiro = /tenho|quero|prefiro|gosto/.test(msg) && !nomeBarbeiro
-      if (querBarbeiro) {
-        await enviar(conversa, 'Qual o nome do barbeiro? 😊')
-        return
-      }
-
       if (!nomeBarbeiro || nomeBarbeiro === 'sem_preferencia') {
-        // Sem preferência ou campo vazio/undefined → mais disponível
-        dados.barbeiro_raw  = null
-        dados.barbeiro_nome = 'Mais disponível'
         dados.barbeiro_id   = null
+        dados.barbeiro_nome = 'Mais disponível'
       } else {
-        // Busca barbeiro por nome na unidade
-        const colQuery = supabaseAdmin.from('colaboradores')
-          .select('id,nome')
-          .eq('ativo', true)
-          .ilike('nome', `%${nomeBarbeiro}%`)
-          .limit(1)
-        if (dados.unidade_id) colQuery.eq('unidade_id', dados.unidade_id)
-        const { data: col } = await colQuery.maybeSingle()
+        const colQ = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${nomeBarbeiro}%`).limit(1)
+        if (dados.unidade_id) colQ.eq('unidade_id', dados.unidade_id)
+        const { data: col } = await colQ.maybeSingle()
         if (col) {
           dados.barbeiro_id   = col.id
           dados.barbeiro_nome = col.nome
         } else {
-          dados.barbeiro_id   = null
-          dados.barbeiro_nome = 'Mais disponível'
+          // Busca em outras unidades
+          const { data: colOutra } = await supabaseAdmin.from('colaboradores')
+            .select('id,nome,unidades(nome)').eq('ativo', true).ilike('nome', `%${nomeBarbeiro}%`).limit(1).maybeSingle()
+          if (colOutra) {
+            const uniDele = colOutra.unidades?.nome || 'outra unidade'
+            dados._barbeiro_pendente_id   = colOutra.id
+            dados._barbeiro_pendente_nome = colOutra.nome
+            dados._barbeiro_pendente_uni  = uniDele
+            await enviar(conversa, `O ${colOutra.nome} é barbeiro da unidade ${uniDele}, não da ${dados.unidade_nome} 😊\n\nEm qual unidade você quer ser atendido?\n\n📍 Timbaúva\n📍 Centro\n📍 São João`)
+            await setFase(conversa.id, 'fase2_unidade', dados)
+            return
+          } else {
+            await enviar(conversa, `Não encontrei o ${nomeBarbeiro} em nenhuma unidade 😔 Tem preferência por outro barbeiro?`)
+            return
+          }
         }
       }
+
+      if (ext.data)    dados.data_raw = ext.data
+      if (ext.hora)    dados.hora_raw = ext.hora
+      if (ext.periodo) dados.periodo  = ext.periodo
       dados._erros = 0
-      await enviar(conversa, MSG.pede_data(dados._nome_cliente))
-      await setEstado(conversa.id, 'aguardando_data', dados)
+      await irParaFase3(conversa, dados)
       return
     }
 
-    // ── ESTADO: aguardando_data
-    if (estado === 'aguardando_data') {
-      // Primeiro tenta extrair TUDO — cliente pode estar mudando serviço/barbeiro/unidade
-      const tudo = await extrairTudo(mensagemCliente)
-      if (tudo.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+    // ══════════════════════════════════════════════════════
+    // FASE 3 — BUSCA E ESCOLHA DE HORÁRIO
+    // ══════════════════════════════════════════════════════
 
-      // Detecta mudança de serviço/barbeiro/unidade (cliente não quer repetir o histórico)
-      if (tudo.servico && tudo.servico !== dados.servico_raw) {
-        dados.servico_raw = tudo.servico; dados.servico_nome = nomearServico(tudo.servico); dados._usando_historico = false
-      }
-      if (tudo.unidade) {
-        dados.unidade_raw = tudo.unidade; dados.unidade_nome = nomearUnidade(tudo.unidade)
-        const { data: uni } = await supabaseAdmin.from('unidades').select('id').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
-        if (uni) dados.unidade_id = uni.id
-      }
-      if (tudo.barbeiro && tudo.barbeiro !== 'sem_preferencia') {
-        const { data: col } = await supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${tudo.barbeiro}%`).limit(1).maybeSingle()
-        if (col) { dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome; dados.barbeiro_raw = col.nome }
-      }
-
-      const ext = tudo
+    if (fase === 'fase3') {
+      const ext = await extrairTudo(mensagemCliente)
       if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+
+      // Detecta mudança de serviço/unidade/barbeiro
+      if (ext.servico && ext.servico !== dados.servico_raw) { dados.servico_raw = ext.servico; dados.servico_nome = nomearServico(ext.servico) }
+      if (ext.unidade) { dados.unidade_raw = ext.unidade; dados.unidade_nome = nomearUnidade(ext.unidade) }
+      if (ext.barbeiro && ext.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = ext.barbeiro
+
       if (ext.data || ext.hora || ext.periodo) {
-        dados.data_raw  = ext.data  || null
-        dados.hora_raw  = ext.hora  || null
+        dados.data_raw  = ext.data   || null
+        dados.hora_raw  = ext.hora   || null
         dados.periodo   = ext.periodo || null
         dados._erros = 0
-        // Busca horários disponíveis
-        const slots = await buscarSlots(dados)
-        if (!slots || slots.length === 0) {
-          // Tenta o dia seguinte automaticamente
-          const dataAtual = dados.data_raw ? new Date(dados.data_raw) : new Date()
-          dataAtual.setDate(dataAtual.getDate() + 1)
-          dados.data_raw = dataAtual.toISOString().slice(0,10)
-          const slotsProximo = await buscarSlots(dados)
-          if (slotsProximo && slotsProximo.length > 0) {
-            dados.slots = slotsProximo
-            await enviar(conversa, `Não há horários disponíveis nesse dia 😔 Mas encontrei no dia seguinte:\n\n` + MSG.mostra_horarios(slotsProximo).split('\n').slice(1).join('\n'))
-            await setEstado(conversa.id, 'escolhendo_horario', dados)
-          } else {
-            await enviar(conversa, MSG.sem_horarios)
-            await setEstado(conversa.id, 'aguardando_data', { ...dados, data_raw: null, hora_raw: null })
-          }
-        } else {
-          dados.slots = slots
-          // Se cliente pediu hora específica mas não tem → avisa e mostra próximos
-          const temHorarioExato = dados.hora_raw && slots.some(s => s.hora_iso === dados.hora_raw)
-          const podeBuscarOutro = !temHorarioExato && dados.hora_raw && !!dados.barbeiro_id
-          dados._pode_buscar_outro = podeBuscarOutro
-          let msgSlots = !temHorarioExato && dados.hora_raw
-            ? MSG.horario_indisponivel(slots, podeBuscarOutro)
-            : MSG.mostra_horarios(slots)
-          if (dados._sem_horario_hoje) {
-            dados._sem_horario_hoje = false
-            // Guarda os slots de amanhã para usar se cliente confirmar
-            dados._slots_amanha = slots
-            await enviar(conversa, MSG.sem_horario_hoje(dados.barbeiro_nome || 'este barbeiro', dados.unidade_nome || 'sua unidade'))
-            await setEstado(conversa.id, 'aguardando_opcao_sem_horario', dados)
-            return
-          }
-          await enviar(conversa, msgSlots)
-          await setEstado(conversa.id, 'escolhendo_horario', dados)
-        }
+        await buscarEMostrarSlots(conversa, dados)
       } else {
-        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
+        await responder(conversa, 'nao_entendeu', { nome: dados._nome, ultima_msg: mensagemCliente }, MSG.pede_data(dados._nome))
+        await supabaseAdmin.from('whatsapp_conversas').update({ dados_ia: dados }).eq('id', conversa.id)
       }
       return
     }
 
-    // ── ESTADO: aguardando_opcao_sem_horario
-    if (estado === 'aguardando_opcao_sem_horario') {
+    if (fase === 'fase3_slots') {
       const msg = mensagemCliente.toLowerCase()
+      const slots = dados._slots || []
 
-      // Cliente quer amanhã com o mesmo barbeiro
-      if (/amanha|amanhã|sim|pode|quero|ok|claro/.test(msg) && !/outro/.test(msg)) {
-        const slots = dados._slots_amanha || []
-        if (slots.length > 0) {
-          dados.slots = slots
+      // Quer outro barbeiro hoje
+      if (dados._sem_horario_hoje && /outro|hoje/.test(msg)) {
+        if (dados.unidade_id && dados.barbeiro_id) {
+          const { data: cols } = await supabaseAdmin.from('colaboradores')
+            .select('id,nome').eq('ativo', true).eq('unidade_id', dados.unidade_id).neq('id', dados.barbeiro_id)
+          if (cols && cols.length > 0) {
+            const hoje = new Date().toISOString().slice(0,10)
+            const slotsHoje = await buscarSlots({ ...dados, barbeiro_id: cols[0].id, data_raw: hoje, hora_raw: null })
+            if (slotsHoje && slotsHoje.length > 0) {
+              dados._slots = slotsHoje
+              dados._sem_horario_hoje = false
+              await enviar(conversa, `Encontrei esses horários ainda hoje:\n\n` + MSG.mostra_horarios(slotsHoje))
+              await setFase(conversa.id, 'fase3_slots', dados)
+              return
+            }
+          }
+          await enviar(conversa, `Não há mais horários hoje em nenhum barbeiro 😔 Quer ver para amanhã?`)
+          return
+        }
+      }
+
+      // Quer amanhã (quando sem_horario_hoje)
+      if (dados._sem_horario_hoje && /amanha|amanhã|sim|pode|ok/.test(msg)) {
+        const slotsAmanha = dados._slots_amanha || []
+        if (slotsAmanha.length > 0) {
+          dados._slots = slotsAmanha
+          dados._sem_horario_hoje = false
           dados._slots_amanha = null
-          await enviar(conversa, MSG.mostra_horarios(slots))
-          await setEstado(conversa.id, 'escolhendo_horario', dados)
+          await enviar(conversa, MSG.mostra_horarios(slotsAmanha))
+          await setFase(conversa.id, 'fase3_slots', dados)
         } else {
           await enviar(conversa, MSG.sem_horarios)
-          await setEstado(conversa.id, 'aguardando_data', { ...dados, data_raw: null })
+          await setFase(conversa.id, 'fase3', { ...dados, data_raw: null, hora_raw: null })
         }
         return
       }
 
-      // Cliente quer outro barbeiro hoje
-      if (/outro|outr|hoje/.test(msg)) {
-        const hoje = new Date().toISOString().slice(0,10)
-        const dadosHoje = { ...dados, data_raw: hoje, barbeiro_id: null, barbeiro_raw: null }
-        const slotsHoje = await buscarOutrosBarbeirosNoHorario({ ...dadosHoje, hora_raw: null })
-        // Busca todos os slots de hoje com outros barbeiros
-        const { data: cols } = await supabaseAdmin.from('colaboradores')
-          .select('id,nome').eq('ativo', true)
-          .eq('unidade_id', dados.unidade_id).neq('id', dados.barbeiro_id || '00000000-0000-0000-0000-000000000000')
-        if (cols && cols.length > 0) {
-          const slotsOutros = await buscarSlots({ ...dadosHoje, barbeiro_id: cols[0].id, data_raw: hoje })
-          if (slotsOutros && slotsOutros.length > 0) {
-            dados.slots = slotsOutros
-            await enviar(conversa, `Encontrei esses horários ainda hoje:\n\n` + MSG.mostra_horarios(slotsOutros).split('\n').slice(1).join('\n'))
-            await setEstado(conversa.id, 'escolhendo_horario', dados)
-            return
-          }
-        }
-        await enviar(conversa, `Infelizmente não há mais horários hoje com nenhum barbeiro 😔 Quer marcar para amanhã?`)
-        return
-      }
-
-      // Não entendeu
-      await erroOuEscalar(conversa, dados, `Responda *amanhã* para ver horários de amanhã com o ${dados.barbeiro_nome || 'mesmo barbeiro'}, ou *outro barbeiro* para ver disponibilidade hoje 😊`)
-      return
-    }
-
-    // ── ESTADO: escolhendo_horario
-    if (estado === 'escolhendo_horario') {
-      const slots = dados.slots || []
-
-      // Detecta se cliente quer ver outro barbeiro no mesmo horário
-      const msg = mensagemCliente.toLowerCase()
-      const querOutroBarbeiro = dados._pode_buscar_outro && (
-        msg.includes('outro barbeiro') || msg.includes('outro barb') ||
-        msg.includes('qualquer barbeiro') || msg.includes('outro') ||
-        msg.includes('sim') && msg.includes('outro') ||
-        msg.includes('ver outro') || msg.includes('busca outro')
-      )
-
-      if (querOutroBarbeiro) {
-        const outrosSlots = await buscarOutrosBarbeirosNoHorario(dados)
-        if (outrosSlots.length > 0) {
-          dados.slots = outrosSlots
-          dados._pode_buscar_outro = false
-          await enviar(conversa,
-            `Encontrei esses barbeiros disponíveis às ${dados.hora_raw}:\n\n` +
-            outrosSlots.map((s,i) => `${i+1}. ${s.label}`).join('\n') +
-            `\n\nQual prefere?`
-          )
-          await setEstado(conversa.id, 'escolhendo_horario', dados)
-        } else {
-          await enviar(conversa, `Infelizmente nenhum barbeiro tem disponível esse horário 😔 Quer tentar outro horário?`)
-          await setEstado(conversa.id, 'aguardando_data', { ...dados, hora_raw: null, data_raw: null })
-        }
-        return
-      }
-
-      // Escolhe por número
+      // Escolha por número
       const ext = await extrairTudo(mensagemCliente)
-      const idx  = (ext.numero_escolhido || 1) - 1
+      const idx  = (ext.numero_escolhido || 0) - 1
       if (idx >= 0 && idx < slots.length) {
         const slot = slots[idx]
-        dados.slot_escolhido = slot
+        dados._slot  = slot
         dados.barbeiro_id    = slot.colaborador_id
         dados.barbeiro_nome  = slot.barbeiro_nome
         dados.data_fmt       = slot.data_fmt
         dados.hora_fmt       = slot.hora_fmt
         dados._erros = 0
         await enviar(conversa, MSG.confirma_agendamento(dados))
-        await setEstado(conversa.id, 'confirmando', dados)
+        await setFase(conversa.id, 'fase4', dados)
       } else {
         await erroOuEscalar(conversa, dados, `Escolha um número entre 1 e ${slots.length} 😊`)
       }
       return
     }
 
-    // ── ESTADO: confirmando
-    if (estado === 'confirmando') {
-      const ext = await extrairTudo(mensagemCliente)
-      if (ext.confirmou === true) {
-        // Tenta fazer o agendamento
+    // ══════════════════════════════════════════════════════
+    // FASE 4 — CONFIRMAÇÃO E AGENDAMENTO
+    // ══════════════════════════════════════════════════════
+
+    if (fase === 'fase4') {
+      const msg = mensagemCliente.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      const confirmou = /\bsim\b|\bpode\b|\bconfirmo\b|\bok\b|\bclaro\b|\bisso\b/.test(msg)
+      const cancelou  = /\bnao\b|\bcancela\b|\bdesistir\b|\bnope\b/.test(msg)
+
+      if (confirmou) {
         const ok = await fazerAgendamento(conversa, dados)
         if (ok) {
           await enviar(conversa, MSG.agendado(dados))
-          await setEstado(conversa.id, 'agendado', dados)
+          await setFase(conversa.id, 'fase4_concluido', dados)
         } else {
-          await escalarHumano(conversa, `Tive um problema ao confirmar o agendamento 😔 Vou chamar um atendente!`)
+          await escalarHumano(conversa, `Tive um problema ao confirmar 😔 Vou chamar um atendente!`)
         }
-      } else if (ext.confirmou === false || ext.cancelou) {
+      } else if (cancelou) {
         await enviar(conversa, MSG.cancelado)
-        await setEstado(conversa.id, 'inicial', {})
+        await setFase(conversa.id, 'fase1', {})
       } else {
         await erroOuEscalar(conversa, dados, `Responda *sim* para confirmar ou *não* para cancelar 😊`)
       }
       return
     }
 
-    // ── ESTADO: agendado → conversa encerrada
-    if (estado === 'agendado') {
-      // Silencioso — não responde automaticamente após agendado
+    if (fase === 'fase4_concluido') {
+      // Conversa encerrada — não responde automaticamente
       return
     }
 
+    // Estado desconhecido → reinicia
+    await setFase(conversa.id, 'fase1', {})
+    await processarFluxo({ ...conversa, estado_ia: 'fase1', dados_ia: {} }, mensagemCliente)
+
   } catch (e) {
-    console.error('[whatsapp/fluxo]', e.message)
+    console.error('[fluxo] erro:', e.message)
     await escalarHumano(conversa, `Tive um problema técnico 😔 Vou chamar um atendente!`)
   }
+}
+
+// ── Lógica de avanço da Fase 2 (verifica o que já tem e pula etapas) ──
+async function irParaFase2(conversa, dados) {
+  const nome = dados._nome || null
+
+  // Resolve unidade_id se ainda não tem
+  if (dados.unidade_raw && !dados.unidade_id) {
+    const { data: uni } = await supabaseAdmin.from('unidades').select('id').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
+    if (uni) dados.unidade_id = uni.id
+  }
+  // Resolve barbeiro_id se tem nome mas não tem id
+  if (dados.barbeiro_raw && !dados.barbeiro_id && dados.barbeiro_raw !== 'historico') {
+    const colQ = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${dados.barbeiro_raw}%`).limit(1)
+    if (dados.unidade_id) colQ.eq('unidade_id', dados.unidade_id)
+    const { data: col } = await colQ.maybeSingle()
+    if (col) { dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome }
+  }
+
+  const ctx = { nome, servico: dados.servico_nome, unidade: dados.unidade_nome, barbeiro: dados.barbeiro_nome, ultima_msg: '', tem_historico: !!dados._usando_historico }
+
+  if (!dados.servico_raw) {
+    const opcoes = '✂️ Corte de cabelo\n🪒 Corte + Barba\n🪒 Só a barba\n👶 Corte infantil'
+    const fallback = nome ? `Olá, ${nome}! 😊 Qual serviço você deseja?` : `Olá! 😊 Qual serviço você deseja?`
+    await responder(conversa, 'pede_servico', ctx, fallback, opcoes)
+    await setFase(conversa.id, 'fase2_servico', dados)
+    return
+  }
+  if (!dados.unidade_raw) {
+    const opcoes = '📍 Timbaúva\n📍 Centro\n📍 São João'
+    await responder(conversa, 'pede_unidade', { ...ctx, servico: dados.servico_nome }, `Ótimo! Qual unidade prefere?`, opcoes)
+    await setFase(conversa.id, 'fase2_unidade', dados)
+    return
+  }
+  if (dados.barbeiro_id === undefined && !dados.barbeiro_raw) {
+    await responder(conversa, 'pede_barbeiro', { ...ctx, unidade: dados.unidade_nome }, MSG.pede_barbeiro(nome))
+    await setFase(conversa.id, 'fase2_barbeiro', dados)
+    return
+  }
+  // Tudo coletado → fase 3
+  await irParaFase3(conversa, dados)
+}
+
+async function irParaFase3(conversa, dados) {
+  if (dados.data_raw || dados.hora_raw || dados.periodo) {
+    await buscarEMostrarSlots(conversa, dados)
+  } else {
+        const ctxD = { nome: dados._nome, servico: dados.servico_nome, unidade: dados.unidade_nome, barbeiro: dados.barbeiro_nome, tem_historico: !!dados._usando_historico }
+    await responder(conversa, 'pede_data', ctxD, MSG.pede_data(dados._nome))
+    await setFase(conversa.id, 'fase3', dados)
+  }
+}
+
+async function buscarEMostrarSlots(conversa, dados) {
+  const slots = await buscarSlots(dados)
+
+  if (!slots || slots.length === 0) {
+    // Tenta dia seguinte
+    const dataAtual = dados.data_raw ? new Date(dados.data_raw + 'T12:00:00') : new Date()
+    dataAtual.setDate(dataAtual.getDate() + 1)
+    const proximoDia = dataAtual.toISOString().slice(0,10)
+    const slotsProximo = await buscarSlots({ ...dados, data_raw: proximoDia, hora_raw: null })
+    if (slotsProximo && slotsProximo.length > 0) {
+      dados._slots = slotsProximo
+      await enviar(conversa, `Não há horários disponíveis nesse dia 😔\n\n` + MSG.mostra_horarios(slotsProximo))
+      await setFase(conversa.id, 'fase3_slots', dados)
+    } else {
+      await enviar(conversa, MSG.sem_horarios)
+      await setFase(conversa.id, 'fase3', { ...dados, data_raw: null, hora_raw: null })
+    }
+    return
+  }
+
+  const temExato = dados.hora_raw && slots.some(s => s.hora_iso === dados.hora_raw)
+  const podeBuscarOutro = !temExato && dados.hora_raw && !!dados.barbeiro_id
+
+  if (dados._sem_horario_hoje) {
+    dados._slots_amanha = slots
+    await enviar(conversa, MSG.sem_horario_hoje(dados.barbeiro_nome || 'este barbeiro', dados.unidade_nome || 'sua unidade'))
+    await setFase(conversa.id, 'fase3_slots', dados)
+    return
+  }
+
+  dados._slots = slots
+  dados._pode_buscar_outro = podeBuscarOutro
+  const msgSlots = !temExato && dados.hora_raw
+    ? MSG.horario_indisponivel(slots, podeBuscarOutro)
+    : MSG.mostra_horarios(slots)
+  await enviar(conversa, msgSlots)
+  await setFase(conversa.id, 'fase3_slots', dados)
+}
+
+async function setFase(id, fase, dados) {
+  await supabaseAdmin.from('whatsapp_conversas').update({ estado_ia: fase, dados_ia: dados }).eq('id', id)
+}
+
+
+// ============================================================
+// Gemini gera texto natural — código controla estrutura e opções
+// ============================================================
+async function gerarResposta(tipo, ctx) {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY
+  if (!GEMINI_KEY) return null // fallback para mensagem padrão
+
+  const tarefas = {
+    pede_servico:   `Pergunte qual serviço o cliente deseja. Não liste os serviços (eles serão adicionados automaticamente).`,
+    pede_unidade:   `O cliente escolheu "${ctx.servico}". Pergunte qual unidade prefere de forma natural.`,
+    pede_barbeiro:  `O cliente vai para a ${ctx.unidade}. Pergunte se tem preferência por algum barbeiro.`,
+    pede_data:      `Coleta: serviço=${ctx.servico}, unidade=${ctx.unidade}, barbeiro=${ctx.barbeiro}. Pergunte o dia e horário de forma natural.`,
+    confirma_slot:  `O cliente escolheu o horário. Mostre o resumo do agendamento e peça confirmação.`,
+    nao_entendeu:   `Não entendeu a mensagem "${ctx.ultima_msg}". Peça para o cliente repetir de forma gentil.`,
+    fora_escopo:    `O cliente falou sobre algo que não é agendamento ("${ctx.ultima_msg}"). Explique gentilmente que só pode ajudar com agendamentos e que vai chamar um atendente.`
+  }
+
+  const prompt = `Você é a atendente virtual da Barbearia 1989 em Montenegro/RS. Tom: simpático, informal, como a atendente real da barbearia.
+
+CONTEXTO ATUAL:
+- Cliente: ${ctx.nome || 'não identificado'}
+- Última mensagem do cliente: "${ctx.ultima_msg || ''}"
+- Serviço: ${ctx.servico || '—'}
+- Unidade: ${ctx.unidade || '—'}
+- Barbeiro: ${ctx.barbeiro || '—'}
+- Tem histórico na barbearia: ${ctx.tem_historico ? 'sim' : 'não'}
+
+TAREFA: ${tarefas[tipo] || tipo}
+
+REGRAS:
+- Máximo 2 linhas curtas
+- Use o nome do cliente quando souber
+- Não liste opções (serão adicionadas automaticamente)
+- Não invente dados
+- Emoji leve só se encaixar bem
+- Responda APENAS o texto da mensagem, sem explicação`
+
+  try {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 80 }
+        })
+      }
+    )
+    const gdata = await resp.json()
+    if (gdata.error) return null
+    const texto = gdata?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
+    return texto || null
+  } catch (e) {
+    return null
+  }
+}
+
+// Gera resposta com fallback para mensagem padrão
+async function responder(conversa, tipo, ctx, fallback, sufixo = '') {
+  const gerado = await gerarResposta(tipo, ctx)
+  const texto  = (gerado || fallback) + (sufixo ? '\n\n' + sufixo : '')
+  await enviar(conversa, texto)
 }
 
 // ============================================================
@@ -1060,9 +1126,6 @@ async function erroOuEscalar(conversa, dados, msg) {
 // ============================================================
 // Atualiza estado e dados
 // ============================================================
-async function setEstado(id, estado, dados) {
-  await supabaseAdmin.from('whatsapp_conversas').update({ estado_ia: estado, dados_ia: dados }).eq('id', id)
-}
 
 // ============================================================
 // Envia mensagem via Evolution
