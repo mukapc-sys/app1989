@@ -5,6 +5,8 @@
 const express           = require('express')
 const router            = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
+const bcrypt            = require('bcryptjs')
+const jwt               = require('jsonwebtoken')
 
 // ============================================================
 // MENSAGENS PRÉ-CONFIGURADAS — edite aqui o tom e texto
@@ -290,11 +292,44 @@ async function processarFluxo(conversa, mensagemCliente) {
     // ══════════════════════════════════════════════════════
 
     if (fase === 'fase2_servico') {
+      const servicos = dados._servicos || await carregarServicos()
+      const msg = mensagemCliente.toLowerCase()
+
+      // Tenta escolha por número
+      const numStr = mensagemCliente.trim().replace(/[^0-9]/g, '')
+      const numIdx = parseInt(numStr) - 1
+      let servicoEscolhido = (!isNaN(numIdx) && numIdx >= 0 && numIdx < servicos.length)
+        ? servicos[numIdx] : null
+
+      // Se não escolheu por número, tenta por nome
+      if (!servicoEscolhido) {
+        servicoEscolhido = servicos.find(s =>
+          msg.includes(s.nome.toLowerCase().split(' ')[0]) ||
+          s.nome.toLowerCase().split(' ').some(p => p.length > 3 && msg.includes(p))
+        )
+      }
+
+      // Fallback: extrai com Gemini e mapeia
+      if (!servicoEscolhido) {
+        const ext = await extrairTudo(mensagemCliente)
+        if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+        if (ext.servico) {
+          const mapa = { corte: 'cabelo', corte_barba: 'barba', barba: 'barba', infantil: 'cabelo' }
+          const chave = mapa[ext.servico] || ext.servico
+          servicoEscolhido = servicos.find(s => s.nome.toLowerCase().includes(chave))
+        }
+      }
+
+      if (!servicoEscolhido) { await erroOuEscalar(conversa, dados, MSG.nao_entendeu); return }
+
+      dados.servico_raw      = 'db'
+      dados.servico_id       = servicoEscolhido.id
+      dados.servico_nome     = servicoEscolhido.nome
+      dados.servico_valor    = Number(servicoEscolhido.valor)
+      dados.servico_duracao  = servicoEscolhido.duracao_min
+
+      // Extrai mais info se veio junto
       const ext = await extrairTudo(mensagemCliente)
-      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
-      if (!ext.servico) { await erroOuEscalar(conversa, dados, MSG.nao_entendeu); return }
-      dados.servico_raw  = ext.servico
-      dados.servico_nome = nomearServico(ext.servico)
       if (ext.unidade)  { dados.unidade_raw = ext.unidade; dados.unidade_nome = nomearUnidade(ext.unidade) }
       if (ext.barbeiro && ext.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = ext.barbeiro
       if (ext.data)     dados.data_raw = ext.data
@@ -478,7 +513,24 @@ async function processarFluxo(conversa, mensagemCliente) {
       if (confirmou) {
         const ok = await fazerAgendamento(conversa, dados)
         if (ok) {
-          await enviar(conversa, MSG.agendado(dados))
+          // Monta mensagem com link de acesso direto
+          let msgFinal = MSG.agendado(dados)
+
+          const cidFinal = dados._cliente_id || conversa.cliente_id
+          if (cidFinal) {
+            const nomeCliente = dados._nome || conversa.nome_contato || ''
+            const token = gerarTokenApp(cidFinal, nomeCliente)
+            if (token) {
+              const link = `https://barbearia1989.com.br/?token=${token}`
+              if (dados._cliente_novo) {
+                msgFinal += `\n\n🎉 Criamos seu cadastro na Barbearia 1989!\nSenha padrão: *123456*\n\nPelo link abaixo você acessa seus agendamentos e agenda direto na próxima vez — sem precisar falar com a gente:\n👉 ${link}`
+              } else {
+                msgFinal += `\n\nPela próxima vez, você pode agendar direto pelo app — mais rápido e sem fila 😊\n👉 ${link}`
+              }
+            }
+          }
+
+          await enviar(conversa, msgFinal)
           await setFase(conversa.id, 'fase4_concluido', dados)
         } else {
           await escalarHumano(conversa, `Tive um problema ao confirmar 😔 Vou chamar um atendente!`)
@@ -873,13 +925,15 @@ async function buscarSlots(dados) {
   try {
     const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
 
-    // Horários padrão da barbearia (09:00-19:00, a cada 30min)
+    // Horários da barbearia baseados na duração do serviço
+    const duracaoMin = dados.servico_duracao || 30
+    const passo      = duracaoMin <= 15 ? 30 : 30 // mínimo 30min entre slots na agenda
     const todosHorarios = []
-    for (let h = 9; h <= 18; h++) {
-      todosHorarios.push(`${String(h).padStart(2,'0')}:00`)
-      todosHorarios.push(`${String(h).padStart(2,'0')}:30`)
+    for (let total = 9 * 60; total <= 19 * 60; total += passo) {
+      const h = Math.floor(total / 60)
+      const m = total % 60
+      todosHorarios.push(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`)
     }
-    todosHorarios.push('19:00')
 
     // Filtra por período se não tem hora exata
     let horariosBase = todosHorarios
@@ -900,12 +954,15 @@ async function buscarSlots(dados) {
     }
 
     // Se a data for HOJE, filtra horários que já passaram (+ 30min de margem)
+    // Usa horário de Brasília (UTC-3) para comparar com os slots da barbearia
     const agora = new Date()
-    const ehHoje = dataBase.toISOString().slice(0,10) === agora.toISOString().slice(0,10)
+    const agoraBR = new Date(agora.getTime() - 3 * 60 * 60 * 1000) // converte para UTC-3
+    const ehHoje = dataBase.toISOString().slice(0,10) === agoraBR.toISOString().slice(0,10)
     if (ehHoje) {
-      const margemMin  = agora.getMinutes() + 30
-      const margemH    = agora.getHours() + Math.floor(margemMin / 60)
+      const margemMin  = agoraBR.getUTCMinutes() + 30
+      const margemH    = agoraBR.getUTCHours()   + Math.floor(margemMin / 60)
       const margemStr  = String(margemH).padStart(2,'0') + ':' + String(margemMin % 60).padStart(2,'0')
+      console.log(`[buscarSlots] horário BR: ${margemStr} — filtrando slots anteriores`)
       horariosBase = horariosBase.filter(h => h >= margemStr)
       // Se não sobrou nada hoje → usa amanhã automaticamente
       if (horariosBase.length === 0) {
@@ -947,12 +1004,17 @@ async function buscarSlots(dados) {
     async function slotsLivresDia(col, data) {
       const dataStr = data.toISOString().slice(0,10)
       const { data: agds } = await supabaseAdmin.from('agendamentos')
-        .select('data_hora')
+        .select('data_hora_ini')
         .eq('colaborador_id', col.id)
-        .gte('data_hora', dataStr + 'T00:00:00')
-        .lte('data_hora', dataStr + 'T23:59:59')
+        .gte('data_hora_ini', dataStr + 'T00:00:00')
+        .lte('data_hora_ini', dataStr + 'T23:59:59')
         .in('status', ['agendado','confirmado'])
-      const ocupSet = new Set((agds||[]).map(a => a.data_hora.slice(11,16)))
+      // Converte UTC para horário de Brasília (UTC-3)
+      const ocupSet = new Set((agds||[]).map(a => {
+        const d = new Date(a.data_hora_ini)
+        const br = new Date(d.getTime() - 3 * 60 * 60 * 1000)
+        return `${String(br.getUTCHours()).padStart(2,'0')}:${String(br.getUTCMinutes()).padStart(2,'0')}`
+      }))
       const fmt = `${diasSemana[data.getDay()]} ${String(data.getDate()).padStart(2,'0')}/${String(data.getMonth()+1).padStart(2,'0')}`
       return horariosBase
         .filter(h => !ocupSet.has(h))
@@ -1021,6 +1083,25 @@ async function buscarSlots(dados) {
   }
 }
 
+// Carrega serviços disponíveis online do banco
+async function carregarServicos() {
+  const { data } = await supabaseAdmin.from('servicos')
+    .select('id, nome, valor, duracao_min')
+    .eq('ativo', true)
+    .eq('disponivel_online', true)
+    .order('duracao_min', { ascending: true })
+    .order('nome')
+  return data || []
+}
+
+// Formata menu de serviços com emojis de número
+function menuServicos(servicos) {
+  const n = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣']
+  return servicos.map((s, i) =>
+    `${n[i] || (i+1)+'.'} ${s.nome} — R$${Number(s.valor).toFixed(0)}`
+  ).join('\n')
+}
+
 // Busca outros barbeiros no mesmo horário pedido
 async function buscarOutrosBarbeirosNoHorario(dados) {
   try {
@@ -1066,6 +1147,52 @@ async function buscarOutrosBarbeirosNoHorario(dados) {
 // ============================================================
 // Faz o agendamento no banco
 // ============================================================
+// ============================================================
+// Cria ou localiza cliente para quem agendou pelo WhatsApp
+// ============================================================
+async function garantirCadastroCliente(conversa, dados) {
+  // Já tem cliente vinculado
+  if (conversa.cliente_id) return conversa.cliente_id
+
+  const nome   = dados._nome || conversa.nome_contato || 'Cliente WhatsApp'
+  const numero = conversa.numero?.replace(/\D/g, '') || ''
+  const senha  = '123456'
+  const hash   = bcrypt.hashSync(senha, 10)
+
+  // Verifica se já existe pelo número
+  const { data: existente } = await supabaseAdmin.from('clientes')
+    .select('id').ilike('whatsapp', `%${numero.slice(-9)}%`).eq('ativo', true).limit(1).maybeSingle()
+
+  if (existente) {
+    await supabaseAdmin.from('whatsapp_conversas').update({ cliente_id: existente.id }).eq('id', conversa.id)
+    return existente.id
+  }
+
+  // Cria novo cadastro
+  const { data: novo } = await supabaseAdmin.from('clientes').insert({
+    nome:        nome.trim(),
+    whatsapp:    numero,
+    senha_hash:  hash,
+    origem:      'whatsapp',
+    ativo:       true
+  }).select('id').single()
+
+  if (novo) {
+    await supabaseAdmin.from('whatsapp_conversas').update({ cliente_id: novo.id }).eq('id', conversa.id)
+    dados._cliente_novo = true
+    dados._cliente_id   = novo.id
+    return novo.id
+  }
+  return null
+}
+
+// Gera token de acesso direto ao app (30 dias)
+function gerarTokenApp(clienteId, nome) {
+  const secret = process.env.JWT_SECRET
+  if (!secret) return null
+  return jwt.sign({ id: clienteId, tipo: 'cliente', nome }, secret, { expiresIn: '30d' })
+}
+
 async function fazerAgendamento(conversa, dados) {
   try {
     const slot = dados.slot_escolhido
@@ -1079,15 +1206,19 @@ async function fazerAgendamento(conversa, dados) {
       colaborador_id: slot.colaborador_id,
       servico_id:     svc?.id || null,
       unidade_id:     dados.unidade_id || null,
-      cliente_id:     conversa.cliente_id || null,
+      cliente_id:     clienteId || null,
       data_hora:      `${slot.data_iso}T${slot.hora_iso}:00`,
       status:         'agendado',
       origem:         'whatsapp',
       observacoes:    `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
     }
 
+    console.log('[fazerAgendamento] inserindo:', JSON.stringify(agendamento))
     const { data: ag, error } = await supabaseAdmin.from('agendamentos').insert(agendamento).select('id').single()
-    if (error) throw error
+    if (error) {
+      console.error('[fazerAgendamento] erro Supabase:', error.message, error.details, error.hint)
+      throw error
+    }
 
     // Vincula agendamento à conversa
     await supabaseAdmin.from('whatsapp_conversas')
