@@ -316,7 +316,7 @@ async function processarFluxo(conversa, mensagemCliente) {
 
     // ── ESTADO: aguardando_unidade
     if (estado === 'aguardando_unidade') {
-      const ext = await extrair(mensagemCliente, 'unidade', dados)
+      const ext = await extrairTudo(mensagemCliente)
       if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
       if (ext.unidade) {
         dados.unidade_raw  = ext.unidade
@@ -336,7 +336,7 @@ async function processarFluxo(conversa, mensagemCliente) {
 
     // ── ESTADO: aguardando_barbeiro
     if (estado === 'aguardando_barbeiro') {
-      const ext = await extrair(mensagemCliente, 'barbeiro', dados)
+      const ext = await extrairTudo(mensagemCliente)
       if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
       if (ext.barbeiro === 'sem_preferencia' || ext.barbeiro === null) {
@@ -463,7 +463,7 @@ async function processarFluxo(conversa, mensagemCliente) {
       }
 
       // Escolhe por número
-      const ext = await extrair(mensagemCliente, 'numero', dados)
+      const ext = await extrairTudo(mensagemCliente)
       const idx  = (ext.numero_escolhido || 1) - 1
       if (idx >= 0 && idx < slots.length) {
         const slot = slots[idx]
@@ -483,7 +483,7 @@ async function processarFluxo(conversa, mensagemCliente) {
 
     // ── ESTADO: confirmando
     if (estado === 'confirmando') {
-      const ext = await extrair(mensagemCliente, 'confirmacao', dados)
+      const ext = await extrairTudo(mensagemCliente)
       if (ext.confirmou === true) {
         // Tenta fazer o agendamento
         const ok = await fazerAgendamento(conversa, dados)
@@ -591,7 +591,7 @@ Mensagem a analisar: "${mensagem}"`
       else if (/cort|cabel|aparar|tesoura/.test(msg)) parsed.servico = 'corte'
     }
     if (!parsed.unidade) {
-      if (/timbau/.test(msg)) parsed.unidade = 'timbauva'
+      if (/timba/.test(msg)) parsed.unidade = 'timbauva'
       else if (/\bcentro\b/.test(msg)) parsed.unidade = 'centro'
       else if (/joao|joão|boark/.test(msg)) parsed.unidade = 'sao_joao'
     }
@@ -614,7 +614,7 @@ Mensagem a analisar: "${mensagem}"`
     else if (/infant|crian|filho|filha|bebe|bebê|menin/.test(msg)) r.servico = 'infantil'
     else if (/\bbarba\b|\bbigode\b/.test(msg)) r.servico = 'barba'
     else if (/cort|cabel|aparar|tesoura/.test(msg)) r.servico = 'corte'
-    if (/timbau/.test(msg)) r.unidade = 'timbauva'
+    if (/timba/.test(msg)) r.unidade = 'timbauva'
     else if (/\bcentro\b/.test(msg)) r.unidade = 'centro'
     else if (/joao|joão|boark/.test(msg)) r.unidade = 'sao_joao'
     if (/manh/.test(msg)) r.periodo = 'manha'
