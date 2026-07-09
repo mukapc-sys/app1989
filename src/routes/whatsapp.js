@@ -1447,6 +1447,81 @@ router.post('/conversas/:id/acionar-ia', async (req, res) => {
 })
 
 // ============================================================
+// POST /whatsapp/notificar-fechamento
+// Envia resumo do dia para o proprietário quando o caixa fecha
+// ============================================================
+router.post('/notificar-fechamento', async (req, res) => {
+  res.json({ ok: true }) // responde imediatamente
+  try {
+    const { unidade_id, data } = req.body
+    const hoje = data || new Date().toISOString().slice(0,10)
+
+    // Busca nome da unidade
+    const { data: uni } = await supabaseAdmin.from('unidades')
+      .select('nome').eq('id', unidade_id).single()
+    const nomeUnidade = uni?.nome || 'Unidade'
+
+    // Busca métricas do dia para a unidade
+    const { data: ags } = await supabaseAdmin.from('agendamentos')
+      .select('valor, status')
+      .eq('unidade_id', unidade_id)
+      .gte('data_hora_ini', hoje + 'T00:00:00')
+      .lte('data_hora_ini', hoje + 'T23:59:59')
+      .in('status', ['concluido', 'realizado'])
+
+    const finalizados = (ags || []).length
+    const faturamento = (ags || []).reduce((s, a) => s + Number(a.valor || 0), 0)
+    const ticket = finalizados > 0 ? faturamento / finalizados : 0
+
+    const msg = `🔒 *Caixa ${nomeUnidade} Fechado!*
+
+`
+      + `💰 Faturamento: *R$ ${faturamento.toFixed(2).replace('.', ',')}*
+`
+      + `✂️ Agendamentos finalizados: *${finalizados}*
+`
+      + `🎯 Ticket médio: *R$ ${ticket.toFixed(2).replace('.', ',')}*`
+
+    // Busca o proprietário com WhatsApp cadastrado
+    const { data: prop } = await supabaseAdmin.from('colaboradores')
+      .select('clientes(whatsapp, nome)')
+      .eq('perfil', 'proprietario')
+      .eq('ativo', true)
+      .limit(1)
+      .maybeSingle()
+
+    // Tenta via clientes vinculados ao perfil proprietário
+    let whatsappProprietario = null
+    if (prop?.clientes?.whatsapp) {
+      whatsappProprietario = prop.clientes.whatsapp.replace(/\D/g, '')
+    } else {
+      // Busca direto em colaboradores por perfil proprietário
+      const { data: cols } = await supabaseAdmin.from('colaboradores')
+        .select('whatsapp').eq('perfil', 'proprietario').eq('ativo', true)
+      if (cols && cols.length > 0 && cols[0].whatsapp) {
+        whatsappProprietario = cols[0].whatsapp.replace(/\D/g, '')
+      }
+    }
+
+    if (whatsappProprietario) {
+      const EVOLUTION_URL    = process.env.EVOLUTION_API_URL
+      const EVOLUTION_KEY    = process.env.EVOLUTION_API_KEY
+      const EVOLUTION_INST   = process.env.EVOLUTION_INSTANCIA
+      await fetch(`${EVOLUTION_URL}/message/sendText/${EVOLUTION_INST}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
+        body: JSON.stringify({ number: whatsappProprietario, text: msg })
+      })
+      console.log(`[fechamento] Notificação enviada para ${whatsappProprietario}`)
+    } else {
+      console.log('[fechamento] Proprietário sem WhatsApp cadastrado')
+    }
+  } catch (e) {
+    console.error('[fechamento] erro:', e.message)
+  }
+})
+
+// ============================================================
 // GET /whatsapp/alertas
 // ============================================================
 router.get('/alertas', async (req, res) => {
