@@ -7,6 +7,26 @@ const router            = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const bcrypt            = require('bcryptjs')
 const jwt               = require('jsonwebtoken')
+// ============================================================
+// Serviços da barbearia
+// ============================================================
+async function carregarServicos() {
+  const { data } = await supabaseAdmin.from('servicos')
+    .select('id, nome, valor, duracao_min')
+    .eq('ativo', true)
+    .eq('disponivel_online', true)
+    .order('duracao_min', { ascending: true })
+    .order('nome')
+  return data || []
+}
+
+function menuServicos(servicos) {
+  const n = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣']
+  return servicos.map((s, i) =>
+    `${n[i] || (i+1)+'.'} ${s.nome} — R$${Number(s.valor).toFixed(0)}`
+  ).join('\n')
+}
+
 
 // ============================================================
 // MENSAGENS PRÉ-CONFIGURADAS — edite aqui o tom e texto
@@ -557,8 +577,8 @@ async function processarFluxo(conversa, mensagemCliente) {
     await processarFluxo({ ...conversa, estado_ia: 'fase1', dados_ia: {} }, mensagemCliente)
 
   } catch (e) {
-    console.error('[fluxo] erro:', e.message)
-    await escalarHumano(conversa, `Tive um problema técnico 😔 Vou chamar um atendente!`)
+    console.error('[fluxo] erro na fase', fase, ':', e.message, e.stack?.slice(0,200))
+    await escalarHumano(conversa, `Erro técnico [${fase}]: ${e.message?.slice(0,80)} 😔`)
   }
 }
 
@@ -920,6 +940,8 @@ JSON:`
     return {}
   }
 }
+
+
 
 // ============================================================
 // Busca slots disponíveis — usa o mesmo endpoint do app
