@@ -502,6 +502,21 @@ async function processarFluxo(conversa, mensagemCliente) {
         return
       }
 
+      // Detecta se o cliente quer ver outro período ou dia
+      const msg3 = mensagemCliente.toLowerCase()
+      const querOutroPeriodo = /tarde|manhã|manha|noite|amanhã|amanha|outro dia|outra hora/.test(msg3)
+      if (querOutroPeriodo) {
+        const ext = await extrairTudo(mensagemCliente)
+        if (ext.periodo || ext.data || ext.hora) {
+          dados.periodo  = ext.periodo  || null
+          dados.data_raw = ext.data     || dados.data_raw
+          dados.hora_raw = ext.hora     || null
+          dados._slots   = null
+          await buscarEMostrarSlots(conversa, dados)
+          return
+        }
+      }
+
       // Escolha por número — parseia direto da mensagem
       const numStr = mensagemCliente.trim().replace(/[^0-9]/g, '')
       const idx    = parseInt(numStr) - 1
@@ -1178,6 +1193,16 @@ async function fazerAgendamento(conversa, dados) {
       canal_origem:   'whatsapp',
       observacao:     `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
     }
+
+    // Verifica se o slot ainda está disponível (previne dupla marcação)
+    const { data: conflito } = await supabaseAdmin.from('agendamentos')
+      .select('id')
+      .eq('colaborador_id', slot.colaborador_id)
+      .eq('data_hora_ini', ini.toISOString())
+      .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
+      .limit(1)
+      .maybeSingle()
+    if (conflito) return { ok: false, erro: 'Este horário acabou de ser ocupado 😔 Precisa escolher outro.' }
 
     console.log('[fazerAgendamento] inserindo:', JSON.stringify(agendamento))
     const { data: ag, error } = await supabaseAdmin.from('agendamentos').insert(agendamento).select('id').single()
