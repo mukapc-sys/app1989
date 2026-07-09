@@ -186,10 +186,23 @@ router.post('/webhook', async (req, res) => {
         remetente:        'cliente'
       }, { onConflict: 'evolution_msg_id', ignoreDuplicates: true })
 
-    // Só processa com IA se ativa e não requer humano
-    const iaAtiva = process.env.WHATSAPP_IA_ATIVA === 'true'
-    if (iaAtiva && conversa.atendente === 'ia' && !conversa.requer_humano && conteudo && tipo === 'texto') {
-      await processarFluxo(conversa, conteudo)
+    // Log de diagnóstico
+    console.log(`[webhook] numero=${numero} tipo=${tipo} atendente=${conversa.atendente} requer_humano=${conversa.requer_humano} estado=${conversa.estado_ia} conteudo=${conteudo?.slice(0,50)}`)
+
+    // Só processa com IA se ativa (configurações no banco) e não requer humano
+    if (conversa.atendente === 'ia' && !conversa.requer_humano && conteudo && tipo === 'texto') {
+      const { data: cfgIA } = await supabaseAdmin
+        .from('configuracoes')
+        .select('valor')
+        .eq('chave', 'whatsapp_ia_ativa')
+        .maybeSingle()
+      console.log(`[webhook] ia_ativa=${cfgIA?.valor}`)
+      if (cfgIA?.valor === 'true') {
+        console.log('[webhook] chamando processarFluxo...')
+        await processarFluxo(conversa, conteudo)
+      }
+    } else {
+      console.log(`[webhook] IA não processou — atendente=${conversa.atendente} requer_humano=${conversa.requer_humano} tipo=${tipo} temConteudo=${!!conteudo}`)
     }
 
   } catch (e) {
@@ -204,6 +217,8 @@ async function processarFluxo(conversa, mensagemCliente) {
   const estado  = conversa.estado_ia || 'inicial'
   const dados   = conversa.dados_ia  || {}
   const erros   = dados._erros || 0
+
+  console.log(`[fluxo] estado=${estado} msg=${mensagemCliente?.slice(0,50)}`)
 
   try {
     // ── ESTADO: inicial → tenta extrair tudo de uma vez antes de pedir etapa por etapa
