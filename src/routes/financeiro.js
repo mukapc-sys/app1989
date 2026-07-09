@@ -577,9 +577,28 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
         if (c.unidade_id)     eU(c.unidade_id).atend++
       }
 
-      // Itens (serviço x produto)
-      const { data: itens } = await supabaseAdmin.from('itens_comanda')
-        .select('tipo, produto_id, descricao, valor_unit, quantidade, comandas(colaborador_id, unidade_id, finalizada_em, status)')
+      // Itens (serviço x produto) — COM PAGINAÇÃO e filtro de data NO BANCO.
+      // Antes, buscava itens_comanda sem paginar (limite de 1000 do Supabase) e
+      // filtrava por data só no JS — o que TRUNCAVA em períodos com +1000 itens,
+      // fazendo o faturamento de vários barbeiros sair incompleto no comparativo.
+      let itens = []
+      {
+        const pageSize = 1000; let from = 0
+        while (true) {
+          let qi = supabaseAdmin.from('itens_comanda')
+            .select('tipo, produto_id, descricao, valor_unit, quantidade, comandas!inner(colaborador_id, unidade_id, finalizada_em, status)')
+            .eq('comandas.status', 'finalizada')
+            .gte('comandas.finalizada_em', ini)
+            .lt('comandas.finalizada_em', fim)
+          if (uidFiltro) qi = qi.eq('comandas.unidade_id', uidFiltro)
+          const { data, error } = await qi.range(from, from + pageSize - 1)
+          if (error || !data || data.length === 0) break
+          itens = itens.concat(data)
+          if (data.length < pageSize) break
+          from += pageSize
+          if (from > 200000) break
+        }
+      }
       for (const i of (itens||[])) {
         const c = i.comandas
         if (!c || c.status !== 'finalizada') continue
