@@ -581,11 +581,53 @@ Mensagem a analisar: "${mensagem}"`
     )
     const gdata = await resp.json()
     let raw = gdata?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '{}'
-    raw = raw.replace(/```json|```/g, '').trim()
-    return JSON.parse(raw)
+    raw = raw.replace(/```json|```/g, '').replace(/\/\/[^\n]*/g, '').trim()
+    const match = raw.match(/\{[\s\S]*\}/)
+    if (match) raw = match[0]
+    const parsed = JSON.parse(raw)
+
+    // Reforça com palavras-chave — garante que termos óbvios sejam reconhecidos
+    const msg = mensagem.toLowerCase()
+    if (!parsed.servico) {
+      if (/corte.{0,15}barba|barba.{0,15}corte/.test(msg)) parsed.servico = 'corte_barba'
+      else if (/infant|crian|filho|filha|bebe|bebê|menin/.test(msg)) parsed.servico = 'infantil'
+      else if (/\bbarba\b|\bbigode\b/.test(msg)) parsed.servico = 'barba'
+      else if (/cort|cabel|aparar|tesoura/.test(msg)) parsed.servico = 'corte'
+    }
+    if (!parsed.unidade) {
+      if (/timbau/.test(msg)) parsed.unidade = 'timbauva'
+      else if (/\bcentro\b/.test(msg)) parsed.unidade = 'centro'
+      else if (/joao|joão|boark/.test(msg)) parsed.unidade = 'sao_joao'
+    }
+    if (!parsed.periodo) {
+      if (/manh/.test(msg)) parsed.periodo = 'manha'
+      else if (/tarde/.test(msg)) parsed.periodo = 'tarde'
+      else if (/noite/.test(msg)) parsed.periodo = 'noite'
+    }
+    if (!parsed.hora) {
+      const h = msg.match(/(\d{1,2})\s*[h:](\d{0,2})/)
+      if (h) parsed.hora = `${h[1].padStart(2,'0')}:${(h[2]||'00').padStart(2,'0')}`
+    }
+    console.log('[extrairTudo]', mensagem.slice(0,40), '->', JSON.stringify(parsed))
+    return parsed
   } catch (e) {
-    console.error('[whatsapp/extrairTudo]', e.message)
-    return {}
+    // Fallback puro por palavras-chave quando Gemini falha
+    const msg = mensagem.toLowerCase()
+    const r = { servico: null, unidade: null, barbeiro: null, data: null, hora: null, periodo: null, fora_escopo: false }
+    if (/corte.{0,15}barba|barba.{0,15}corte/.test(msg)) r.servico = 'corte_barba'
+    else if (/infant|crian|filho|filha|bebe|bebê|menin/.test(msg)) r.servico = 'infantil'
+    else if (/\bbarba\b|\bbigode\b/.test(msg)) r.servico = 'barba'
+    else if (/cort|cabel|aparar|tesoura/.test(msg)) r.servico = 'corte'
+    if (/timbau/.test(msg)) r.unidade = 'timbauva'
+    else if (/\bcentro\b/.test(msg)) r.unidade = 'centro'
+    else if (/joao|joão|boark/.test(msg)) r.unidade = 'sao_joao'
+    if (/manh/.test(msg)) r.periodo = 'manha'
+    else if (/tarde/.test(msg)) r.periodo = 'tarde'
+    else if (/noite/.test(msg)) r.periodo = 'noite'
+    const h = msg.match(/(\d{1,2})\s*[h:](\d{0,2})/)
+    if (h) r.hora = `${h[1].padStart(2,'0')}:${(h[2]||'00').padStart(2,'0')}`
+    console.log('[extrairTudo fallback]', mensagem.slice(0,40), '->', JSON.stringify(r))
+    return r
   }
 }
 
