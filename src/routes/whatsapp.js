@@ -512,7 +512,13 @@ async function processarFluxo(conversa, mensagemCliente) {
 
       if (confirmou) {
         const ok = await fazerAgendamento(conversa, dados)
-        if (ok) {
+        // Debug temporário: se falhar, mostra o erro no WhatsApp
+      if (!ok) {
+        const debugInfo = `servico_id=${dados.servico_id ? 'ok' : 'FALTA'} unidade_id=${dados.unidade_id ? 'ok' : 'FALTA'} slot=${dados._slot ? 'ok' : 'FALTA'} barbeiro_id=${dados.barbeiro_id || 'null'}`
+        await escalarHumano(conversa, `Erro interno 😔 (${debugInfo})`)
+        return
+      }
+      if (ok) {
           // Monta mensagem com link de acesso direto
           let msgFinal = MSG.agendado(dados)
 
