@@ -511,14 +511,13 @@ async function processarFluxo(conversa, mensagemCliente) {
       const cancelou  = /\bnao\b|\bcancela\b|\bdesistir\b|\bnope\b/.test(msg)
 
       if (confirmou) {
-        const ok = await fazerAgendamento(conversa, dados)
-        // Debug temporário: se falhar, mostra o erro no WhatsApp
-      if (!ok) {
-        const debugInfo = `servico_id=${dados.servico_id ? 'ok' : 'FALTA'} unidade_id=${dados.unidade_id ? 'ok' : 'FALTA'} slot=${dados._slot ? 'ok' : 'FALTA'} barbeiro_id=${dados.barbeiro_id || 'null'}`
-        await escalarHumano(conversa, `Erro interno 😔 (${debugInfo})`)
-        return
-      }
-      if (ok) {
+        const resultado = await fazerAgendamento(conversa, dados)
+        if (!resultado || !resultado.ok) {
+          const erroMsg = resultado?.erro || 'erro desconhecido'
+          await escalarHumano(conversa, `Erro ao agendar: ${erroMsg} 😔`)
+          return
+        }
+        if (resultado.ok) {
           // Monta mensagem com link de acesso direto
           let msgFinal = MSG.agendado(dados)
 
@@ -538,8 +537,6 @@ async function processarFluxo(conversa, mensagemCliente) {
 
           await enviar(conversa, msgFinal)
           await setFase(conversa.id, 'fase4_concluido', dados)
-        } else {
-          await escalarHumano(conversa, `Tive um problema ao confirmar 😔 Vou chamar um atendente!`)
         }
       } else if (cancelou) {
         await enviar(conversa, MSG.cancelado)
@@ -925,188 +922,95 @@ JSON:`
 }
 
 // ============================================================
-// Busca slots disponíveis — ordenados por proximidade ao pedido
+// Busca slots disponíveis — usa o mesmo endpoint do app
 // ============================================================
 async function buscarSlots(dados) {
   try {
     const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
 
-    // Horários da barbearia baseados na duração do serviço
-    const duracaoMin = dados.servico_duracao || 30
-    const passo      = duracaoMin <= 15 ? 30 : 30 // mínimo 30min entre slots na agenda
-    const todosHorarios = []
-    for (let total = 9 * 60; total <= 19 * 60; total += passo) {
-      const h = Math.floor(total / 60)
-      const m = total % 60
-      todosHorarios.push(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`)
-    }
-
-    // Filtra por período se não tem hora exata
-    let horariosBase = todosHorarios
-    if (!dados.hora_raw) {
-      if (dados.periodo === 'manha') horariosBase = todosHorarios.filter(h => h < '12:00')
-      else if (dados.periodo === 'tarde') horariosBase = todosHorarios.filter(h => h >= '12:00' && h < '18:00')
-      else if (dados.periodo === 'noite') horariosBase = todosHorarios.filter(h => h >= '18:00')
-    }
-
-    // Determina data base
+    // Determina a data base
     let dataBase = new Date()
     dataBase.setHours(0,0,0,0)
     if (dados.data_raw) {
       const d = new Date(dados.data_raw + 'T12:00:00')
       if (!isNaN(d)) dataBase = d
     } else if (!dados.periodo) {
-      dataBase.setDate(dataBase.getDate() + 1) // padrão: amanhã
+      dataBase.setDate(dataBase.getDate() + 1)
     }
 
-    // Se a data for HOJE, filtra horários que já passaram (+ 30min de margem)
-    // Usa horário de Brasília (UTC-3) para comparar com os slots da barbearia
-    const agora = new Date()
-    const agoraBR = new Date(agora.getTime() - 3 * 60 * 60 * 1000) // converte para UTC-3
-    const ehHoje = dataBase.toISOString().slice(0,10) === agoraBR.toISOString().slice(0,10)
-    if (ehHoje) {
-      const margemMin  = agoraBR.getUTCMinutes() + 30
-      const margemH    = agoraBR.getUTCHours()   + Math.floor(margemMin / 60)
-      const margemStr  = String(margemH).padStart(2,'0') + ':' + String(margemMin % 60).padStart(2,'0')
-      console.log(`[buscarSlots] horário BR: ${margemStr} — filtrando slots anteriores`)
-      horariosBase = horariosBase.filter(h => h >= margemStr)
-      // Se não sobrou nada hoje → usa amanhã automaticamente
-      if (horariosBase.length === 0) {
-        dados._sem_horario_hoje = true  // sinaliza para mostrar aviso ao cliente
-        dataBase = new Date()
-        dataBase.setDate(dataBase.getDate() + 1)
-        dataBase.setHours(0,0,0,0)
-        horariosBase = todosHorarios
-        if (dados.periodo === 'manha')      horariosBase = todosHorarios.filter(h => h < '12:00')
-        else if (dados.periodo === 'tarde') horariosBase = todosHorarios.filter(h => h >= '12:00' && h < '18:00')
-        else if (dados.periodo === 'noite') horariosBase = todosHorarios.filter(h => h >= '18:00')
-      }
+    const dataStr = dataBase.toISOString().slice(0,10)
+    const fmt = `${diasSemana[dataBase.getDay()]} ${String(dataBase.getDate()).padStart(2,'0')}/${String(dataBase.getMonth()+1).padStart(2,'0')}`
+
+    // Chama o endpoint interno de horários disponíveis (mesma lógica do app)
+    const baseUrl = `http://localhost:${process.env.PORT || 3001}`
+    const params  = new URLSearchParams({
+      data:          dataStr,
+      ...(dados.unidade_id    ? { unidade_id:    dados.unidade_id }    : {}),
+      ...(dados.barbeiro_id   ? { colaborador_id: dados.barbeiro_id }   : {}),
+      ...(dados.servico_id    ? { servico_id:    dados.servico_id }    : {}),
+    })
+
+    const resp = await fetch(`${baseUrl}/agendamentos/horarios-disponiveis?${params}`)
+    if (!resp.ok) throw new Error(`endpoint retornou ${resp.status}`)
+    const horarios = await resp.json()
+
+    // Horários vêm como array de strings "HH:MM" ou objetos com { hora, colaborador_id, ... }
+    // Normaliza para o formato interno
+    let slots = []
+    const listaHoras = Array.isArray(horarios) ? horarios : (horarios.horarios || horarios.slots || [])
+
+    for (const item of listaHoras) {
+      const horaStr = typeof item === 'string' ? item : (item.hora || item.hora_inicio || item.time)
+      if (!horaStr) continue
+
+      const horaIso = horaStr.slice(0,5) // "HH:MM"
+
+      // Filtra por período se solicitado
+      if (dados.periodo === 'manha'  && horaIso >= '12:00') continue
+      if (dados.periodo === 'tarde'  && (horaIso < '12:00' || horaIso >= '18:00')) continue
+      if (dados.periodo === 'noite'  && horaIso < '18:00') continue
+
+      const colId   = item.colaborador_id || dados.barbeiro_id
+      const colNome = item.colaborador_nome || item.nome_colaborador || dados.barbeiro_nome || ''
+
+      slots.push({
+        colaborador_id: colId,
+        barbeiro_nome:  colNome,
+        data_iso:       dataStr,
+        hora_iso:       horaIso,
+        data_fmt:       fmt,
+        hora_fmt:       horaIso,
+        label:          `${horaIso} — ${colNome} (${fmt})`
+      })
     }
 
-    // Busca colaboradores
-    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true)
-    if (dados.unidade_id) colQuery = colQuery.eq('unidade_id', dados.unidade_id)
-    if (dados.barbeiro_id) colQuery = colQuery.eq('id', dados.barbeiro_id)
-    const { data: cols } = await colQuery
-    if (!cols || cols.length === 0) return []
-
-    // Se sem preferência → pega o com mais disponibilidade
-    let colAlvo = cols
-    if (!dados.barbeiro_id && cols.length > 1) {
-      // Conta livres para cada barbeiro e pega o melhor
-      const { data: agDia } = await supabaseAdmin.from('agendamentos')
-        .select('colaborador_id')
-        .in('colaborador_id', cols.map(c => c.id))
-        .gte('data_hora', dataBase.toISOString().slice(0,10) + 'T00:00:00')
-        .lte('data_hora', dataBase.toISOString().slice(0,10) + 'T23:59:59')
-        .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
-      const ocupCount = {}
-      ;(agDia||[]).forEach(a => { ocupCount[a.colaborador_id] = (ocupCount[a.colaborador_id]||0)+1 })
-      const sorted = [...cols].sort((a,b) => (ocupCount[a.id]||0) - (ocupCount[b.id]||0))
-      colAlvo = [sorted[0]]
-    }
-
-    // Função auxiliar: busca slots livres num dia específico para um colaborador
-    async function slotsLivresDia(col, data) {
-      const dataStr = data.toISOString().slice(0,10)
-      const { data: agds } = await supabaseAdmin.from('agendamentos')
-        .select('data_hora_ini')
-        .eq('colaborador_id', col.id)
-        .gte('data_hora_ini', dataStr + 'T00:00:00')
-        .lte('data_hora_ini', dataStr + 'T23:59:59')
-        .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
-      // Converte UTC para horário de Brasília (UTC-3)
-      const ocupSet = new Set((agds||[]).map(a => {
-        const d = new Date(a.data_hora_ini)
-        const br = new Date(d.getTime() - 3 * 60 * 60 * 1000)
-        return `${String(br.getUTCHours()).padStart(2,'0')}:${String(br.getUTCMinutes()).padStart(2,'0')}`
-      }))
-      const fmt = `${diasSemana[data.getDay()]} ${String(data.getDate()).padStart(2,'0')}/${String(data.getMonth()+1).padStart(2,'0')}`
-      return horariosBase
-        .filter(h => !ocupSet.has(h))
-        .map(h => ({
-          colaborador_id: col.id,
-          barbeiro_nome:  col.nome,
-          data_iso:       dataStr,
-          hora_iso:       h,
-          data_fmt:       fmt,
-          hora_fmt:       h,
-          label:          `${h} — ${col.nome} (${fmt})`
-        }))
-    }
-
-    // MODO 1: Tem hora específica pedida → busca por proximidade
+    // Se pediu hora específica, ordena por proximidade
     if (dados.hora_raw) {
-      const col = colAlvo[0]
-      const slots = []
-
-      // A) Mesma hora, mesmo dia
-      const livresDia1 = await slotsLivresDia(col, dataBase)
-      const exato = livresDia1.find(s => s.hora_iso === dados.hora_raw)
-      if (exato) {
-        // Horário exato disponível — retorna ele + próximos como bonus
-        slots.push(exato)
-        livresDia1.filter(s => s.hora_iso > dados.hora_raw).slice(0,2).forEach(s => slots.push(s))
-        return slots.slice(0,3)
-      }
-
-      // Exato não disponível — busca PRÓXIMOS com mesma referência
-      // B) Mesmo barbeiro, mesmo dia, horários próximos (depois e antes)
-      const depoisDia1 = livresDia1.filter(s => s.hora_iso > dados.hora_raw).slice(0,2)
-      const antesDia1  = livresDia1.filter(s => s.hora_iso < dados.hora_raw).reverse().slice(0,1)
-      depoisDia1.forEach(s => { s._prioridade = 1; slots.push(s) })
-      antesDia1.forEach(s  => { s._prioridade = 2; slots.push(s) })
-
-      // C) Mesmo barbeiro, dia seguinte, mesmo horário (ou próximos)
-      const dia2 = new Date(dataBase); dia2.setDate(dia2.getDate() + 1)
-      const livresDia2 = await slotsLivresDia(col, dia2)
-      const exatoDia2  = livresDia2.find(s => s.hora_iso === dados.hora_raw)
-      if (exatoDia2) {
-        exatoDia2._prioridade = 3
-        slots.push(exatoDia2)
-      } else {
-        const proxDia2 = livresDia2.filter(s => s.hora_iso >= dados.hora_raw).slice(0,1)
-        proxDia2.forEach(s => { s._prioridade = 4; slots.push(s) })
-      }
-
-      // Ordena: mesmo dia primeiro, depois dia seguinte; dentro do dia: mais próximo à hora pedida
-      slots.sort((a,b) => (a._prioridade||9) - (b._prioridade||9))
-      return slots.slice(0,3)
+      slots.sort((a, b) => {
+        const da = Math.abs(parseInt(a.hora_iso.replace(':','')) - parseInt(dados.hora_raw.replace(':','')))
+        const db = Math.abs(parseInt(b.hora_iso.replace(':','')) - parseInt(dados.hora_raw.replace(':','')))
+        return da - db
+      })
     }
 
-    // MODO 2: Sem hora específica → lista os primeiros disponíveis do período
-    const slots = []
-    for (const col of colAlvo) {
-      const livres = await slotsLivresDia(col, dataBase)
-      livres.slice(0,6).forEach(s => slots.push(s))
-      if (slots.length >= 6) break
+    // Marca se não tinha horário hoje e moveu para amanhã
+    if (slots.length === 0 && dados.data_raw) {
+      // tenta amanhã
+      const amanha = new Date(dataBase)
+      amanha.setDate(amanha.getDate() + 1)
+      const dadosAmanha = { ...dados, data_raw: amanha.toISOString().slice(0,10), hora_raw: null }
+      const slotsAmanha = await buscarSlots(dadosAmanha)
+      if (slotsAmanha.length > 0) dados._sem_horario_hoje = true
+      return slotsAmanha
     }
-    return slots.slice(0,6)
 
+    return slots.slice(0, 6)
   } catch (e) {
-    console.error('[whatsapp/slots]', e.message)
+    console.error('[whatsapp/buscarSlots]', e.message)
     return []
   }
 }
 
-// Carrega serviços disponíveis online do banco
-async function carregarServicos() {
-  const { data } = await supabaseAdmin.from('servicos')
-    .select('id, nome, valor, duracao_min')
-    .eq('ativo', true)
-    .eq('disponivel_online', true)
-    .order('duracao_min', { ascending: true })
-    .order('nome')
-  return data || []
-}
-
-// Formata menu de serviços com emojis de número
-function menuServicos(servicos) {
-  const n = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣']
-  return servicos.map((s, i) =>
-    `${n[i] || (i+1)+'.'} ${s.nome} — R$${Number(s.valor).toFixed(0)}`
-  ).join('\n')
-}
 
 // Busca outros barbeiros no mesmo horário pedido
 async function buscarOutrosBarbeirosNoHorario(dados) {
