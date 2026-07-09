@@ -339,7 +339,10 @@ async function processarFluxo(conversa, mensagemCliente) {
         return
       }
 
-      const nomeBarbeiro = ext.barbeiro
+      // Se Gemini não extraiu nome mas msg não parece "sem preferência" → usa msg como nome
+      const semPref = /sem prefer|qualquer|tanto faz|pode ser|nao tenho|não tenho/.test(msg)
+      const nomeBarbeiro = ext.barbeiro || (!semPref && mensagemCliente.trim().length < 30 ? mensagemCliente.trim() : null)
+
       if (!nomeBarbeiro || nomeBarbeiro === 'sem_preferencia') {
         dados.barbeiro_id   = null
         dados.barbeiro_nome = 'Mais disponível'
@@ -906,6 +909,7 @@ async function buscarSlots(dados) {
       horariosBase = horariosBase.filter(h => h >= margemStr)
       // Se não sobrou nada hoje → usa amanhã automaticamente
       if (horariosBase.length === 0) {
+        dados._sem_horario_hoje = true  // sinaliza para mostrar aviso ao cliente
         dataBase = new Date()
         dataBase.setDate(dataBase.getDate() + 1)
         dataBase.setHours(0,0,0,0)
