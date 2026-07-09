@@ -999,7 +999,7 @@ async function buscarSlots(dados) {
         .in('colaborador_id', cols.map(c => c.id))
         .gte('data_hora', dataBase.toISOString().slice(0,10) + 'T00:00:00')
         .lte('data_hora', dataBase.toISOString().slice(0,10) + 'T23:59:59')
-        .in('status', ['agendado','confirmado'])
+        .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
       const ocupCount = {}
       ;(agDia||[]).forEach(a => { ocupCount[a.colaborador_id] = (ocupCount[a.colaborador_id]||0)+1 })
       const sorted = [...cols].sort((a,b) => (ocupCount[a.id]||0) - (ocupCount[b.id]||0))
@@ -1014,7 +1014,7 @@ async function buscarSlots(dados) {
         .eq('colaborador_id', col.id)
         .gte('data_hora_ini', dataStr + 'T00:00:00')
         .lte('data_hora_ini', dataStr + 'T23:59:59')
-        .in('status', ['agendado','confirmado'])
+        .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
       // Converte UTC para horário de Brasília (UTC-3)
       const ocupSet = new Set((agds||[]).map(a => {
         const d = new Date(a.data_hora_ini)
@@ -1126,7 +1126,7 @@ async function buscarOutrosBarbeirosNoHorario(dados) {
       .select('colaborador_id')
       .in('colaborador_id', cols.map(c => c.id))
       .eq('data_hora', `${dataStr}T${dados.hora_raw}:00`)
-      .in('status', ['agendado','confirmado'])
+      .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
     const ocupSet = new Set((agds||[]).map(a => a.colaborador_id))
 
     const data = new Date(dataStr + 'T12:00:00')
