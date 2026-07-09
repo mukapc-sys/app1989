@@ -96,7 +96,6 @@ async function getOrCreateConversa(numero, nomeContato) {
   }
 
   // Não existe conversa aberta → cria uma nova
-  // Usa upsert com índice único para evitar race condition
   const cli = await buscarClientePorNumero(numero)
   const nova = {
     numero,
@@ -110,17 +109,14 @@ async function getOrCreateConversa(numero, nomeContato) {
     ultima_msg_em: new Date().toISOString()
   }
 
-  // onConflict garante que se outra requisição criou ao mesmo tempo, reutiliza
-  const { data: criada } = await supabaseAdmin.from('whatsapp_conversas')
-    .upsert(nova, {
-      onConflict:       'numero',        // índice único WHERE status='aberta' garante isso
-      ignoreDuplicates: false
-    })
+  const { data: criada, error: errInsert } = await supabaseAdmin.from('whatsapp_conversas')
+    .insert(nova)
     .select('*')
     .single()
 
-  // Fallback: se o upsert não retornou (já existia), busca novamente
-  if (!criada) {
+  if (errInsert) {
+    // Pode ser conflito do índice único — busca a que já existe
+    console.log('[getOrCreateConversa] insert falhou, buscando existente:', errInsert.message)
     const { data: recuperada } = await supabaseAdmin
       .from('whatsapp_conversas')
       .select('*')
