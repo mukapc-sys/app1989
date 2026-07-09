@@ -1153,40 +1153,44 @@ function gerarTokenApp(clienteId, nome) {
 
 async function fazerAgendamento(conversa, dados) {
   try {
-    const slot = dados.slot_escolhido
-    if (!slot) return false
+    const slot = dados._slot
+    if (!slot)              return { ok: false, erro: 'slot não encontrado' }
+    if (!dados.servico_id)  return { ok: false, erro: 'serviço não definido' }
+    if (!dados.unidade_id)  return { ok: false, erro: 'unidade não definida' }
 
-    // Busca serviço
-    const { data: svc } = await supabaseAdmin.from('servicos')
-      .select('id').ilike('nome', `%${dados.servico_nome?.split(' ')[0]}%`).limit(1).maybeSingle()
+    // Garante cadastro do cliente
+    const clienteId = await garantirCadastroCliente(conversa, dados)
+
+    // Calcula início e fim do agendamento (horário de Brasília UTC-3)
+    const duracaoMin = dados.servico_duracao || 30
+    const ini = new Date(`${slot.data_iso}T${slot.hora_iso}:00-03:00`)
+    const fim = new Date(ini.getTime() + duracaoMin * 60 * 1000)
 
     const agendamento = {
       colaborador_id: slot.colaborador_id,
-      servico_id:     svc?.id || null,
-      unidade_id:     dados.unidade_id || null,
+      servico_id:     dados.servico_id,
+      unidade_id:     dados.unidade_id,
       cliente_id:     clienteId || null,
-      data_hora:      `${slot.data_iso}T${slot.hora_iso}:00`,
-      status:         'agendado',
-      origem:         'whatsapp',
-      observacoes:    `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
+      cliente_nome:   dados._nome || conversa.nome_contato || null,
+      data_hora_ini:  ini.toISOString(),
+      data_hora_fim:  fim.toISOString(),
+      valor:          dados.servico_valor || 0,
+      canal_origem:   'whatsapp',
+      observacao:     `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
     }
 
     console.log('[fazerAgendamento] inserindo:', JSON.stringify(agendamento))
     const { data: ag, error } = await supabaseAdmin.from('agendamentos').insert(agendamento).select('id').single()
     if (error) {
-      console.error('[fazerAgendamento] erro Supabase:', error.message, error.details, error.hint)
-      throw error
+      console.error('[fazerAgendamento] erro:', error.message, '|', error.details, '|', error.hint)
+      return { ok: false, erro: error.message + (error.details ? ' | ' + error.details : '') }
     }
 
-    // Vincula agendamento à conversa
-    await supabaseAdmin.from('whatsapp_conversas')
-      .update({ agendamento_id: ag.id })
-      .eq('id', conversa.id)
-
-    return true
+    await supabaseAdmin.from('whatsapp_conversas').update({ agendamento_id: ag.id }).eq('id', conversa.id)
+    return { ok: true }
   } catch (e) {
-    console.error('[whatsapp/fazerAgendamento]', e.message)
-    return false
+    console.error('[fazerAgendamento] exceção:', e.message)
+    return { ok: false, erro: e.message }
   }
 }
 
