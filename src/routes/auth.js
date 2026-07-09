@@ -58,6 +58,11 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ erro: 'Usuário não encontrado ou inativo' })
     }
 
+    // Colaboradores (barbeiro/gerente/caixa/proprietário) ficam conectados por
+    // 15 dias no celular do balcão. Clientes seguem com validade curta (12h)
+    // por segurança — o app deles é público.
+    const validade = perfil === 'cliente' ? '12h' : '15d'
+
     // Gera JWT com dados do usuário
     const token = jwt.sign(
       {
@@ -68,7 +73,7 @@ router.post('/login', async (req, res) => {
         unidade_id: usuario.unidade_id || null
       },
       process.env.JWT_SECRET,
-      { expiresIn: '12h' }
+      { expiresIn: validade }
     )
 
     return res.json({
@@ -92,7 +97,6 @@ router.post('/login', async (req, res) => {
 router.post('/cadastro-cliente', async (req, res) => {
   try {
     const { nome, email, whatsapp, cpf, data_nasc, senha } = req.body
-
     if (!nome || !email || !senha || !whatsapp) {
       return res.status(400).json({ erro: 'Nome, e-mail, WhatsApp e senha são obrigatórios' })
     }
@@ -155,5 +159,5 @@ router.post('/esqueci-senha', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao processar solicitação' })
   }
 })
- 
+
 module.exports = router
