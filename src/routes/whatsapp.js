@@ -1037,31 +1037,38 @@ router.post('/conversas/:id/acionar-ia', async (req, res) => {
       .single()
     if (!conv) return res.status(404).json({ erro: 'Conversa não encontrada' })
 
-    // Busca última mensagem do cliente
+    // Busca TODAS as mensagens do cliente em ordem cronológica
     const { data: msgs } = await supabaseAdmin
       .from('whatsapp_mensagens')
       .select('conteudo, tipo')
       .eq('conversa_id', req.params.id)
       .eq('direcao', 'entrada')
-      .order('criado_em', { ascending: false })
-      .limit(1)
+      .eq('tipo', 'texto')
+      .order('criado_em', { ascending: true })
 
-    const ultimaMsg = msgs?.[0]
-    if (!ultimaMsg || ultimaMsg.tipo !== 'texto') {
-      return res.status(400).json({ erro: 'Nenhuma mensagem de texto do cliente para processar' })
+    // Concatena ignorando mensagens muito curtas (?, ok, oi)
+    const textoCliente = (msgs || [])
+      .map(m => (m.conteudo || '').trim())
+      .filter(c => c.length > 3)
+      .join(' ')
+
+    if (!textoCliente) {
+      return res.status(400).json({ erro: 'Nenhuma mensagem com conteúdo suficiente' })
     }
 
-    // Garante que a conversa está no modo IA
+    // Reinicia estado para inicial e garante modo IA
     await supabaseAdmin.from('whatsapp_conversas')
-      .update({ atendente: 'ia', requer_humano: false })
+      .update({ atendente: 'ia', requer_humano: false, estado_ia: 'inicial', dados_ia: {} })
       .eq('id', req.params.id)
-    conv.atendente = 'ia'
+    conv.atendente     = 'ia'
     conv.requer_humano = false
+    conv.estado_ia     = 'inicial'
+    conv.dados_ia      = {}
 
-    res.json({ ok: true, mensagem: ultimaMsg.conteudo })
+    res.json({ ok: true, mensagem: textoCliente })
 
-    // Processa em background
-    await processarFluxo(conv, ultimaMsg.conteudo)
+    // Processa com o contexto completo da conversa
+    await processarFluxo(conv, textoCliente)
   } catch (e) {
     console.error('[whatsapp/acionar-ia]', e.message)
     res.status(500).json({ erro: e.message })
