@@ -57,12 +57,14 @@ const MSG = {
 
   cancelado: `Tudo bem! Se precisar agendar, é só chamar 😊`,
 
-  horario_indisponivel: (slots, podeBuscarOutroBarbeiro) =>
-    `Esse horário não está disponível 😔\n\nMas temos essas opções próximas:\n\n` +
-    slots.map((s, i) => `${i + 1}. ${s.label}`).join('\n') +
-    (podeBuscarOutroBarbeiro
-      ? `\n\nPode ser algum desses? Ou se preferir, digita *outro barbeiro* e busco quem tem disponível no horário que você quer 😊`
-      : `\n\nQual prefere?`),
+  horario_indisponivel: (slots, podeBuscarOutroBarbeiro) => {
+    const n = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣']
+    return `Esse horário não está disponível 😔\n\nMas temos essas opções próximas:\n\n` +
+      slots.map((s, i) => `${n[i] || (i+1)+'.'} ${s.label}`).join('\n') +
+      (podeBuscarOutroBarbeiro
+        ? `\n\nPode ser algum desses? Ou se preferir, digita *outro barbeiro* e busco quem tem disponível no horário que você quer 😊`
+        : `\n\nQual prefere?`)
+  },
 
   mostra_horarios: (slots) =>
     `Horários disponíveis:\n\n` +
