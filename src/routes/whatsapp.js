@@ -52,6 +52,9 @@ const MSG = {
     `📅 ${d.data_fmt} às ${d.hora_fmt}\n\n` +
     `Te esperamos! 🤝`,
 
+  sem_horario_hoje: (barbeiro, unidade) =>
+    `Com o ${barbeiro}, não temos mais horários para hoje 😔\n\nQuer ver um horário para amanhã com ele? Ou posso verificar se tem algum horário ainda hoje com outro barbeiro da ${unidade} 😊`,
+
   cancelado: `Tudo bem! Se precisar agendar, é só chamar 😊`,
 
   horario_indisponivel: (slots, podeBuscarOutroBarbeiro) =>
@@ -444,15 +447,69 @@ async function processarFluxo(conversa, mensagemCliente) {
           const temHorarioExato = dados.hora_raw && slots.some(s => s.hora_iso === dados.hora_raw)
           const podeBuscarOutro = !temHorarioExato && dados.hora_raw && !!dados.barbeiro_id
           dados._pode_buscar_outro = podeBuscarOutro
-          const msgSlots = !temHorarioExato && dados.hora_raw
+          let msgSlots = !temHorarioExato && dados.hora_raw
             ? MSG.horario_indisponivel(slots, podeBuscarOutro)
             : MSG.mostra_horarios(slots)
+          if (dados._sem_horario_hoje) {
+            dados._sem_horario_hoje = false
+            // Guarda os slots de amanhã para usar se cliente confirmar
+            dados._slots_amanha = slots
+            await enviar(conversa, MSG.sem_horario_hoje(dados.barbeiro_nome || 'este barbeiro', dados.unidade_nome || 'sua unidade'))
+            await setEstado(conversa.id, 'aguardando_opcao_sem_horario', dados)
+            return
+          }
           await enviar(conversa, msgSlots)
           await setEstado(conversa.id, 'escolhendo_horario', dados)
         }
       } else {
         await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
       }
+      return
+    }
+
+    // ── ESTADO: aguardando_opcao_sem_horario
+    if (estado === 'aguardando_opcao_sem_horario') {
+      const msg = mensagemCliente.toLowerCase()
+
+      // Cliente quer amanhã com o mesmo barbeiro
+      if (/amanha|amanhã|sim|pode|quero|ok|claro/.test(msg) && !/outro/.test(msg)) {
+        const slots = dados._slots_amanha || []
+        if (slots.length > 0) {
+          dados.slots = slots
+          dados._slots_amanha = null
+          await enviar(conversa, MSG.mostra_horarios(slots))
+          await setEstado(conversa.id, 'escolhendo_horario', dados)
+        } else {
+          await enviar(conversa, MSG.sem_horarios)
+          await setEstado(conversa.id, 'aguardando_data', { ...dados, data_raw: null })
+        }
+        return
+      }
+
+      // Cliente quer outro barbeiro hoje
+      if (/outro|outr|hoje/.test(msg)) {
+        const hoje = new Date().toISOString().slice(0,10)
+        const dadosHoje = { ...dados, data_raw: hoje, barbeiro_id: null, barbeiro_raw: null }
+        const slotsHoje = await buscarOutrosBarbeirosNoHorario({ ...dadosHoje, hora_raw: null })
+        // Busca todos os slots de hoje com outros barbeiros
+        const { data: cols } = await supabaseAdmin.from('colaboradores')
+          .select('id,nome').eq('ativo', true)
+          .eq('unidade_id', dados.unidade_id).neq('id', dados.barbeiro_id || '00000000-0000-0000-0000-000000000000')
+        if (cols && cols.length > 0) {
+          const slotsOutros = await buscarSlots({ ...dadosHoje, barbeiro_id: cols[0].id, data_raw: hoje })
+          if (slotsOutros && slotsOutros.length > 0) {
+            dados.slots = slotsOutros
+            await enviar(conversa, `Encontrei esses horários ainda hoje:\n\n` + MSG.mostra_horarios(slotsOutros).split('\n').slice(1).join('\n'))
+            await setEstado(conversa.id, 'escolhendo_horario', dados)
+            return
+          }
+        }
+        await enviar(conversa, `Infelizmente não há mais horários hoje com nenhum barbeiro 😔 Quer marcar para amanhã?`)
+        return
+      }
+
+      // Não entendeu
+      await erroOuEscalar(conversa, dados, `Responda *amanhã* para ver horários de amanhã com o ${dados.barbeiro_nome || 'mesmo barbeiro'}, ou *outro barbeiro* para ver disponibilidade hoje 😊`)
       return
     }
 
