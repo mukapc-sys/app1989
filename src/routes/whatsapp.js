@@ -26,7 +26,7 @@ const MSG = {
 
   pede_barbeiro: (nome) => nome ? `${nome}, tem preferência por algum barbeiro?` : `Tem preferência por algum barbeiro?`,
 
-  pede_data: `Qual dia e horário prefere? Pode dizer assim:\n"amanhã de manhã", "sexta às 14h", "hoje à tarde"...`,
+  pede_data: (nome) => nome ? `${nome}, qual dia e horário?` : `Qual dia e horário?`,
 
   nao_entendeu: `Desculpe, não entendi! 😅\nPode repetir de outra forma?`,
 
@@ -266,7 +266,7 @@ async function processarFluxo(conversa, mensagemCliente) {
         return
       }
       if (!dados.data_raw && !dados.hora_raw && !dados.periodo) {
-        await enviar(conversa, MSG.pede_data)
+        await enviar(conversa, MSG.pede_data(dados._nome_cliente))
         await setEstado(conversa.id, 'aguardando_data', dados)
         return
       }
@@ -390,7 +390,7 @@ async function processarFluxo(conversa, mensagemCliente) {
         }
       }
       dados._erros = 0
-      await enviar(conversa, MSG.pede_data)
+      await enviar(conversa, MSG.pede_data(dados._nome_cliente))
       await setEstado(conversa.id, 'aguardando_data', dados)
       return
     }
@@ -629,6 +629,23 @@ Mensagem a analisar: "${mensagem}"`
       const h = msg.match(/(\d{1,2})\s*[h:](\d{0,2})/)
       if (h) parsed.hora = `${h[1].padStart(2,'0')}:${(h[2]||'00').padStart(2,'0')}`
     }
+    if (!parsed.data) {
+      const hoje = new Date()
+      const amanha = new Date(); amanha.setDate(amanha.getDate()+1)
+      const diasSem = ['domingo','segunda','terca','quarta','quinta','sexta','sabado']
+      const msgNorm = msg.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+      if (/\bhoje\b/.test(msgNorm)) parsed.data = hoje.toISOString().slice(0,10)
+      else if (/\bamanha\b/.test(msgNorm)) parsed.data = amanha.toISOString().slice(0,10)
+      else {
+        const diaIdx = diasSem.findIndex(d => msgNorm.includes(d))
+        if (diaIdx >= 0) {
+          const alvo = new Date()
+          const diff = (diaIdx - alvo.getDay() + 7) % 7 || 7
+          alvo.setDate(alvo.getDate() + diff)
+          parsed.data = alvo.toISOString().slice(0,10)
+        }
+      }
+    }
     console.log('[extrairTudo]', mensagem.slice(0,40), '->', JSON.stringify(parsed))
     return parsed
   } catch (e) {
@@ -752,6 +769,26 @@ async function buscarSlots(dados) {
       if (!isNaN(d)) dataBase = d
     } else if (!dados.periodo) {
       dataBase.setDate(dataBase.getDate() + 1) // padrão: amanhã
+    }
+
+    // Se a data for HOJE, filtra horários que já passaram (+ 30min de margem)
+    const agora = new Date()
+    const ehHoje = dataBase.toISOString().slice(0,10) === agora.toISOString().slice(0,10)
+    if (ehHoje) {
+      const margemMin  = agora.getMinutes() + 30
+      const margemH    = agora.getHours() + Math.floor(margemMin / 60)
+      const margemStr  = String(margemH).padStart(2,'0') + ':' + String(margemMin % 60).padStart(2,'0')
+      horariosBase = horariosBase.filter(h => h >= margemStr)
+      // Se não sobrou nada hoje → usa amanhã automaticamente
+      if (horariosBase.length === 0) {
+        dataBase = new Date()
+        dataBase.setDate(dataBase.getDate() + 1)
+        dataBase.setHours(0,0,0,0)
+        horariosBase = todosHorarios
+        if (dados.periodo === 'manha')      horariosBase = todosHorarios.filter(h => h < '12:00')
+        else if (dados.periodo === 'tarde') horariosBase = todosHorarios.filter(h => h >= '12:00' && h < '18:00')
+        else if (dados.periodo === 'noite') horariosBase = todosHorarios.filter(h => h >= '18:00')
+      }
     }
 
     // Busca colaboradores
