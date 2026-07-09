@@ -1,57 +1,105 @@
 // ============================================================
-// routes/whatsapp.js — Webhook Evolution API + Atendimento
+// routes/whatsapp.js — Atendimento WhatsApp com IA roteirizada
+// A IA só extrai intenções. Todas as respostas são pré-configuradas.
 // ============================================================
 const express           = require('express')
 const router            = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 
-// ---- Normaliza número ----
+// ============================================================
+// MENSAGENS PRÉ-CONFIGURADAS — edite aqui o tom e texto
+// ============================================================
+const MSG = {
+  boas_vindas_historico: (nome, srv, uni, barb) =>
+    `Olá, ${nome}! 😊\n\nNa última vez foi:\n✂️ ${srv}\n📍 ${uni}\n💈 ${barb}\n\nQuer marcar igual? Me conta o dia e horário que prefere!\n\nOu se quiser algo diferente, é só me dizer 😊`,
+
+  boas_vindas_historico_parcial: (nome, linhas) =>
+    `Olá, ${nome}! 😊 Já te conheço por aqui!\n\n${linhas}\n\nQuer agendar? Me conta o que você precisa e o horário 😊`,
+
+  boas_vindas: `Olá! 😊 Sou a assistente da Barbearia 1989.\n\nQual serviço você deseja?\n\n✂️ Corte de cabelo\n🪒 Corte + Barba\n🪒 Só a barba\n👶 Corte infantil`,
+
+  pede_unidade: `Ótimo! Qual unidade prefere?\n\n📍 Timbaúva\n📍 Centro\n📍 São João`,
+
+  pede_barbeiro: `Tem preferência de barbeiro? Se não tiver, eu escolho o que tiver mais horário disponível 😁`,
+
+  pede_data: `Qual dia e horário prefere? Pode dizer assim:\n"amanhã de manhã", "sexta às 14h", "hoje à tarde"...`,
+
+  nao_entendeu: `Desculpe, não entendi! 😅\nPode repetir de outra forma?`,
+
+  nao_entendeu2: `Hmm, ainda não consegui entender 😅 Vou chamar um atendente pra te ajudar!`,
+
+  fora_escopo: `Oi! Por aqui consigo ajudar apenas com agendamentos. Vou chamar um atendente para te atender! 😊`,
+
+  sem_horarios: `Não encontrei horários disponíveis para esse período. Gostaria de tentar outro dia ou horário?`,
+
+  confirma_agendamento: (d) =>
+    `Confirme seu agendamento:\n\n` +
+    `✂️ ${d.servico_nome}\n` +
+    `📍 ${d.unidade_nome}\n` +
+    `💈 ${d.barbeiro_nome}\n` +
+    `📅 ${d.data_fmt} às ${d.hora_fmt}\n\n` +
+    `Confirmar? Responda *sim* ou *não*`,
+
+  agendado: (d) =>
+    `Agendamento confirmado! 🎉\n\n` +
+    `✂️ ${d.servico_nome}\n` +
+    `📍 ${d.unidade_nome}\n` +
+    `💈 ${d.barbeiro_nome}\n` +
+    `📅 ${d.data_fmt} às ${d.hora_fmt}\n\n` +
+    `Te esperamos! 🤝`,
+
+  cancelado: `Tudo bem! Se precisar agendar, é só chamar 😊`,
+
+  horario_indisponivel: (slots, podeBuscarOutroBarbeiro) =>
+    `Esse horário não está disponível 😔\n\nMas temos essas opções próximas:\n\n` +
+    slots.map((s, i) => `${i + 1}. ${s.label}`).join('\n') +
+    (podeBuscarOutroBarbeiro
+      ? `\n\nPode ser algum desses? Ou se preferir, digita *outro barbeiro* e busco quem tem disponível no horário que você quer 😊`
+      : `\n\nQual prefere?`),
+
+  mostra_horarios: (slots) =>
+    `Horários disponíveis:\n\n` +
+    slots.map((s, i) => `${i + 1}. ${s.label}`).join('\n') +
+    `\n\nQual prefere? Responda o número.`
+}
+
+// ============================================================
+// Normaliza número
+// ============================================================
 function normalizeNumero(raw) {
   if (!raw) return null
   return raw.replace(/@.*/, '').replace(/\D/g, '')
 }
 
-// ---- Busca cliente pelo número (usa função SQL que normaliza dígitos) ----
-async function buscarClientePorNumero(numero) {
-  try {
-    const { data, error } = await supabaseAdmin.rpc('buscar_cliente_por_telefone', { tel: numero })
-    if (error) throw error
-    return (data && data[0]) || null
-  } catch (e) {
-    console.error('[wpp/buscarCliente]', e.message)
-    return null
-  }
-}
-
-// ---- Busca ou cria conversa ----
+// ============================================================
+// Busca ou cria conversa
+// ============================================================
 async function getOrCreateConversa(numero, nomeContato) {
   const { data: existente } = await supabaseAdmin
     .from('whatsapp_conversas')
-    .select('id, cliente_id, status, atendente, estado_ia, dados_ia, requer_humano')
+    .select('*')
     .eq('numero', numero)
+    .eq('status', 'aberta')
     .order('criado_em', { ascending: false })
     .limit(1)
-    .single()
+    .maybeSingle()
 
   if (existente) {
-    const upd = { nome_contato: nomeContato, ultima_msg_em: new Date().toISOString() }
-
-    // Se ainda não tem cliente vinculado, tenta vincular agora
+    await supabaseAdmin.from('whatsapp_conversas')
+      .update({ nome_contato: nomeContato, ultima_msg_em: new Date().toISOString() })
+      .eq('id', existente.id)
+    // Tenta vincular cliente se ainda null
     if (!existente.cliente_id) {
       const cli = await buscarClientePorNumero(numero)
       if (cli) {
-        upd.cliente_id = cli.id
+        await supabaseAdmin.from('whatsapp_conversas').update({ cliente_id: cli.id }).eq('id', existente.id)
         existente.cliente_id = cli.id
       }
     }
-
-    await supabaseAdmin.from('whatsapp_conversas').update(upd).eq('id', existente.id)
     return existente
   }
 
-  // Vincula cliente pelo número
   const cli = await buscarClientePorNumero(numero)
-
   const { data: nova } = await supabaseAdmin.from('whatsapp_conversas')
     .insert({
       numero,
@@ -64,14 +112,25 @@ async function getOrCreateConversa(numero, nomeContato) {
       requer_humano: false,
       ultima_msg_em: new Date().toISOString()
     })
-    .select('id, cliente_id, status, atendente, estado_ia, dados_ia, requer_humano')
+    .select('*')
     .single()
-
   return nova
 }
 
 // ============================================================
-// POST /whatsapp/webhook — recebe eventos do Evolution
+// Busca cliente pelo número via função SQL
+// ============================================================
+async function buscarClientePorNumero(numero) {
+  try {
+    const { data } = await supabaseAdmin.rpc('buscar_cliente_por_telefone', { tel: numero })
+    return (data && data[0]) || null
+  } catch (e) {
+    return null
+  }
+}
+
+// ============================================================
+// POST /whatsapp/webhook
 // ============================================================
 router.post('/webhook', async (req, res) => {
   try {
@@ -87,48 +146,32 @@ router.post('/webhook', async (req, res) => {
 
     const numero      = normalizeNumero(data.key?.remoteJid)
     const nomeContato = data.pushName || numero
-    const msgId       = data.key?.id  || null
     if (!numero) return
 
-    // Extrai conteúdo
-    let tipo     = 'texto'
-    let conteudo = null
-    let midiaUrl = null
-
-    if (data.message.conversation) {
-      conteudo = data.message.conversation
-    } else if (data.message.extendedTextMessage) {
-      conteudo = data.message.extendedTextMessage.text
-    } else if (data.message.audioMessage) {
-      tipo = 'audio'; conteudo = '[áudio]'
-      midiaUrl = data.message.audioMessage.url || null
-    } else if (data.message.imageMessage) {
-      tipo = 'imagem'
-      conteudo = data.message.imageMessage.caption || '[imagem]'
-      midiaUrl = data.message.imageMessage.url || null
-    } else {
-      conteudo = '[mensagem não suportada]'
-    }
+    let tipo = 'texto', conteudo = null, midiaUrl = null
+    if (data.message.conversation)              { conteudo = data.message.conversation }
+    else if (data.message.extendedTextMessage)  { conteudo = data.message.extendedTextMessage.text }
+    else if (data.message.audioMessage)         { tipo = 'audio'; conteudo = '[áudio]'; midiaUrl = data.message.audioMessage?.url }
+    else if (data.message.imageMessage)         { tipo = 'imagem'; conteudo = data.message.imageMessage?.caption || '[imagem]'; midiaUrl = data.message.imageMessage?.url }
+    else                                        { conteudo = '[mensagem não suportada]' }
 
     const conversa = await getOrCreateConversa(numero, nomeContato)
     if (!conversa) return
 
-    // Salva mensagem recebida
+    // Salva mensagem
     await supabaseAdmin.from('whatsapp_mensagens')
       .upsert({
         conversa_id:      conversa.id,
-        evolution_msg_id: msgId,
+        evolution_msg_id: data.key?.id || null,
         direcao:          'entrada',
-        tipo, conteudo,
-        midia_url:        midiaUrl,
+        tipo, conteudo, midia_url: midiaUrl,
         remetente:        'cliente'
       }, { onConflict: 'evolution_msg_id', ignoreDuplicates: true })
 
-    // Se IA está atendendo e não precisa de humano → processa com IA
-    // (só roda se WHATSAPP_IA_ATIVA=true nas variáveis do Railway)
+    // Só processa com IA se ativa e não requer humano
     const iaAtiva = process.env.WHATSAPP_IA_ATIVA === 'true'
     if (iaAtiva && conversa.atendente === 'ia' && !conversa.requer_humano && conteudo && tipo === 'texto') {
-      await processarComIA(conversa, conteudo)
+      await processarFluxo(conversa, conteudo)
     }
 
   } catch (e) {
@@ -137,307 +180,818 @@ router.post('/webhook', async (req, res) => {
 })
 
 // ============================================================
-// IA — processa mensagem e responde
+// MÁQUINA DE ESTADOS — fluxo roteirizado
 // ============================================================
-async function processarComIA(conversa, mensagemCliente) {
+async function processarFluxo(conversa, mensagemCliente) {
+  const estado  = conversa.estado_ia || 'inicial'
+  const dados   = conversa.dados_ia  || {}
+  const erros   = dados._erros || 0
+
   try {
-    const GEMINI_KEY = process.env.GEMINI_API_KEY
-    if (!GEMINI_KEY) return // IA não configurada ainda
+    // ── ESTADO: inicial → tenta extrair tudo de uma vez antes de pedir etapa por etapa
+    if (estado === 'inicial') {
+      const tudo = await extrairTudo(mensagemCliente)
+      if (tudo.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
-    // Busca histórico da conversa (últimas 10 msgs para contexto)
-    const { data: historico } = await supabaseAdmin
-      .from('whatsapp_mensagens')
-      .select('direcao, conteudo, remetente')
-      .eq('conversa_id', conversa.id)
-      .order('criado_em', { ascending: false })
-      .limit(10)
-    const msgs = (historico || []).reverse()
+      // Preenche o que já veio na primeira mensagem
+      if (tudo.servico)  { dados.servico_raw = tudo.servico;   dados.servico_nome = nomearServico(tudo.servico) }
+      if (tudo.unidade)  { dados.unidade_raw = tudo.unidade;   dados.unidade_nome = nomearUnidade(tudo.unidade) }
+      if (tudo.barbeiro && tudo.barbeiro !== 'sem_preferencia') dados.barbeiro_raw = tudo.barbeiro
+      if (tudo.data)     dados.data_raw  = tudo.data
+      if (tudo.hora)     dados.hora_raw  = tudo.hora
+      if (tudo.periodo)  dados.periodo   = tudo.periodo
 
-    // Busca contexto do cliente
-    let contextoCliente = 'Cliente não identificado no sistema. Se quiser agendar, peça para cadastrar no app.'
-    if (conversa.cliente_id) {
-      const ctx = await buscarContextoCliente(conversa.cliente_id)
-      if (ctx) {
-        contextoCliente = `Cliente: ${ctx.nome}`
-        if (ctx.ultima_unidade) contextoCliente += ` | Unidade habitual: ${ctx.ultima_unidade}`
-        if (ctx.ultimo_barbeiro) contextoCliente += ` | Barbeiro preferido: ${ctx.ultimo_barbeiro}`
-        if (ctx.plano_ativo) contextoCliente += ` | Plano ativo: ${ctx.plano_ativo}`
-        if (ctx.pontos) contextoCliente += ` | Pontos: ${ctx.pontos}`
+      // Busca unidade_id se unidade foi informada
+      if (dados.unidade_raw) {
+        const { data: uni } = await supabaseAdmin.from('unidades')
+          .select('id,nome').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
+        if (uni) dados.unidade_id = uni.id
       }
+
+      // Busca barbeiro_id se barbeiro foi informado
+      if (dados.barbeiro_raw) {
+        const q = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${dados.barbeiro_raw}%`).limit(1)
+        if (dados.unidade_id) q.eq('unidade_id', dados.unidade_id)
+        const { data: col } = await q.maybeSingle()
+        if (col) { dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome }
+      }
+
+      // Avança direto para o passo que falta
+      if (!dados.servico_raw) {
+        await enviar(conversa, MSG.boas_vindas)
+        await setEstado(conversa.id, 'aguardando_servico', dados)
+        return
+      }
+      if (!dados.unidade_raw) {
+        await enviar(conversa, `Olá! 😊 Serviço: *\${dados.servico_nome}*. \${MSG.pede_unidade}`)
+        await setEstado(conversa.id, 'aguardando_unidade', dados)
+        return
+      }
+      if (!dados.barbeiro_raw && dados.barbeiro_id === undefined) {
+        await enviar(conversa, MSG.pede_barbeiro)
+        await setEstado(conversa.id, 'aguardando_barbeiro', dados)
+        return
+      }
+      if (!dados.data_raw && !dados.hora_raw && !dados.periodo) {
+        await enviar(conversa, MSG.pede_data)
+        await setEstado(conversa.id, 'aguardando_data', dados)
+        return
+      }
+      // Tem tudo! Busca slots direto
+      const slots = await buscarSlots(dados)
+      if (!slots || slots.length === 0) {
+        await enviar(conversa, MSG.sem_horarios)
+        await setEstado(conversa.id, 'aguardando_data', dados)
+      } else {
+        dados.slots = slots
+        const temHorarioExato = dados.hora_raw && slots.some(s => s.hora_iso === dados.hora_raw)
+        const podeBuscarOutro = !temHorarioExato && dados.hora_raw && !!dados.barbeiro_id
+        dados._pode_buscar_outro = podeBuscarOutro
+        const msgSlots = !temHorarioExato && dados.hora_raw
+          ? MSG.horario_indisponivel(slots, podeBuscarOutro)
+          : MSG.mostra_horarios(slots)
+        await enviar(conversa, msgSlots)
+        await setEstado(conversa.id, 'escolhendo_horario', dados)
+      }
+      return
     }
 
-    // Busca serviços disponíveis para contexto
-    const { data: servicos } = await supabaseAdmin
-      .from('servicos')
-      .select('nome, valor, duracao_min')
-      .eq('ativo', true)
-      .eq('disponivel_online', true)
-      .order('nome')
-    const listaServicos = (servicos || []).map(s => `${s.nome} (R$${Number(s.valor).toFixed(2)}, ${s.duracao_min}min)`).join(', ')
+    // ── ESTADO: aguardando_servico
+    if (estado === 'aguardando_servico') {
+      // Tenta extrair tudo (cliente pode ter mandado info completa numa resposta posterior)
+      const tudo = await extrairTudo(mensagemCliente)
+      if (tudo.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+      const servico = tudo.servico
+      if (servico) {
+        dados.servico_raw  = servico
+        dados.servico_nome = nomearServico(servico)
+        // Aproveita o que mais veio
+        if (tudo.unidade)  { dados.unidade_raw = tudo.unidade; dados.unidade_nome = nomearUnidade(tudo.unidade) }
+        if (tudo.barbeiro) dados.barbeiro_raw = tudo.barbeiro
+        if (tudo.data)     dados.data_raw  = tudo.data
+        if (tudo.hora)     dados.hora_raw  = tudo.hora
+        if (tudo.periodo)  dados.periodo   = tudo.periodo
+        dados._erros = 0
+        if (!dados.unidade_raw) {
+          await enviar(conversa, MSG.pede_unidade)
+          await setEstado(conversa.id, 'aguardando_unidade', dados)
+        } else {
+          await enviar(conversa, MSG.pede_barbeiro)
+          await setEstado(conversa.id, 'aguardando_barbeiro', dados)
+        }
+      } else {
+        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
+      }
+      return
+    }
 
-    // Monta histórico formatado
-    const historicoFormatado = msgs.map(m =>
-      (m.direcao === 'entrada' ? 'Cliente: ' : 'Assistente: ') + m.conteudo
-    ).join('\n')
+    // ── ESTADO: aguardando_unidade
+    if (estado === 'aguardando_unidade') {
+      const ext = await extrair(mensagemCliente, 'unidade', dados)
+      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+      if (ext.unidade) {
+        dados.unidade_raw  = ext.unidade
+        dados.unidade_nome = nomearUnidade(ext.unidade)
+        // Busca unidade_id no banco
+        const { data: uni } = await supabaseAdmin.from('unidades')
+          .select('id,nome').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
+        if (uni) dados.unidade_id = uni.id
+        dados._erros = 0
+        await enviar(conversa, MSG.pede_barbeiro)
+        await setEstado(conversa.id, 'aguardando_barbeiro', dados)
+      } else {
+        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
+      }
+      return
+    }
 
-    const dadosIA = conversa.dados_ia || {}
+    // ── ESTADO: aguardando_barbeiro
+    if (estado === 'aguardando_barbeiro') {
+      const ext = await extrair(mensagemCliente, 'barbeiro', dados)
+      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
-    const prompt = `Você é a atendente virtual da Barbearia 1989 em Montenegro/RS. A barbearia tem 3 unidades: Timbaúva, Centro e São João.
+      if (ext.barbeiro === 'sem_preferencia' || ext.barbeiro === null) {
+        dados.barbeiro_raw  = null
+        dados.barbeiro_nome = 'Mais disponível'
+        dados.barbeiro_id   = null
+      } else if (ext.barbeiro) {
+        // Busca barbeiro por nome na unidade
+        const { data: col } = await supabaseAdmin.from('colaboradores')
+          .select('id,nome')
+          .eq('ativo', true)
+          .eq('unidade_id', dados.unidade_id || null)
+          .ilike('nome', `%${ext.barbeiro}%`)
+          .limit(1)
+          .maybeSingle()
+        if (col) {
+          dados.barbeiro_id   = col.id
+          dados.barbeiro_nome = col.nome
+        } else {
+          // Nome não encontrado → aceita como sem preferência
+          dados.barbeiro_id   = null
+          dados.barbeiro_nome = 'Mais disponível'
+        }
+      } else {
+        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
+        return
+      }
+      dados._erros = 0
+      await enviar(conversa, MSG.pede_data)
+      await setEstado(conversa.id, 'aguardando_data', dados)
+      return
+    }
 
-PERSONALIDADE:
-- Tom simpático e informal, como a barbearia atende de verdade
-- Respostas curtas (1-3 linhas), diretas e amigáveis
-- Use "Bom dia!", "Boa tarde!", "Certinho!", "Combinado!", "Até!" naturalmente
-- Emoji leve só quando encaixa bem (😁 🤝 ✂️)
+    // ── ESTADO: aguardando_data
+    if (estado === 'aguardando_data') {
+      // Primeiro tenta extrair TUDO — cliente pode estar mudando serviço/barbeiro/unidade
+      const tudo = await extrairTudo(mensagemCliente)
+      if (tudo.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
-EXEMPLOS REAIS DE COMO RESPONDEMOS:
-Cliente: "Oi bom dia, qual valor do corte?"
-Atendente: "Olá bom dia! O corte de cabelo é R$40. Gostaria de agendar? 😁"
+      // Detecta mudança de serviço/barbeiro/unidade (cliente não quer repetir o histórico)
+      if (tudo.servico && tudo.servico !== dados.servico_raw) {
+        dados.servico_raw = tudo.servico; dados.servico_nome = nomearServico(tudo.servico); dados._usando_historico = false
+      }
+      if (tudo.unidade) {
+        dados.unidade_raw = tudo.unidade; dados.unidade_nome = nomearUnidade(tudo.unidade)
+        const { data: uni } = await supabaseAdmin.from('unidades').select('id').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
+        if (uni) dados.unidade_id = uni.id
+      }
+      if (tudo.barbeiro && tudo.barbeiro !== 'sem_preferencia') {
+        const { data: col } = await supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${tudo.barbeiro}%`).limit(1).maybeSingle()
+        if (col) { dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome; dados.barbeiro_raw = col.nome }
+      }
 
-Cliente: "Quero marcar um horário amanhã à tarde"
-Atendente: "Boa tarde! Qual barbearia prefere — Timbaúva, Centro ou São João? E tem preferência de barbeiro?"
+      const ext = tudo
+      if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
+      if (ext.data || ext.hora || ext.periodo) {
+        dados.data_raw  = ext.data  || null
+        dados.hora_raw  = ext.hora  || null
+        dados.periodo   = ext.periodo || null
+        dados._erros = 0
+        // Busca horários disponíveis
+        const slots = await buscarSlots(dados)
+        if (!slots || slots.length === 0) {
+          // Tenta o dia seguinte automaticamente
+          const dataAtual = dados.data_raw ? new Date(dados.data_raw) : new Date()
+          dataAtual.setDate(dataAtual.getDate() + 1)
+          dados.data_raw = dataAtual.toISOString().slice(0,10)
+          const slotsProximo = await buscarSlots(dados)
+          if (slotsProximo && slotsProximo.length > 0) {
+            dados.slots = slotsProximo
+            await enviar(conversa, `Não há horários disponíveis nesse dia 😔 Mas encontrei no dia seguinte:\n\n` + MSG.mostra_horarios(slotsProximo).split('\n').slice(1).join('\n'))
+            await setEstado(conversa.id, 'escolhendo_horario', dados)
+          } else {
+            await enviar(conversa, MSG.sem_horarios)
+            await setEstado(conversa.id, 'aguardando_data', { ...dados, data_raw: null, hora_raw: null })
+          }
+        } else {
+          dados.slots = slots
+          // Se cliente pediu hora específica mas não tem → avisa e mostra próximos
+          const temHorarioExato = dados.hora_raw && slots.some(s => s.hora_iso === dados.hora_raw)
+          const podeBuscarOutro = !temHorarioExato && dados.hora_raw && !!dados.barbeiro_id
+          dados._pode_buscar_outro = podeBuscarOutro
+          const msgSlots = !temHorarioExato && dados.hora_raw
+            ? MSG.horario_indisponivel(slots, podeBuscarOutro)
+            : MSG.mostra_horarios(slots)
+          await enviar(conversa, msgSlots)
+          await setEstado(conversa.id, 'escolhendo_horario', dados)
+        }
+      } else {
+        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
+      }
+      return
+    }
 
-Cliente: "Pode ser às 10h com o William"
-Atendente: "Certinho! Ficou marcado com o William amanhã às 10h. Até!"
+    // ── ESTADO: escolhendo_horario
+    if (estado === 'escolhendo_horario') {
+      const slots = dados.slots || []
 
-Cliente: "Corte infantil para meu filho de 2 anos"
-Atendente: "Boa tarde! Cortamos sim! 😁 Qual barbearia e qual horário fica melhor pra você?"
+      // Detecta se cliente quer ver outro barbeiro no mesmo horário
+      const msg = mensagemCliente.toLowerCase()
+      const querOutroBarbeiro = dados._pode_buscar_outro && (
+        msg.includes('outro barbeiro') || msg.includes('outro barb') ||
+        msg.includes('qualquer barbeiro') || msg.includes('outro') ||
+        msg.includes('sim') && msg.includes('outro') ||
+        msg.includes('ver outro') || msg.includes('busca outro')
+      )
 
-FLUXO DE AGENDAMENTO:
-1. Saudar e perguntar: qual serviço? qual unidade?
-2. Perguntar preferência de barbeiro (se não tiver, escolhemos o mais disponível)
-3. Confirmar data e horário
-4. Confirmar e fechar
+      if (querOutroBarbeiro) {
+        const outrosSlots = await buscarOutrosBarbeirosNoHorario(dados)
+        if (outrosSlots.length > 0) {
+          dados.slots = outrosSlots
+          dados._pode_buscar_outro = false
+          await enviar(conversa,
+            `Encontrei esses barbeiros disponíveis às ${dados.hora_raw}:\n\n` +
+            outrosSlots.map((s,i) => `${i+1}. ${s.label}`).join('\n') +
+            `\n\nQual prefere?`
+          )
+          await setEstado(conversa.id, 'escolhendo_horario', dados)
+        } else {
+          await enviar(conversa, `Infelizmente nenhum barbeiro tem disponível esse horário 😔 Quer tentar outro horário?`)
+          await setEstado(conversa.id, 'aguardando_data', { ...dados, hora_raw: null, data_raw: null })
+        }
+        return
+      }
 
-SERVIÇOS DISPONÍVEIS:
-${listaServicos}
+      // Escolhe por número
+      const ext = await extrair(mensagemCliente, 'numero', dados)
+      const idx  = (ext.numero_escolhido || 1) - 1
+      if (idx >= 0 && idx < slots.length) {
+        const slot = slots[idx]
+        dados.slot_escolhido = slot
+        dados.barbeiro_id    = slot.colaborador_id
+        dados.barbeiro_nome  = slot.barbeiro_nome
+        dados.data_fmt       = slot.data_fmt
+        dados.hora_fmt       = slot.hora_fmt
+        dados._erros = 0
+        await enviar(conversa, MSG.confirma_agendamento(dados))
+        await setEstado(conversa.id, 'confirmando', dados)
+      } else {
+        await erroOuEscalar(conversa, dados, `Escolha um número entre 1 e ${slots.length} 😊`)
+      }
+      return
+    }
 
-CONTEXTO DO CLIENTE:
-${contextoCliente}
+    // ── ESTADO: confirmando
+    if (estado === 'confirmando') {
+      const ext = await extrair(mensagemCliente, 'confirmacao', dados)
+      if (ext.confirmou === true) {
+        // Tenta fazer o agendamento
+        const ok = await fazerAgendamento(conversa, dados)
+        if (ok) {
+          await enviar(conversa, MSG.agendado(dados))
+          await setEstado(conversa.id, 'agendado', dados)
+        } else {
+          await escalarHumano(conversa, `Tive um problema ao confirmar o agendamento 😔 Vou chamar um atendente!`)
+        }
+      } else if (ext.confirmou === false || ext.cancelou) {
+        await enviar(conversa, MSG.cancelado)
+        await setEstado(conversa.id, 'inicial', {})
+      } else {
+        await erroOuEscalar(conversa, dados, `Responda *sim* para confirmar ou *não* para cancelar 😊`)
+      }
+      return
+    }
 
-DADOS JÁ COLETADOS NESSA CONVERSA:
-${JSON.stringify(dadosIA)}
+    // ── ESTADO: agendado → conversa encerrada
+    if (estado === 'agendado') {
+      // Silencioso — não responde automaticamente após agendado
+      return
+    }
 
-HISTÓRICO:
-${historicoFormatado}
+  } catch (e) {
+    console.error('[whatsapp/fluxo]', e.message)
+    await escalarHumano(conversa, `Tive um problema técnico 😔 Vou chamar um atendente!`)
+  }
+}
 
-REGRAS IMPORTANTES:
-- Se o assunto NÃO for agendamento ou dúvida sobre serviços/preços, diga que só consegue ajudar com agendamentos e escreva [TRANSFERIR] no final
-- Se não entender após 2 tentativas, escreva [TRANSFERIR]
-- Ao confirmar agendamento completo (serviço + unidade + barbeiro + data + hora), escreva no final: [AGENDAMENTO_CONFIRMADO: serviço | unidade | barbeiro | data | hora]
-- Use o nome do cliente quando souber
-- Máximo 3 linhas por resposta
+// ============================================================
+// Extrai TUDO de uma vez — para quando cliente manda mensagem completa
+// ============================================================
+async function extrairTudo(mensagem) {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY
+  if (!GEMINI_KEY) return {}
 
-Mensagem do cliente: "${mensagemCliente}"
+  const hoje = new Date()
+  const amanha = new Date(hoje); amanha.setDate(amanha.getDate() + 1)
+  const dias = ['domingo','segunda','terça','quarta','quinta','sexta','sábado']
 
-Responda naturalmente:`
+  // Calcula próximas segundas, terças, etc.
+  const datasReferencia = {}
+  for (let i = 0; i <= 7; i++) {
+    const d = new Date(hoje); d.setDate(hoje.getDate() + i)
+    datasReferencia[dias[d.getDay()]] = d.toISOString().slice(0,10)
+  }
 
-    // Chama Gemini
+  const prompt = `Extraia informações de agendamento da mensagem abaixo.
+Hoje é ${hoje.toLocaleDateString('pt-BR')} (${dias[hoje.getDay()]}).
+Amanhã é ${amanha.toLocaleDateString('pt-BR')}.
+Referência dos próximos dias: ${JSON.stringify(datasReferencia)}
+
+Responda APENAS com JSON válido, sem explicação:
+{
+  "servico": null,        // "corte" | "corte_barba" | "barba" | "infantil" | null
+  "unidade": null,        // "timbauva" | "centro" | "sao_joao" | null
+  "barbeiro": null,       // nome do barbeiro, "sem_preferencia", ou null
+  "data": null,           // "YYYY-MM-DD" ou null
+  "hora": null,           // "HH:MM" ou null
+  "periodo": null,        // "manha" | "tarde" | "noite" | null
+  "fora_escopo": false    // true se não for sobre agendamento/barbearia
+}
+
+Mensagem: "${mensagem}"
+JSON:`
+
+  try {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\${GEMINI_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 150 }
+        })
+      }
+    )
+    const gdata = await resp.json()
+    let raw = gdata?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '{}'
+    raw = raw.replace(/```json|```/g, '').trim()
+    return JSON.parse(raw)
+  } catch (e) {
+    console.error('[whatsapp/extrairTudo]', e.message)
+    return {}
+  }
+}
+
+// ============================================================
+// Extrai intenção com Gemini — retorna JSON, nunca texto livre
+// ============================================================
+async function extrair(mensagem, tipo, dadosAtuais) {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY
+  if (!GEMINI_KEY) return {}
+
+  const prompts = {
+    servico: `Extraia o serviço que o cliente quer da mensagem abaixo.
+Responda APENAS com JSON, sem explicação.
+Serviços válidos: "corte", "corte_barba", "barba", "infantil"
+Se não for sobre agendamento/serviço de barbearia: {"fora_escopo": true}
+Se não entendeu: {}
+Mensagem: "${mensagem}"
+JSON:`,
+
+    unidade: `Extraia a unidade preferida da mensagem. Unidades: timbaúva, centro, sao_joao.
+Responda APENAS com JSON: {"unidade": "timbaúva"} ou {"unidade": "centro"} ou {"unidade": "sao_joao"} ou {}
+Mensagem: "${mensagem}"
+JSON:`,
+
+    barbeiro: `Extraia a preferência de barbeiro. Se o cliente não tiver preferência, "sem_preferencia".
+Responda APENAS com JSON: {"barbeiro": "William"} ou {"barbeiro": "sem_preferencia"} ou {}
+Mensagem: "${mensagem}"
+JSON:`,
+
+    data: `Extraia data e horário da mensagem. Hoje é ${new Date().toLocaleDateString('pt-BR')}.
+Responda APENAS com JSON com campos opcionais:
+- "data": "YYYY-MM-DD" (ou null)
+- "hora": "HH:MM" (ou null)  
+- "periodo": "manha", "tarde" ou "noite" (ou null)
+Mensagem: "${mensagem}"
+JSON:`,
+
+    numero: `O cliente está escolhendo um número de opção. Qual número escolheu?
+Responda APENAS com JSON: {"numero_escolhido": 1} (use o número que aparece na mensagem)
+Mensagem: "${mensagem}"
+JSON:`,
+
+    confirmacao: `O cliente confirmou ou cancelou? Responda APENAS com JSON:
+{"confirmou": true} se disse sim/confirmo/pode ser/ok
+{"confirmou": false} se disse não/cancela/desistir
+{} se não ficou claro
+Mensagem: "${mensagem}"
+JSON:`
+  }
+
+  try {
     const resp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 300 }
+          contents: [{ parts: [{ text: prompts[tipo] || prompts.servico }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 100 }
         })
       }
     )
-
-    const geminiData = await resp.json()
-    const respostaIA = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
-    if (!respostaIA) return
-
-    // Verifica se precisa transferir para humano
-    if (respostaIA.includes('[TRANSFERIR]')) {
-      await supabaseAdmin.from('whatsapp_conversas').update({
-        requer_humano:    true,
-        requer_humano_em: new Date().toISOString(),
-        estado_ia:        'escalado'
-      }).eq('id', conversa.id)
-
-      const textoEnvio = respostaIA.replace('[TRANSFERIR]', '').trim() ||
-        'Um momento! Vou chamar um de nossos atendentes para te ajudar. 😊'
-      await enviarMensagemEvolution(conversa.numero, textoEnvio, conversa.id, 'ia')
-      return
-    }
-
-    // Verifica se tem agendamento confirmado
-    const matchAg = respostaIA.match(/\[AGENDAMENTO_CONFIRMADO:\s*([^\]]+)\]/)
-    if (matchAg) {
-      await supabaseAdmin.from('whatsapp_conversas').update({
-        estado_ia: 'agendado'
-      }).eq('id', conversa.id)
-
-      const textoEnvio = respostaIA.replace(matchAg[0], '').trim()
-      await enviarMensagemEvolution(conversa.numero, textoEnvio, conversa.id, 'ia')
-      return
-    }
-
-    // Resposta normal
-    await enviarMensagemEvolution(conversa.numero, respostaIA, conversa.id, 'ia')
-
+    const gdata = await resp.json()
+    let raw = gdata?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '{}'
+    raw = raw.replace(/```json|```/g, '').trim()
+    return JSON.parse(raw)
   } catch (e) {
-    console.error('[whatsapp/ia]', e.message)
-  }
-}
-
-// ---- Envia mensagem via Evolution ----
-async function enviarMensagemEvolution(numero, texto, conversaId, remetente) {
-  const EVOLUTION_URL = process.env.EVOLUTION_API_URL
-  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
-  const INSTANCIA     = process.env.EVOLUTION_INSTANCIA || 'barbearia1989'
-
-  const resp = await fetch(`${EVOLUTION_URL}/message/sendText/${INSTANCIA}`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
-    body: JSON.stringify({ number: numero, text: texto, options: { delay: 1200 } })
-  })
-
-  const result = await resp.json()
-
-  await supabaseAdmin.from('whatsapp_mensagens').insert({
-    conversa_id:      conversaId,
-    evolution_msg_id: result.key?.id || null,
-    direcao:          'saida',
-    tipo:             'texto',
-    conteudo:         texto,
-    remetente
-  })
-
-  await supabaseAdmin.from('whatsapp_conversas')
-    .update({ ultima_msg_em: new Date().toISOString() })
-    .eq('id', conversaId)
-}
-
-// ---- Busca contexto completo do cliente ----
-async function buscarContextoCliente(clienteId) {
-  try {
-    const [
-      { data: cli },
-      { data: ultimoAg },
-      { data: plano },
-      { data: carteira }
-    ] = await Promise.all([
-      supabaseAdmin.from('clientes').select('nome, email, user_id, whatsapp').eq('id', clienteId).single(),
-      supabaseAdmin.from('agendamentos')
-        .select('unidades(nome), colaboradores(nome)')
-        .eq('cliente_id', clienteId)
-        .eq('status', 'realizado')
-        .order('data', { ascending: false })
-        .limit(1)
-        .single(),
-      supabaseAdmin.from('assinaturas')
-        .select('planos(nome), status, data_renovacao')
-        .eq('cliente_id', clienteId)
-        .eq('status', 'ativa')
-        .limit(1)
-        .single(),
-      supabaseAdmin.from('carteira_pontos')
-        .select('saldo')
-        .eq('cliente_id', clienteId)
-        .single()
-    ])
-
-    return {
-      nome:           cli?.nome,
-      email:          cli?.email,
-      tem_app:        !!cli?.user_id,
-      ultima_unidade: ultimoAg?.unidades?.nome || null,
-      ultimo_barbeiro: ultimoAg?.colaboradores?.nome || null,
-      plano_ativo:    plano?.planos?.nome || null,
-      plano_vence:    plano?.data_renovacao || null,
-      pontos:         carteira?.saldo || 0
-    }
-  } catch (e) {
-    return null
+    console.error('[whatsapp/extrair]', e.message)
+    return {}
   }
 }
 
 // ============================================================
-// GET /whatsapp/conversas — lista conversas
+// Busca slots disponíveis — ordenados por proximidade ao pedido
+// ============================================================
+async function buscarSlots(dados) {
+  try {
+    const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+
+    // Horários padrão da barbearia (09:00-19:00, a cada 30min)
+    const todosHorarios = []
+    for (let h = 9; h <= 18; h++) {
+      todosHorarios.push(`${String(h).padStart(2,'0')}:00`)
+      todosHorarios.push(`${String(h).padStart(2,'0')}:30`)
+    }
+    todosHorarios.push('19:00')
+
+    // Filtra por período se não tem hora exata
+    let horariosBase = todosHorarios
+    if (!dados.hora_raw) {
+      if (dados.periodo === 'manha') horariosBase = todosHorarios.filter(h => h < '12:00')
+      else if (dados.periodo === 'tarde') horariosBase = todosHorarios.filter(h => h >= '12:00' && h < '18:00')
+      else if (dados.periodo === 'noite') horariosBase = todosHorarios.filter(h => h >= '18:00')
+    }
+
+    // Determina data base
+    let dataBase = new Date()
+    dataBase.setHours(0,0,0,0)
+    if (dados.data_raw) {
+      const d = new Date(dados.data_raw + 'T12:00:00')
+      if (!isNaN(d)) dataBase = d
+    } else if (!dados.periodo) {
+      dataBase.setDate(dataBase.getDate() + 1) // padrão: amanhã
+    }
+
+    // Busca colaboradores
+    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true)
+    if (dados.unidade_id) colQuery = colQuery.eq('unidade_id', dados.unidade_id)
+    if (dados.barbeiro_id) colQuery = colQuery.eq('id', dados.barbeiro_id)
+    const { data: cols } = await colQuery
+    if (!cols || cols.length === 0) return []
+
+    // Se sem preferência → pega o com mais disponibilidade
+    let colAlvo = cols
+    if (!dados.barbeiro_id && cols.length > 1) {
+      // Conta livres para cada barbeiro e pega o melhor
+      const { data: agDia } = await supabaseAdmin.from('agendamentos')
+        .select('colaborador_id')
+        .in('colaborador_id', cols.map(c => c.id))
+        .gte('data_hora', dataBase.toISOString().slice(0,10) + 'T00:00:00')
+        .lte('data_hora', dataBase.toISOString().slice(0,10) + 'T23:59:59')
+        .in('status', ['agendado','confirmado'])
+      const ocupCount = {}
+      ;(agDia||[]).forEach(a => { ocupCount[a.colaborador_id] = (ocupCount[a.colaborador_id]||0)+1 })
+      const sorted = [...cols].sort((a,b) => (ocupCount[a.id]||0) - (ocupCount[b.id]||0))
+      colAlvo = [sorted[0]]
+    }
+
+    // Função auxiliar: busca slots livres num dia específico para um colaborador
+    async function slotsLivresDia(col, data) {
+      const dataStr = data.toISOString().slice(0,10)
+      const { data: agds } = await supabaseAdmin.from('agendamentos')
+        .select('data_hora')
+        .eq('colaborador_id', col.id)
+        .gte('data_hora', dataStr + 'T00:00:00')
+        .lte('data_hora', dataStr + 'T23:59:59')
+        .in('status', ['agendado','confirmado'])
+      const ocupSet = new Set((agds||[]).map(a => a.data_hora.slice(11,16)))
+      const fmt = `${diasSemana[data.getDay()]} ${String(data.getDate()).padStart(2,'0')}/${String(data.getMonth()+1).padStart(2,'0')}`
+      return horariosBase
+        .filter(h => !ocupSet.has(h))
+        .map(h => ({
+          colaborador_id: col.id,
+          barbeiro_nome:  col.nome,
+          data_iso:       dataStr,
+          hora_iso:       h,
+          data_fmt:       fmt,
+          hora_fmt:       h,
+          label:          `${h} — ${col.nome} (${fmt})`
+        }))
+    }
+
+    // MODO 1: Tem hora específica pedida → busca por proximidade
+    if (dados.hora_raw) {
+      const col = colAlvo[0]
+      const slots = []
+
+      // A) Mesma hora, mesmo dia
+      const livresDia1 = await slotsLivresDia(col, dataBase)
+      const exato = livresDia1.find(s => s.hora_iso === dados.hora_raw)
+      if (exato) {
+        // Horário exato disponível — retorna ele + próximos como bonus
+        slots.push(exato)
+        livresDia1.filter(s => s.hora_iso > dados.hora_raw).slice(0,2).forEach(s => slots.push(s))
+        return slots.slice(0,3)
+      }
+
+      // Exato não disponível — busca PRÓXIMOS com mesma referência
+      // B) Mesmo barbeiro, mesmo dia, horários próximos (depois e antes)
+      const depoisDia1 = livresDia1.filter(s => s.hora_iso > dados.hora_raw).slice(0,2)
+      const antesDia1  = livresDia1.filter(s => s.hora_iso < dados.hora_raw).reverse().slice(0,1)
+      depoisDia1.forEach(s => { s._prioridade = 1; slots.push(s) })
+      antesDia1.forEach(s  => { s._prioridade = 2; slots.push(s) })
+
+      // C) Mesmo barbeiro, dia seguinte, mesmo horário (ou próximos)
+      const dia2 = new Date(dataBase); dia2.setDate(dia2.getDate() + 1)
+      const livresDia2 = await slotsLivresDia(col, dia2)
+      const exatoDia2  = livresDia2.find(s => s.hora_iso === dados.hora_raw)
+      if (exatoDia2) {
+        exatoDia2._prioridade = 3
+        slots.push(exatoDia2)
+      } else {
+        const proxDia2 = livresDia2.filter(s => s.hora_iso >= dados.hora_raw).slice(0,1)
+        proxDia2.forEach(s => { s._prioridade = 4; slots.push(s) })
+      }
+
+      // Ordena: mesmo dia primeiro, depois dia seguinte; dentro do dia: mais próximo à hora pedida
+      slots.sort((a,b) => (a._prioridade||9) - (b._prioridade||9))
+      return slots.slice(0,3)
+    }
+
+    // MODO 2: Sem hora específica → lista os primeiros disponíveis do período
+    const slots = []
+    for (const col of colAlvo) {
+      const livres = await slotsLivresDia(col, dataBase)
+      livres.slice(0,6).forEach(s => slots.push(s))
+      if (slots.length >= 6) break
+    }
+    return slots.slice(0,6)
+
+  } catch (e) {
+    console.error('[whatsapp/slots]', e.message)
+    return []
+  }
+}
+
+// Busca outros barbeiros no mesmo horário pedido
+async function buscarOutrosBarbeirosNoHorario(dados) {
+  try {
+    if (!dados.hora_raw || !dados.data_raw) return []
+    const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+
+    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true)
+    if (dados.unidade_id) colQuery = colQuery.eq('unidade_id', dados.unidade_id)
+    // Exclui o barbeiro atual
+    if (dados.barbeiro_id) colQuery = colQuery.neq('id', dados.barbeiro_id)
+    const { data: cols } = await colQuery
+    if (!cols || cols.length === 0) return []
+
+    const dataStr = dados.data_raw
+    const { data: agds } = await supabaseAdmin.from('agendamentos')
+      .select('colaborador_id')
+      .in('colaborador_id', cols.map(c => c.id))
+      .eq('data_hora', `${dataStr}T${dados.hora_raw}:00`)
+      .in('status', ['agendado','confirmado'])
+    const ocupSet = new Set((agds||[]).map(a => a.colaborador_id))
+
+    const data = new Date(dataStr + 'T12:00:00')
+    const fmt  = `${diasSemana[data.getDay()]} ${String(data.getDate()).padStart(2,'0')}/${String(data.getMonth()+1).padStart(2,'0')}`
+
+    return cols
+      .filter(c => !ocupSet.has(c.id))
+      .map(c => ({
+        colaborador_id: c.id,
+        barbeiro_nome:  c.nome,
+        data_iso:       dataStr,
+        hora_iso:       dados.hora_raw,
+        data_fmt:       fmt,
+        hora_fmt:       dados.hora_raw,
+        label:          `${dados.hora_raw} — ${c.nome} (${fmt})`
+      }))
+      .slice(0,3)
+  } catch(e) {
+    console.error('[whatsapp/outrosBarbeiros]', e.message)
+    return []
+  }
+}
+
+// ============================================================
+// Faz o agendamento no banco
+// ============================================================
+async function fazerAgendamento(conversa, dados) {
+  try {
+    const slot = dados.slot_escolhido
+    if (!slot) return false
+
+    // Busca serviço
+    const { data: svc } = await supabaseAdmin.from('servicos')
+      .select('id').ilike('nome', `%${dados.servico_nome?.split(' ')[0]}%`).limit(1).maybeSingle()
+
+    const agendamento = {
+      colaborador_id: slot.colaborador_id,
+      servico_id:     svc?.id || null,
+      unidade_id:     dados.unidade_id || null,
+      cliente_id:     conversa.cliente_id || null,
+      data_hora:      `${slot.data_iso}T${slot.hora_iso}:00`,
+      status:         'agendado',
+      origem:         'whatsapp',
+      observacoes:    `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
+    }
+
+    const { data: ag, error } = await supabaseAdmin.from('agendamentos').insert(agendamento).select('id').single()
+    if (error) throw error
+
+    // Vincula agendamento à conversa
+    await supabaseAdmin.from('whatsapp_conversas')
+      .update({ agendamento_id: ag.id })
+      .eq('id', conversa.id)
+
+    return true
+  } catch (e) {
+    console.error('[whatsapp/fazerAgendamento]', e.message)
+    return false
+  }
+}
+
+// ============================================================
+// Escalona para atendente humano
+// ============================================================
+async function escalarHumano(conversa, msg) {
+  if (msg) await enviar(conversa, msg)
+  await supabaseAdmin.from('whatsapp_conversas').update({
+    requer_humano:    true,
+    requer_humano_em: new Date().toISOString(),
+    estado_ia:        'escalado'
+  }).eq('id', conversa.id)
+}
+
+// ============================================================
+// Controla erros consecutivos → escala após 2 tentativas
+// ============================================================
+async function erroOuEscalar(conversa, dados, msg) {
+  const erros = (dados._erros || 0) + 1
+  dados._erros = erros
+  if (erros >= 2) {
+    await escalarHumano(conversa, MSG.nao_entendeu2)
+  } else {
+    await supabaseAdmin.from('whatsapp_conversas').update({ dados_ia: dados }).eq('id', conversa.id)
+    await enviar(conversa, msg)
+  }
+}
+
+// ============================================================
+// Atualiza estado e dados
+// ============================================================
+async function setEstado(id, estado, dados) {
+  await supabaseAdmin.from('whatsapp_conversas').update({ estado_ia: estado, dados_ia: dados }).eq('id', id)
+}
+
+// ============================================================
+// Envia mensagem via Evolution
+// ============================================================
+async function enviar(conversa, texto, remetente = 'ia') {
+  const EVOLUTION_URL = process.env.EVOLUTION_API_URL
+  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
+  const INSTANCIA     = process.env.EVOLUTION_INSTANCIA || 'barbearia1989'
+
+  try {
+    const resp = await fetch(`${EVOLUTION_URL}/message/sendText/${INSTANCIA}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
+      body: JSON.stringify({ number: conversa.numero, text: texto, options: { delay: 1500 } })
+    })
+    const result = await resp.json()
+
+    await supabaseAdmin.from('whatsapp_mensagens').insert({
+      conversa_id:      conversa.id,
+      evolution_msg_id: result.key?.id || null,
+      direcao:          'saida',
+      tipo:             'texto',
+      conteudo:         texto,
+      remetente
+    })
+
+    await supabaseAdmin.from('whatsapp_conversas')
+      .update({ ultima_msg_em: new Date().toISOString() })
+      .eq('id', conversa.id)
+  } catch (e) {
+    console.error('[whatsapp/enviar]', e.message)
+  }
+}
+
+// ============================================================
+// Helpers de nome
+// ============================================================
+function nomearServico(raw) {
+  const map = { corte: 'Corte de cabelo', corte_barba: 'Corte + Barba', barba: 'Barba', infantil: 'Corte infantil' }
+  return map[raw] || raw
+}
+function nomearUnidade(raw) {
+  const map = { 'timbaúva': 'Timbaúva', 'timbauva': 'Timbaúva', centro: 'Centro', sao_joao: 'São João', 'são joão': 'São João' }
+  return map[raw?.toLowerCase()] || raw
+}
+
+// ============================================================
+// GET /whatsapp/conversas
 // ============================================================
 router.get('/conversas', async (req, res) => {
   try {
     const { status = 'aberta' } = req.query
     const { data } = await supabaseAdmin
       .from('whatsapp_conversas')
-      .select('id, numero, nome_contato, status, atendente, estado_ia, requer_humano, ultima_msg_em, cliente_id, cliente:clientes(id, nome, whatsapp, user_id)')
+      .select('id, numero, nome_contato, status, atendente, estado_ia, requer_humano, ultima_msg_em, cliente_id, dados_ia, cliente:clientes(id, nome, whatsapp, user_id)')
       .eq('status', status)
       .order('requer_humano', { ascending: false })
       .order('ultima_msg_em', { ascending: false })
       .limit(50)
     res.json(data || [])
   } catch (e) {
-    console.error('[whatsapp/conversas]', e.message)
-    res.status(500).json({ erro: 'Erro ao buscar conversas' })
-  }
-})
-
-// ============================================================
-// GET /whatsapp/conversas/:id/contexto — contexto do cliente
-// ============================================================
-router.get('/conversas/:id/contexto', async (req, res) => {
-  try {
-    const { data: conv } = await supabaseAdmin
-      .from('whatsapp_conversas')
-      .select('cliente_id, numero, nome_contato, estado_ia, requer_humano')
-      .eq('id', req.params.id)
-      .single()
-    if (!conv) return res.status(404).json({ erro: 'Conversa não encontrada' })
-
-    if (!conv.cliente_id) {
-      return res.json({ identificado: false, numero: conv.numero, nome: conv.nome_contato })
-    }
-
-    const ctx = await buscarContextoCliente(conv.cliente_id)
-    res.json({ identificado: true, ...ctx })
-  } catch (e) {
-    console.error('[whatsapp/contexto]', e.message)
     res.status(500).json({ erro: e.message })
   }
 })
+
+// ============================================================
+// GET /whatsapp/conversas/:id/contexto
+// ============================================================
+router.get('/conversas/:id/contexto', async (req, res) => {
+  try {
+    const { data: conv } = await supabaseAdmin.from('whatsapp_conversas')
+      .select('cliente_id, numero, nome_contato, estado_ia, dados_ia, requer_humano')
+      .eq('id', req.params.id).single()
+    if (!conv) return res.status(404).json({ erro: 'Não encontrada' })
+    if (!conv.cliente_id) return res.json({ identificado: false, numero: conv.numero, nome: conv.nome_contato })
+    const ctx = await buscarContextoCliente(conv.cliente_id)
+    res.json({ identificado: true, ...ctx })
+  } catch (e) {
+    res.status(500).json({ erro: e.message })
+  }
+})
+
+async function buscarContextoCliente(clienteId) {
+  try {
+    const [{ data: cli }, { data: ultimoAg }, { data: plano }, { data: carteira }] = await Promise.all([
+      supabaseAdmin.from('clientes').select('nome, email, user_id').eq('id', clienteId).single(),
+      supabaseAdmin.from('agendamentos').select('unidades(id,nome), colaboradores(id,nome), servicos(nome), data_hora').eq('cliente_id', clienteId).eq('status', 'realizado').order('data_hora', { ascending: false }).limit(1).maybeSingle(),
+      supabaseAdmin.from('assinaturas').select('planos(nome), data_renovacao').eq('cliente_id', clienteId).eq('status', 'ativa').limit(1).maybeSingle(),
+      supabaseAdmin.from('carteira_pontos').select('saldo').eq('cliente_id', clienteId).maybeSingle()
+    ])
+    return {
+      nome: cli?.nome, email: cli?.email, tem_app: !!cli?.user_id,
+      ultima_unidade: ultimoAg?.unidades?.nome || null,
+      ultima_unidade_id: ultimoAg?.unidades?.id || null,
+      ultimo_barbeiro: ultimoAg?.colaboradores?.nome || null,
+      ultimo_barbeiro_id: ultimoAg?.colaboradores?.id || null,
+      ultimo_servico: ultimoAg?.servicos?.nome || null,
+      plano_ativo: plano?.planos?.nome || null,
+      plano_vence: plano?.data_renovacao || null,
+      pontos: carteira?.saldo || 0
+    }
+  } catch (e) { return null }
+}
 
 // ============================================================
 // GET /whatsapp/conversas/:id/mensagens
 // ============================================================
 router.get('/conversas/:id/mensagens', async (req, res) => {
   try {
-    const { data } = await supabaseAdmin
-      .from('whatsapp_mensagens')
-      .select('id, direcao, tipo, conteudo, midia_url, remetente, criado_em')
+    const { data } = await supabaseAdmin.from('whatsapp_mensagens')
+      .select('id, direcao, tipo, conteudo, remetente, criado_em')
       .eq('conversa_id', req.params.id)
-      .order('criado_em', { ascending: true })
-      .limit(100)
+      .order('criado_em', { ascending: true }).limit(100)
     res.json(data || [])
-  } catch (e) {
-    res.status(500).json({ erro: 'Erro ao buscar mensagens' })
-  }
+  } catch (e) { res.status(500).json({ erro: e.message }) }
 })
 
 // ============================================================
-// POST /whatsapp/conversas/:id/enviar — envia mensagem (humano)
+// POST /whatsapp/conversas/:id/enviar (humano)
 // ============================================================
 router.post('/conversas/:id/enviar', async (req, res) => {
   try {
     const { texto, remetente = 'humano' } = req.body || {}
     if (!texto) return res.status(400).json({ erro: 'Informe o texto' })
-
-    const { data: conv } = await supabaseAdmin
-      .from('whatsapp_conversas').select('numero').eq('id', req.params.id).single()
-    if (!conv) return res.status(404).json({ erro: 'Conversa não encontrada' })
-
-    await enviarMensagemEvolution(conv.numero, texto, req.params.id, remetente)
+    const { data: conv } = await supabaseAdmin.from('whatsapp_conversas').select('numero').eq('id', req.params.id).single()
+    if (!conv) return res.status(404).json({ erro: 'Não encontrada' })
+    await enviar(conv, texto, remetente)
     res.json({ ok: true })
-  } catch (e) {
-    console.error('[whatsapp/enviar]', e.message)
-    res.status(500).json({ erro: e.message })
-  }
+  } catch (e) { res.status(500).json({ erro: e.message }) }
 })
 
 // ============================================================
-// PATCH /whatsapp/conversas/:id — atualiza status/atendente
+// PATCH /whatsapp/conversas/:id
 // ============================================================
 router.patch('/conversas/:id', async (req, res) => {
   try {
@@ -446,29 +1000,23 @@ router.patch('/conversas/:id', async (req, res) => {
     if (status !== undefined)        upd.status        = status
     if (atendente !== undefined)     upd.atendente     = atendente
     if (requer_humano !== undefined) upd.requer_humano = requer_humano
+    if (atendente === 'ia')          upd.requer_humano = false
     await supabaseAdmin.from('whatsapp_conversas').update(upd).eq('id', req.params.id)
     res.json({ ok: true })
-  } catch (e) {
-    res.status(500).json({ erro: e.message })
-  }
+  } catch (e) { res.status(500).json({ erro: e.message }) }
 })
 
 // ============================================================
-// GET /whatsapp/alertas — conversas que precisam de humano
-// (polling rápido da tela do caixa)
+// GET /whatsapp/alertas
 // ============================================================
 router.get('/alertas', async (req, res) => {
   try {
-    const { data } = await supabaseAdmin
-      .from('whatsapp_conversas')
+    const { data } = await supabaseAdmin.from('whatsapp_conversas')
       .select('id, nome_contato, numero, requer_humano_em')
-      .eq('requer_humano', true)
-      .eq('status', 'aberta')
+      .eq('requer_humano', true).eq('status', 'aberta')
       .order('requer_humano_em', { ascending: false })
     res.json(data || [])
-  } catch (e) {
-    res.status(500).json({ erro: e.message })
-  }
+  } catch (e) { res.status(500).json({ erro: e.message }) }
 })
 
 module.exports = router
