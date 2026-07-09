@@ -86,10 +86,20 @@ async function pingAgenda(unidade_id) {
 // ---- WhatsApp: pronto para a Evolution API (no-op se não configurada) ----
 async function enviarWhatsApp(numero, texto) {
   try {
+    // Checa se notificações estão ativas na tabela de configurações
+    const { data: cfg } = await supabaseAdmin
+      .from('configuracoes')
+      .select('valor')
+      .eq('chave', 'whatsapp_notificacoes')
+      .single()
+    if (!cfg || cfg.valor !== 'true') {
+      console.log('[wpp] Notificações WhatsApp desativadas — mensagem não enviada')
+      return false
+    }
     const url  = process.env.EVOLUTION_API_URL
     const key  = process.env.EVOLUTION_API_KEY
-    const inst = process.env.EVOLUTION_INSTANCE
-    if (!url || !key || !inst) {
+    const inst = process.env.EVOLUTION_INSTANCIA || process.env.EVOLUTION_INSTANCE || 'barbearia1989'
+    if (!url || !key) {
       console.log('[wpp] Evolution não configurada — confirmação não enviada (ok)')
       return false
     }
