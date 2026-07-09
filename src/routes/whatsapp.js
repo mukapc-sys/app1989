@@ -536,24 +536,36 @@ async function extrairTudo(mensagem) {
     datasReferencia[dias[d.getDay()]] = d.toISOString().slice(0,10)
   }
 
-  const prompt = `Extraia informações de agendamento da mensagem abaixo.
-Hoje é ${hoje.toLocaleDateString('pt-BR')} (${dias[hoje.getDay()]}).
-Amanhã é ${amanha.toLocaleDateString('pt-BR')}.
-Referência dos próximos dias: ${JSON.stringify(datasReferencia)}
+  const prompt = `Você extrai dados de agendamento de mensagens de WhatsApp de uma barbearia.
 
-Responda APENAS com JSON válido, sem explicação:
-{
-  "servico": null,        // "corte" | "corte_barba" | "barba" | "infantil" | null
-  "unidade": null,        // "timbauva" | "centro" | "sao_joao" | null
-  "barbeiro": null,       // nome do barbeiro, "sem_preferencia", ou null
-  "data": null,           // "YYYY-MM-DD" ou null
-  "hora": null,           // "HH:MM" ou null
-  "periodo": null,        // "manha" | "tarde" | "noite" | null
-  "fora_escopo": false    // true se não for sobre agendamento/barbearia
-}
+Regras para o campo "servico":
+- Se mencionar corte, cabelo, cabelinho, aparar, tesoura → "corte"
+- Se mencionar corte e barba juntos → "corte_barba"
+- Se mencionar só barba, bigode → "barba"
+- Se mencionar infantil, criança, filho, bebê, menino, menina → "infantil"
+- Se não mencionar nenhum serviço → null
 
-Mensagem: "${mensagem}"
-JSON:`
+Regras para "unidade":
+- Timbaúva, timbauva → "timbauva"
+- Centro, central → "centro"
+- São João, sao joao, boark → "sao_joao"
+- Se não mencionar → null
+
+Regras para "barbeiro": nome do profissional mencionado, ou null
+
+Regras para data/hora:
+- Hoje: ${hoje.toLocaleDateString('pt-BR')} (${dias[hoje.getDay()]})
+- Amanhã: ${amanha.toLocaleDateString('pt-BR')}
+- ${Object.entries(datasReferencia).map(([d,v]) => `${d} = ${v}`).join(', ')}
+- Converta para "YYYY-MM-DD" e "HH:MM"
+- "de manhã" → periodo "manha", "à tarde" → "tarde", "à noite" → "noite"
+
+Regras para "fora_escopo": true APENAS se o assunto não tiver NADA a ver com barbearia ou agendamento.
+
+Retorne SOMENTE um JSON sem comentários, sem explicação, sem markdown:
+{"servico":null,"unidade":null,"barbeiro":null,"data":null,"hora":null,"periodo":null,"fora_escopo":false}
+
+Mensagem a analisar: "${mensagem}"`
 
   try {
     const resp = await fetch(
