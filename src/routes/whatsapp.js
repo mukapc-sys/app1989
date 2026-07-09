@@ -1025,6 +1025,50 @@ router.patch('/conversas/:id', async (req, res) => {
 })
 
 // ============================================================
+// POST /whatsapp/conversas/:id/acionar-ia
+// Força a IA processar a última mensagem do cliente
+// ============================================================
+router.post('/conversas/:id/acionar-ia', async (req, res) => {
+  try {
+    const { data: conv } = await supabaseAdmin
+      .from('whatsapp_conversas')
+      .select('*')
+      .eq('id', req.params.id)
+      .single()
+    if (!conv) return res.status(404).json({ erro: 'Conversa não encontrada' })
+
+    // Busca última mensagem do cliente
+    const { data: msgs } = await supabaseAdmin
+      .from('whatsapp_mensagens')
+      .select('conteudo, tipo')
+      .eq('conversa_id', req.params.id)
+      .eq('direcao', 'entrada')
+      .order('criado_em', { ascending: false })
+      .limit(1)
+
+    const ultimaMsg = msgs?.[0]
+    if (!ultimaMsg || ultimaMsg.tipo !== 'texto') {
+      return res.status(400).json({ erro: 'Nenhuma mensagem de texto do cliente para processar' })
+    }
+
+    // Garante que a conversa está no modo IA
+    await supabaseAdmin.from('whatsapp_conversas')
+      .update({ atendente: 'ia', requer_humano: false })
+      .eq('id', req.params.id)
+    conv.atendente = 'ia'
+    conv.requer_humano = false
+
+    res.json({ ok: true, mensagem: ultimaMsg.conteudo })
+
+    // Processa em background
+    await processarFluxo(conv, ultimaMsg.conteudo)
+  } catch (e) {
+    console.error('[whatsapp/acionar-ia]', e.message)
+    res.status(500).json({ erro: e.message })
+  }
+})
+
+// ============================================================
 // GET /whatsapp/alertas
 // ============================================================
 router.get('/alertas', async (req, res) => {
