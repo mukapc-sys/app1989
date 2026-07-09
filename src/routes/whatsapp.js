@@ -16,11 +16,15 @@ const MSG = {
   boas_vindas_historico_parcial: (nome, linhas) =>
     `Olá, ${nome}! 😊 Já te conheço por aqui!\n\n${linhas}\n\nQuer agendar? Me conta o que você precisa e o horário 😊`,
 
+  pede_nome: `Olá! 😊 Pode me dizer seu nome?`,
+
+  boas_vindas_com_nome: (nome) => `Olá, ${nome}! 😊 Qual serviço você deseja?\n\n✂️ Corte de cabelo\n🪒 Corte + Barba\n🪒 Só a barba\n👶 Corte infantil`,
+
   boas_vindas: `Olá! 😊 Sou a assistente da Barbearia 1989.\n\nQual serviço você deseja?\n\n✂️ Corte de cabelo\n🪒 Corte + Barba\n🪒 Só a barba\n👶 Corte infantil`,
 
   pede_unidade: `Ótimo! Qual unidade prefere?\n\n📍 Timbaúva\n📍 Centro\n📍 São João`,
 
-  pede_barbeiro: `Tem preferência de barbeiro? Se não tiver, eu escolho o que tiver mais horário disponível 😁`,
+  pede_barbeiro: (nome) => nome ? `${nome}, tem preferência por algum barbeiro?` : `Tem preferência por algum barbeiro?`,
 
   pede_data: `Qual dia e horário prefere? Pode dizer assim:\n"amanhã de manhã", "sexta às 14h", "hoje à tarde"...`,
 
@@ -257,7 +261,7 @@ async function processarFluxo(conversa, mensagemCliente) {
         return
       }
       if (!dados.barbeiro_raw && dados.barbeiro_id === undefined) {
-        await enviar(conversa, MSG.pede_barbeiro)
+        await enviar(conversa, MSG.pede_barbeiro(dados._nome_cliente))
         await setEstado(conversa.id, 'aguardando_barbeiro', dados)
         return
       }
@@ -285,6 +289,20 @@ async function processarFluxo(conversa, mensagemCliente) {
       return
     }
 
+    // ── ESTADO: aguardando_nome
+    if (estado === 'aguardando_nome') {
+      const nome = mensagemCliente.trim().split(' ').slice(0,2).join(' ') // pega até 2 palavras
+      if (nome && nome.length > 1) {
+        dados._nome_cliente = nome
+        dados._erros = 0
+        await enviar(conversa, MSG.boas_vindas_com_nome(nome))
+        await setEstado(conversa.id, 'aguardando_servico', dados)
+      } else {
+        await erroOuEscalar(conversa, dados, `Não entendi seu nome 😅 Pode me dizer como se chama?`)
+      }
+      return
+    }
+
     // ── ESTADO: aguardando_servico
     if (estado === 'aguardando_servico') {
       // Tenta extrair tudo (cliente pode ter mandado info completa numa resposta posterior)
@@ -305,7 +323,7 @@ async function processarFluxo(conversa, mensagemCliente) {
           await enviar(conversa, MSG.pede_unidade)
           await setEstado(conversa.id, 'aguardando_unidade', dados)
         } else {
-          await enviar(conversa, MSG.pede_barbeiro)
+          await enviar(conversa, MSG.pede_barbeiro(dados._nome_cliente))
           await setEstado(conversa.id, 'aguardando_barbeiro', dados)
         }
       } else {
@@ -326,7 +344,7 @@ async function processarFluxo(conversa, mensagemCliente) {
           .select('id,nome').ilike('nome', `%${dados.unidade_nome}%`).limit(1).maybeSingle()
         if (uni) dados.unidade_id = uni.id
         dados._erros = 0
-        await enviar(conversa, MSG.pede_barbeiro)
+        await enviar(conversa, MSG.pede_barbeiro(dados._nome_cliente))
         await setEstado(conversa.id, 'aguardando_barbeiro', dados)
       } else {
         await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
@@ -339,30 +357,37 @@ async function processarFluxo(conversa, mensagemCliente) {
       const ext = await extrairTudo(mensagemCliente)
       if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
-      if (ext.barbeiro === 'sem_preferencia' || ext.barbeiro === null) {
+      const nomeBarbeiro = ext.barbeiro
+      const msg = mensagemCliente.toLowerCase()
+
+      // Cliente diz que TEM preferência mas não falou o nome → pede o nome
+      const querBarbeiro = /tenho|quero|prefiro|gosto/.test(msg) && !nomeBarbeiro
+      if (querBarbeiro) {
+        await enviar(conversa, 'Qual o nome do barbeiro? 😊')
+        return
+      }
+
+      if (!nomeBarbeiro || nomeBarbeiro === 'sem_preferencia') {
+        // Sem preferência ou campo vazio/undefined → mais disponível
         dados.barbeiro_raw  = null
         dados.barbeiro_nome = 'Mais disponível'
         dados.barbeiro_id   = null
-      } else if (ext.barbeiro) {
+      } else {
         // Busca barbeiro por nome na unidade
-        const { data: col } = await supabaseAdmin.from('colaboradores')
+        const colQuery = supabaseAdmin.from('colaboradores')
           .select('id,nome')
           .eq('ativo', true)
-          .eq('unidade_id', dados.unidade_id || null)
-          .ilike('nome', `%${ext.barbeiro}%`)
+          .ilike('nome', `%${nomeBarbeiro}%`)
           .limit(1)
-          .maybeSingle()
+        if (dados.unidade_id) colQuery.eq('unidade_id', dados.unidade_id)
+        const { data: col } = await colQuery.maybeSingle()
         if (col) {
           dados.barbeiro_id   = col.id
           dados.barbeiro_nome = col.nome
         } else {
-          // Nome não encontrado → aceita como sem preferência
           dados.barbeiro_id   = null
           dados.barbeiro_nome = 'Mais disponível'
         }
-      } else {
-        await erroOuEscalar(conversa, dados, MSG.nao_entendeu)
-        return
       }
       dados._erros = 0
       await enviar(conversa, MSG.pede_data)
