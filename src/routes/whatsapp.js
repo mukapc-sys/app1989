@@ -447,10 +447,10 @@ async function processarFluxo(conversa, mensagemCliente) {
         return
       }
 
-      // Escolha por número
-      const ext = await extrairTudo(mensagemCliente)
-      const idx  = (ext.numero_escolhido || 0) - 1
-      if (idx >= 0 && idx < slots.length) {
+      // Escolha por número — parseia direto da mensagem
+      const numStr = mensagemCliente.trim().replace(/[^0-9]/g, '')
+      const idx    = parseInt(numStr) - 1
+      if (!isNaN(idx) && idx >= 0 && idx < slots.length) {
         const slot = slots[idx]
         dados._slot  = slot
         dados.barbeiro_id    = slot.colaborador_id
