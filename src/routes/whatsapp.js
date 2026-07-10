@@ -175,6 +175,80 @@ async function buscarClientePorNumero(numero) {
 }
 
 // ============================================================
+// ============================================================
+// Salva mensagens ENVIADAS pelo número da barbearia (fromMe).
+// Cobre respostas manuais feitas pelo celular / WhatsApp Web — antes
+// eram descartadas e a tela do sistema só mostrava cliente + IA.
+// As mensagens da própria IA já são salvas pela função enviar(); aqui
+// a checagem por evolution_msg_id evita duplicar.
+// ============================================================
+async function salvarMensagemEnviada(data) {
+  try {
+    const jid = data.key?.remoteJid || ''
+    if (jid.includes('@g.us') || jid.includes('@broadcast')) return  // ignora grupos e status
+    const numero = normalizeNumero(jid)
+    if (!numero || !data.message) return
+
+    // Se já existe (foi a IA/sistema que mandou via enviar()), não duplica
+    const msgId = data.key?.id || null
+    if (msgId) {
+      const { data: jaExiste } = await supabaseAdmin.from('whatsapp_mensagens')
+        .select('id').eq('evolution_msg_id', msgId).limit(1).maybeSingle()
+      if (jaExiste) return
+    }
+
+    let tipo = 'texto', conteudo = null, midiaUrl = null
+    if (data.message.conversation)              { conteudo = data.message.conversation }
+    else if (data.message.extendedTextMessage)  { conteudo = data.message.extendedTextMessage.text }
+    else if (data.message.audioMessage)         { tipo = 'audio'; conteudo = '[áudio]'; midiaUrl = data.message.audioMessage?.url }
+    else if (data.message.imageMessage)         { tipo = 'imagem'; conteudo = data.message.imageMessage?.caption || '[imagem]'; midiaUrl = data.message.imageMessage?.url }
+    else                                        { conteudo = '[mensagem não suportada]' }
+
+    // Busca conversa aberta SEM sobrescrever nome_contato
+    // (no fromMe o pushName é o nome da barbearia, não do cliente)
+    let { data: conversa } = await supabaseAdmin.from('whatsapp_conversas')
+      .select('id')
+      .eq('numero', numero).eq('status', 'aberta')
+      .order('criado_em', { ascending: false })
+      .limit(1).maybeSingle()
+
+    // Barbearia iniciou a conversa manualmente → cria já em modo humano
+    // (senão a IA entraria no meio quando o cliente respondesse)
+    if (!conversa) {
+      const cli = await buscarClientePorNumero(numero)
+      const { data: criada } = await supabaseAdmin.from('whatsapp_conversas')
+        .insert({
+          numero,
+          nome_contato:  (cli && cli.nome) || numero,
+          cliente_id:    cli ? cli.id : null,
+          status:        'aberta',
+          atendente:     'humano',
+          estado_ia:     'inicial',
+          dados_ia:      {},
+          requer_humano: true,
+          ultima_msg_em: new Date().toISOString()
+        })
+        .select('id').single()
+      conversa = criada
+    }
+    if (!conversa) return
+
+    await supabaseAdmin.from('whatsapp_mensagens').upsert({
+      conversa_id:      conversa.id,
+      evolution_msg_id: msgId,
+      direcao:          'saida',
+      tipo, conteudo, midia_url: midiaUrl,
+      remetente:        'humano'
+    }, { onConflict: 'evolution_msg_id', ignoreDuplicates: true })
+
+    await supabaseAdmin.from('whatsapp_conversas')
+      .update({ ultima_msg_em: new Date().toISOString() })
+      .eq('id', conversa.id)
+  } catch (e) {
+    console.error('[salvarMensagemEnviada]', e.message)
+  }
+}
+
 // POST /whatsapp/webhook
 // ============================================================
 router.post('/webhook', async (req, res) => {
@@ -186,7 +260,7 @@ router.post('/webhook', async (req, res) => {
     const data  = body.data  || {}
 
     if (event !== 'messages.upsert') return
-    if (data.key?.fromMe) return
+    if (data.key?.fromMe) { await salvarMensagemEnviada(data); return }
     if (!data.message)    return
 
     const numero      = normalizeNumero(data.key?.remoteJid)
@@ -1286,14 +1360,14 @@ async function enviar(conversa, texto, remetente = 'ia') {
     })
     const result = await resp.json()
 
-    await supabaseAdmin.from('whatsapp_mensagens').insert({
+    await supabaseAdmin.from('whatsapp_mensagens').upsert({
       conversa_id:      conversa.id,
       evolution_msg_id: result.key?.id || null,
       direcao:          'saida',
       tipo:             'texto',
       conteudo:         texto,
       remetente
-    })
+    }, { onConflict: 'evolution_msg_id', ignoreDuplicates: true })
 
     await supabaseAdmin.from('whatsapp_conversas')
       .update({ ultima_msg_em: new Date().toISOString() })
