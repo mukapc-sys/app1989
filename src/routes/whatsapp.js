@@ -787,7 +787,7 @@ Regras para o campo "servico":
 Regras para "unidade":
 - Timbaúva, timbauva → "timbauva"
 - Centro, central → "centro"
-- São João, sao joao, boark → "sao_joao"
+- São João, sao joao, boark, buarque, barbearia da buarque, unidade da buarque → "sao_joao"
 - Se não mencionar → null
 
 Regras para "barbeiro": nome do profissional mencionado, ou null
@@ -1025,22 +1025,37 @@ async function buscarSlots(dados) {
     // Função: slots livres de um colaborador num dia
     async function slotsLivresDia(col, dStr) {
       const { data: agds } = await supabaseAdmin.from('agendamentos')
-        .select('data_hora_ini')
+        .select('data_hora_ini, data_hora_fim')
         .eq('colaborador_id', col.id)
         .gte('data_hora_ini', dStr + 'T00:00:00')
         .lte('data_hora_ini', dStr + 'T23:59:59')
         .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
 
-      const ocupSet = new Set((agds||[]).map(a => {
-        const d  = new Date(a.data_hora_ini)
-        const br = new Date(d.getTime() - 3 * 60 * 60 * 1000)
-        return `${String(br.getUTCHours()).padStart(2,'0')}:${String(br.getUTCMinutes()).padStart(2,'0')}`
-      }))
+      // Intervalos ocupados em minutos-do-dia (horário de Brasília).
+      // Considera a DURAÇÃO de cada agendamento/bloqueio, não só o minuto de início —
+      // sem isso, um bloqueio 13:00–13:30 deixava 13:15 "livre" e um serviço de 30min
+      // às 12:45 invadia o bloqueio das 13:00.
+      const minutoBR = (iso) => {
+        const br = new Date(new Date(iso).getTime() - 3 * 60 * 60 * 1000)
+        return br.getUTCHours() * 60 + br.getUTCMinutes()
+      }
+      const ocupados = (agds||[]).map(a => {
+        const iniMin = minutoBR(a.data_hora_ini)
+        const fimMin = a.data_hora_fim ? minutoBR(a.data_hora_fim) : iniMin + 30
+        return { ini: iniMin, fim: Math.max(fimMin, iniMin + 1) }
+      })
+      const slotLivre = (h) => {
+        const [hh, mm] = h.split(':').map(Number)
+        const sIni = hh * 60 + mm
+        const sFim = sIni + duracaoMin
+        // conflito se [sIni, sFim) sobrepõe qualquer [o.ini, o.fim)
+        return !ocupados.some(o => sIni < o.fim && sFim > o.ini)
+      }
 
       const dObj = new Date(dStr + 'T12:00:00')
       const fmt  = `${diasSemana[dObj.getDay()]} ${String(dObj.getDate()).padStart(2,'0')}/${String(dObj.getMonth()+1).padStart(2,'0')}`
 
-      return horariosBase.filter(h => !ocupSet.has(h)).map(h => ({
+      return horariosBase.filter(slotLivre).map(h => ({
         colaborador_id: col.id,
         barbeiro_nome:  col.nome,
         data_iso:       dStr,
@@ -1194,15 +1209,21 @@ async function fazerAgendamento(conversa, dados) {
       observacao:     `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
     }
 
-    // Verifica se o slot ainda está disponível (previne dupla marcação)
-    const { data: conflito } = await supabaseAdmin.from('agendamentos')
-      .select('id')
+    // Verifica se o slot ainda está disponível (previne dupla marcação).
+    // Checa SOBREPOSIÇÃO de intervalo com tudo do dia (agendado/bloqueado/etc),
+    // não só igualdade do horário de início — cobre bloqueios e serviços longos.
+    const { data: doDia } = await supabaseAdmin.from('agendamentos')
+      .select('data_hora_ini, data_hora_fim')
       .eq('colaborador_id', slot.colaborador_id)
-      .eq('data_hora_ini', ini.toISOString())
+      .gte('data_hora_ini', slot.data_iso + 'T00:00:00')
+      .lte('data_hora_ini', slot.data_iso + 'T23:59:59')
       .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
-      .limit(1)
-      .maybeSingle()
-    if (conflito) return { ok: false, erro: 'Este horário acabou de ser ocupado 😔 Precisa escolher outro.' }
+    const temConflito = (doDia||[]).some(a => {
+      const aIni = new Date(a.data_hora_ini).getTime()
+      const aFim = a.data_hora_fim ? new Date(a.data_hora_fim).getTime() : aIni + 30 * 60 * 1000
+      return ini.getTime() < aFim && fim.getTime() > aIni
+    })
+    if (temConflito) return { ok: false, erro: 'Este horário acabou de ser ocupado 😔 Precisa escolher outro.' }
 
     console.log('[fazerAgendamento] inserindo:', JSON.stringify(agendamento))
     const { data: ag, error } = await supabaseAdmin.from('agendamentos').insert(agendamento).select('id').single()
@@ -1290,7 +1311,7 @@ function nomearServico(raw) {
   return map[raw] || raw
 }
 function nomearUnidade(raw) {
-  const map = { 'timbaúva': 'Timbaúva', 'timbauva': 'Timbaúva', centro: 'Centro', sao_joao: 'São João', 'são joão': 'São João' }
+  const map = { 'timbaúva': 'Timbaúva', 'timbauva': 'Timbaúva', centro: 'Centro', sao_joao: 'São João', 'são joão': 'São João', 'buarque': 'São João', 'barbearia da buarque': 'São João' }
   return map[raw?.toLowerCase()] || raw
 }
 
