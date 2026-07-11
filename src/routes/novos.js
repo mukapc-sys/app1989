@@ -582,6 +582,79 @@ router.post('/cashback/resgatar', autenticar, async (req, res) => {
   }
 })
 
+// POST /cashback/definir-resgate — DEFINE o resgate de uma comanda ABERTA (item 2).
+// Diferente de /resgatar (que resgata uma vez e trava), esta rota ACERTA o resgate
+// pela DIFERENÇA: pode aumentar, diminuir ou zerar a qualquer momento, inclusive
+// numa comanda reaberta. Os pontos saem da carteira NA HORA que aplica.
+// body: { cliente_id, comanda_id, pontos }  (pontos = valor DESEJADO final, não delta)
+// Regras (revalidadas no servidor): múltiplo de 30, 150/produto, 600/comanda,
+// limitado pelo saldo (contando o que já estava resgatado nesta comanda).
+router.post('/cashback/definir-resgate', autenticar, async (req, res) => {
+  try {
+    const { cliente_id, comanda_id } = req.body || {}
+    if (!cliente_id || !comanda_id) return res.status(400).json({ erro: 'cliente_id e comanda_id são obrigatórios.' })
+
+    let pedido = parseInt(req.body && req.body.pontos) || 0
+    if (pedido < 0) pedido = 0
+    pedido = Math.floor(pedido / 30) * 30            // sempre múltiplo de 30 (30 pts = R$1)
+    if (pedido > 600) pedido = 600                   // teto por comanda: 600 pts (= R$20)
+
+    // Quanto já estava resgatado NESTA comanda (X). É o ponto de partida do ajuste.
+    const { data: cmd } = await supabaseAdmin.from('comandas')
+      .select('id, pontos_resgatados').eq('id', comanda_id).single()
+    if (!cmd) return res.status(404).json({ erro: 'Comanda não encontrada.' })
+    const jaResgatado = parseInt(cmd.pontos_resgatados) || 0
+
+    // Limite pelos PRODUTOS da comanda: min(150, valor_do_item_em_pts) por produto,
+    // somado, com teto de 600. (mesma regra do widget: 30 pts = R$1, máx 150/produto)
+    const { data: itens } = await supabaseAdmin.from('itens_comanda')
+      .select('tipo, valor_unit, quantidade').eq('comanda_id', comanda_id)
+    let limiteProdutos = 0
+    for (const it of (itens || [])) {
+      if (String(it.tipo || '').toLowerCase() === 'produto') {
+        const v = (parseFloat(it.valor_unit) || 0) * (parseInt(it.quantidade) || 1)
+        limiteProdutos += Math.min(150, Math.floor(v) * 30)
+      }
+    }
+    limiteProdutos = Math.min(limiteProdutos, 600)
+
+    // Saldo atual da carteira (S). O disponível REAL para este resgate é S + X,
+    // porque devolvemos o que já estava resgatado antes de aplicar o novo valor.
+    const { data: carteira } = await supabaseAdmin.from('carteira_pontos')
+      .select('id, saldo').eq('cliente_id', cliente_id).single()
+    const saldo = (carteira && carteira.saldo != null) ? carteira.saldo : 0
+    const disponivel = saldo + jaResgatado
+
+    // Valor final = pedido, cortado pelo limite de produtos E pelo disponível.
+    let novo = Math.min(pedido, limiteProdutos)
+    novo = Math.min(novo, Math.floor(disponivel / 30) * 30)
+    if (novo < 0) novo = 0
+
+    // Ajuste por diferença: delta sai da carteira (delta>0 debita, delta<0 devolve).
+    const delta = novo - jaResgatado
+
+    if (!carteira) {
+      // Sem carteira: só pode ficar em 0 (não há de onde debitar).
+      await supabaseAdmin.from('comandas').update({ pontos_resgatados: 0 }).eq('id', comanda_id)
+      return res.json({ pontos_resgatados: 0, saldo_restante: 0, limite_produtos: limiteProdutos })
+    }
+
+    const novoSaldo = saldo - delta   // = saldo - (novo - jaResgatado)
+    await supabaseAdmin.from('carteira_pontos').update({ saldo: Math.max(0, novoSaldo) }).eq('id', carteira.id)
+    await supabaseAdmin.from('comandas').update({ pontos_resgatados: novo }).eq('id', comanda_id)
+
+    return res.json({
+      pontos_resgatados: novo,
+      saldo_restante: Math.max(0, novoSaldo),
+      limite_produtos: limiteProdutos,
+      ajuste: delta
+    })
+  } catch (err) {
+    console.error('[cashback/definir-resgate]', err.message)
+    return res.status(500).json({ erro: 'Erro ao definir resgate de pontos' })
+  }
+})
+
 router.post('/cashback/creditar', autenticar, async (req, res) => {
   try {
     const { cliente_id, valor_servicos } = req.body
