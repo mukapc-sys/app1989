@@ -20,6 +20,48 @@ function normalizarForma(f) {
 }
 
 // ============================================================
+// ESTORNO DA COMANDA LIGADA A UM AGENDAMENTO (itens 5 + 9)
+// ------------------------------------------------------------
+// Reaproveita a MESMA lógica do POST /comandas/:id/estornar:
+//  - devolve os pontos resgatados (pontos_resgatados) à carteira do cliente
+//  - apaga a(s) comanda(s) ligada(s) ao agendamento (sai do faturamento)
+// É best-effort: se algo falhar aqui, o cancelamento/exclusão do agendamento
+// segue mesmo assim (não trava a ação principal do caixa).
+// Chamado quando um agendamento é APAGADO (DELETE) ou CANCELADO (PATCH status=cancelado).
+async function estornarComandasDoAgendamento(agendamentoId) {
+  if (!agendamentoId) return { estornadas: 0, pontos_devolvidos: 0 }
+  let estornadas = 0
+  let pontosDevolvidos = 0
+  try {
+    // Todas as comandas ligadas a este agendamento (aberta, finalizada, etc).
+    const { data: comandas } = await supabaseAdmin
+      .from('comandas')
+      .select('id, cliente_id, pontos_resgatados')
+      .eq('agendamento_id', agendamentoId)
+    if (!comandas || !comandas.length) return { estornadas: 0, pontos_devolvidos: 0 }
+
+    for (const c of comandas) {
+      // 1) devolve os pontos resgatados nesta comanda (se houver) antes de excluir
+      if (c.cliente_id && (c.pontos_resgatados || 0) > 0) {
+        const { data: cart } = await supabaseAdmin.from('carteira_pontos')
+          .select('id,saldo').eq('cliente_id', c.cliente_id).single()
+        if (cart) {
+          await supabaseAdmin.from('carteira_pontos')
+            .update({ saldo: (cart.saldo || 0) + c.pontos_resgatados }).eq('id', cart.id)
+          pontosDevolvidos += c.pontos_resgatados
+        }
+      }
+      // 2) apaga a comanda (tira do caixa e do faturamento)
+      const { error: eDel } = await supabaseAdmin.from('comandas').delete().eq('id', c.id)
+      if (!eDel) estornadas++
+    }
+  } catch (e) {
+    console.error('[estornarComandasDoAgendamento]', e.message)
+  }
+  return { estornadas, pontos_devolvidos: pontosDevolvidos }
+}
+
+// ============================================================
 // AUTORIZAÇÃO DO GERENTE — senha que libera ações sensíveis do caixa
 // ============================================================
 // O gestor (gerente/proprietário) logado define/atualiza a PRÓPRIA senha.
@@ -323,7 +365,7 @@ router.post('/colaboradores/:id/tempos-servico', autenticar, ADM_GER, async (req
     const { servico_id, duracao_min } = req.body
     const { data, error } = await supabaseAdmin.from('colaborador_servico_tempo')
       .upsert({ colaborador_id: req.params.id, servico_id, duracao_min, atualizado_em: new Date().toISOString() },
-               { onConflict: 'colaborador_id,servico_id' }).select().single()
+              { onConflict: 'colaborador_id,servico_id' }).select().single()
     if (error) throw error
     return res.json(data)
   } catch (err) {
@@ -663,12 +705,18 @@ router.post('/cashback/resgatar-produto', autenticar, async (req, res) => {
 // ============================================================
 
 // DELETE /agendamentos/:id — remover agendamento (bloqueio)
+// ITEM 9 + 5: antes de apagar o agendamento, estorna a comanda ligada
+// (devolve os pontos resgatados e tira a comanda do faturamento).
 router.delete('/agendamentos/:id', autenticar, async (req, res) => {
   try {
+    // Estorna a(s) comanda(s) ligada(s) ANTES de apagar o agendamento.
+    // Best-effort: não trava a exclusão se o estorno falhar.
+    const estorno = await estornarComandasDoAgendamento(req.params.id)
+
     const { error } = await supabaseAdmin
       .from('agendamentos').delete().eq('id', req.params.id)
     if (error) throw error
-    return res.status(200).json({ ok: true })
+    return res.status(200).json({ ok: true, comandas_estornadas: estorno.estornadas, pontos_devolvidos: estorno.pontos_devolvidos })
   } catch (err) {
     console.error('[DELETE agendamento]', err.message)
     return res.status(500).json({ erro: err.message })
@@ -676,18 +724,34 @@ router.delete('/agendamentos/:id', autenticar, async (req, res) => {
 })
 
 // PATCH /agendamentos/:id — atualizar status (cancelar, etc)
+// ITEM 9 + 5: quando o status vira "cancelado", estorna a comanda ligada
+// (devolve os pontos resgatados e tira a comanda do faturamento).
 router.patch('/agendamentos/:id', autenticar, async (req, res) => {
   try {
     const { status } = req.body
+
+    // Se está CANCELANDO o agendamento, estorna a comanda ligada primeiro.
+    // Best-effort: não trava o cancelamento se o estorno falhar.
+    let estorno = { estornadas: 0, pontos_devolvidos: 0 }
+    if (normalizarStatus(status) === 'cancelado') {
+      estorno = await estornarComandasDoAgendamento(req.params.id)
+    }
+
     const { data, error } = await supabaseAdmin
       .from('agendamentos').update({ status }).eq('id', req.params.id).select().single()
     if (error) throw error
-    return res.json(data)
+    return res.json({ ...data, comandas_estornadas: estorno.estornadas, pontos_devolvidos: estorno.pontos_devolvidos })
   } catch (err) {
     console.error('[PATCH agendamento]', err.message)
     return res.status(500).json({ erro: err.message })
   }
 })
+
+// Normaliza o status recebido para comparar "cancelado" com segurança
+// (aceita variações de acento/caixa: "Cancelado", "CANCELADO", etc).
+function normalizarStatus(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+}
 
 // POST /agendamentos/:id/reabrir-autorizado — reabre um atendimento concluído.
 // Gestor logado autoriza sozinho; caixa precisa da senha de autorização.
@@ -863,6 +927,7 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
           cliente_nome: ag.cliente_nome || null,
           colaborador_id: ag.colaborador_id, unidade_id: ag.unidade_id,
           status: 'finalizada', forma_pgto: normalizarForma(forma_pgto),
+          pagamentos: (Array.isArray(req.body.pagamentos) && req.body.pagamentos.length) ? req.body.pagamentos : null,
           subtotal, desconto, total,
           aberta_em: new Date().toISOString(), finalizada_em: new Date().toISOString(),
           observacao: 'Finalização de atendimento', criado_por: req.usuario.id
