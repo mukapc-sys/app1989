@@ -2,11 +2,9 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
-
 const ADMIN = exigirPerfil('proprietario', 'gerente')
 const { exigirTela, exigirFuncao } = require('./permissoes')
 const TELA_ESTOQUE = exigirTela('estoque')
-
 // resolve o "base" de um perfil (perfis novos herdam de um fixo)
 const PERFIS_FIXOS_CAD = ['proprietario','gerente','caixa','colaborador','funcionario','cliente']
 async function baseDoPerfilCad(perfil) {
@@ -16,9 +14,7 @@ async function baseDoPerfilCad(perfil) {
     return (data && data.base) || 'colaborador'
   } catch (e) { return 'colaborador' }
 }
-
 // ============ UNIDADES ============
-
 router.get('/unidades', autenticar, async (req, res) => {
   try {
     const u = req.usuario
@@ -35,14 +31,12 @@ router.get('/unidades', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar unidades' })
   }
 })
-
 router.post('/unidades', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
     const { nome, endereco, bairro, cidade, cep, telefone, email, horarios } = req.body
     const { data: unidade, error } = await supabaseAdmin
       .from('unidades').insert({ nome, endereco, bairro, cidade, cep, telefone, email }).select().single()
     if (error) throw error
-
     if (horarios && Array.isArray(horarios)) {
       const rows = horarios.map(h => ({ ...h, unidade_id: unidade.id }))
       await supabaseAdmin.from('horarios_unidade').insert(rows)
@@ -52,7 +46,6 @@ router.post('/unidades', autenticar, exigirPerfil('proprietario'), async (req, r
     return res.status(500).json({ erro: 'Erro ao criar unidade' })
   }
 })
-
 router.put('/unidades/:id', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
   try {
     // Gerente só edita a própria unidade
@@ -62,7 +55,6 @@ router.put('/unidades/:id', autenticar, exigirPerfil('proprietario', 'gerente'),
     const { horarios, ...campos } = req.body
     const { data, error } = await supabaseAdmin.from('unidades').update(campos).eq('id', req.params.id).select().single()
     if (error) throw error
-
     if (horarios && Array.isArray(horarios)) {
       await supabaseAdmin.from('horarios_unidade').delete().eq('unidade_id', req.params.id)
       const rows = horarios.map(h => ({ ...h, unidade_id: req.params.id }))
@@ -73,9 +65,7 @@ router.put('/unidades/:id', autenticar, exigirPerfil('proprietario', 'gerente'),
     return res.status(500).json({ erro: 'Erro ao atualizar unidade' })
   }
 })
-
 // ============ COLABORADORES ============
-
 router.get('/colaboradores', autenticar, async (req, res) => {
   try {
     const { unidade_id } = req.query
@@ -86,7 +76,6 @@ router.get('/colaboradores', autenticar, async (req, res) => {
       .eq('ativo', true)
       .in('perfil', ['colaborador','gerente'])   // só quem ATENDE (nunca o caixa)
       .order('nome')
-
     // Caixa e proprietário enxergam colaboradores de qualquer unidade (p/ agendar em todas).
     // Gerente e barbeiro ficam restritos à própria unidade.
     if (u.perfil === 'proprietario' || u.perfil === 'caixa') {
@@ -101,11 +90,9 @@ router.get('/colaboradores', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar colaboradores' })
   }
 })
-
 router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
     const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
-
     // Gerente: força a própria unidade e não pode criar proprietário
     let unidadeFinal = unidade_id
     let perfilFinal = perfil
@@ -113,9 +100,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
       unidadeFinal = req.usuario.unidade_id
       if (perfilFinal === 'proprietario') perfilFinal = 'colaborador'
     }
-
     const ehFuncionario = (perfilFinal === 'funcionario') || (await baseDoPerfilCad(perfilFinal) === 'funcionario')
-
     // Funcionário não comissionado NÃO tem login (sem user no Auth).
     let userId = null
     if (!ehFuncionario) {
@@ -125,7 +110,6 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
       if (authErr) throw authErr
       userId = authData.user.id
     }
-
     const registro = {
       user_id: userId, nome, whatsapp, cpf, data_nasc,
       perfil: perfilFinal, unidade_id: unidadeFinal, foto_url, foto_url_2,
@@ -133,13 +117,11 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
     }
     if (email) registro.email = email
     if (ehFuncionario) registro.salario = parseFloat(salario) || 0
-
     const { data: colab, error } = await supabaseAdmin
       .from('colaboradores')
       .insert(registro)
       .select().single()
     if (error) throw error
-
     // Vínculos com serviços
     if (servico_ids?.length) {
       const rows = servico_ids.map(s => ({ colaborador_id: colab.id, servico_id: s }))
@@ -151,11 +133,9 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
     return res.status(500).json({ erro: 'Erro ao criar colaborador' })
   }
 })
-
 router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
     const { servico_ids, senha_temp, ...campos } = req.body
-
     // Gerente: só edita colaborador da própria unidade, não muda de unidade nem vira proprietário
     if (req.usuario.perfil === 'gerente') {
       const { data: alvo } = await supabaseAdmin.from('colaboradores').select('unidade_id').eq('id', req.params.id).single()
@@ -165,10 +145,8 @@ router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'geren
       if (campos.unidade_id) campos.unidade_id = req.usuario.unidade_id
       if (campos.perfil === 'proprietario') delete campos.perfil
     }
-
     const { data, error } = await supabaseAdmin.from('colaboradores').update(campos).eq('id', req.params.id).select().single()
     if (error) throw error
-
     if (servico_ids) {
       await supabaseAdmin.from('colaborador_servicos').delete().eq('colaborador_id', req.params.id)
       if (servico_ids.length) {
@@ -181,9 +159,7 @@ router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'geren
     return res.status(500).json({ erro: 'Erro ao atualizar colaborador' })
   }
 })
-
 // ============ CLIENTES ============
-
 router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
     const { busca, q, unidade_id } = req.query
@@ -193,7 +169,6 @@ router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa
       .from('clientes')
       .select('id, nome, email, whatsapp, cpf, ativo, criado_em, colaborador_pref, unidade_pref')
       .order('nome').limit(lim)
-
     if (termo) {
       // Buscando por nome/telefone/cpf -> acha TODOS (inclusive inativos),
       // pra o operador nunca precisar recriar um cadastro que já existe.
@@ -202,7 +177,6 @@ router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa
       // Lista padrão (sem digitar nada) -> só ativos, pra não poluir.
       query = query.eq('ativo', true)
     }
-
     const { data, error } = await query
     if (error) throw error
     return res.json(data)
@@ -210,7 +184,6 @@ router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa
     return res.status(500).json({ erro: 'Erro ao buscar clientes' })
   }
 })
-
 router.get('/clientes/meu', autenticar, exigirPerfil('cliente'), async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -223,7 +196,6 @@ router.get('/clientes/meu', autenticar, exigirPerfil('cliente'), async (req, res
     return res.status(500).json({ erro: 'Erro ao buscar dados do cliente' })
   }
 })
-
 // GET /clientes/:id/plano — assinatura ativa de um cliente (para o atendimento/comanda)
 router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
@@ -234,10 +206,8 @@ router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','geren
     if (!assin || !assin.length) return res.json({ ativo: false })
     const a = assin[0]
     const plano = a.planos || {}
-
     const { data: ps } = await supabaseAdmin.from('plano_servicos')
       .select('servico_id, limite_mes, servicos(nome)').eq('plano_id', plano.id)
-
     const agora = new Date()
     const ini = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
     const { data: usados } = await supabaseAdmin.from('agendamentos')
@@ -245,7 +215,6 @@ router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','geren
       .eq('status', 'concluido').gte('data_hora_ini', ini)
     const cont = {}
     ;(usados || []).forEach(u => { cont[u.servico_id] = (cont[u.servico_id] || 0) + 1 })
-
     const servicos = (ps || []).map(x => ({
       nome: (x.servicos && x.servicos.nome) || 'Serviço',
       limite_mes: x.limite_mes,
@@ -263,7 +232,6 @@ router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','geren
     return res.status(500).json({ erro: 'Erro ao carregar plano do cliente' })
   }
 })
-
 router.put('/clientes/:id', autenticar, async (req, res) => {
   try {
     const u = req.usuario
@@ -280,7 +248,6 @@ router.put('/clientes/:id', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao atualizar cliente' })
   }
 })
-
 // GET /clientes/:id/situacao-plano — situação completa p/ a comanda (coroa, zerar, renovar)
 router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
@@ -293,13 +260,11 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     if (!assins || !assins.length) return res.json({ assinante: false })
     const a = assins[0]
     const plano = a.planos || {}
-
     // serviços cobertos pelo plano
     const { data: ps } = await supabaseAdmin.from('plano_servicos')
       .select('servico_id, servicos(nome)').eq('plano_id', plano.id)
     const servicos_cobertos = (ps || []).map(x => x.servico_id)
     const servicos_nomes = (ps || []).map(x => (x.servicos && x.servicos.nome) || '').filter(Boolean)
-
     // limites da semana (segunda 00:00 → próxima segunda) em horário de São Paulo (-03:00)
     const sp = new Date(Date.now() - 3 * 3600 * 1000)
     const dow = sp.getUTCDay()                       // 0=dom .. 6=sáb
@@ -307,7 +272,6 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     const monMid = Date.UTC(sp.getUTCFullYear(), sp.getUTCMonth(), sp.getUTCDate() - diffMon, 0, 0, 0)
     const ini = new Date(monMid + 3 * 3600 * 1000).toISOString()
     const fim = new Date(monMid + 3 * 3600 * 1000 + 7 * 24 * 3600 * 1000).toISOString()
-
     // visitas do plano já usadas nesta semana (itens marcados como 'plano')
     let visitas_usadas = 0
     try {
@@ -319,13 +283,11 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
         .ilike('tipo', '%plano%')
       visitas_usadas = (usados || []).length
     } catch (e) { visitas_usadas = 0 }
-
     const visitas_semana = plano.visitas_semana || 1
     const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
     const venceu = a.data_renovacao && String(a.data_renovacao).slice(0, 10) < hoje
     const em_dia = (a.status === 'ativa') && !venceu
     const pode_zerar = em_dia && (visitas_usadas < visitas_semana)
-
     // ITEM 7: fichas ACUMULAM e expiram em 90 dias (tabela fichas_plano).
     // Disponíveis = soma dos lotes válidos (não expirados) ainda com saldo.
     let fichas_disponiveis = 0
@@ -337,7 +299,6 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     // Plano vencido/inativo não dá direito a usar fichas no momento.
     if (!em_dia) fichas_disponiveis = 0
     const fichas_usadas = 0  // (compat: o saldo já vem líquido da tabela)
-
     return res.json({
       assinante: true,
       assinatura_id: a.id,
@@ -360,7 +321,6 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     return res.status(500).json({ erro: 'Erro ao carregar situação do plano' })
   }
 })
-
 // GET /clientes-assinantes-ids — ids E nomes dos clientes assinantes (p/ a coroa na agenda)
 // Retorna também quem está VENCIDO/SUSPENSO (p/ a bolinha vermelha ao lado da coroa).
 router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
@@ -379,14 +339,11 @@ router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','
     return res.json({ ids, nomes, ids_vencidos, nomes_vencidos })
   } catch (e) { return res.json({ ids: [], nomes: [], ids_vencidos: [], nomes_vencidos: [] }) }
 })
-
 // ============ SERVIÇOS ============
-
 router.get('/servicos', autenticar, async (req, res) => {
   try {
     const { colaborador_id } = req.query
     let query = supabaseAdmin.from('servicos').select('*').eq('ativo', true).order('nome')
-
     if (colaborador_id) {
       const { data: vinculos } = await supabaseAdmin
         .from('colaborador_servicos').select('servico_id').eq('colaborador_id', colaborador_id)
@@ -400,7 +357,6 @@ router.get('/servicos', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar serviços' })
   }
 })
-
 router.post('/servicos', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('servicos').insert(req.body).select().single()
@@ -410,7 +366,6 @@ router.post('/servicos', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao criar serviço' })
   }
 })
-
 router.put('/servicos/:id', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('servicos').update(req.body).eq('id', req.params.id).select().single()
@@ -420,9 +375,7 @@ router.put('/servicos/:id', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao atualizar serviço' })
   }
 })
-
 // ============ PRODUTOS ============
-
 router.get('/produtos', autenticar, async (req, res) => {
   try {
     const { categoria_id } = req.query
@@ -435,7 +388,6 @@ router.get('/produtos', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar produtos' })
   }
 })
-
 router.get('/produtos/por-barcode/:barcode', autenticar, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -446,7 +398,6 @@ router.get('/produtos/por-barcode/:barcode', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar produto' })
   }
 })
-
 router.post('/produtos', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('produtos').insert(req.body).select().single()
@@ -456,7 +407,6 @@ router.post('/produtos', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao criar produto' })
   }
 })
-
 router.put('/produtos/:id', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('produtos').update(req.body).eq('id', req.params.id).select().single()
@@ -466,9 +416,7 @@ router.put('/produtos/:id', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao atualizar produto' })
   }
 })
-
 // ============ ESTOQUE ============
-
 router.post('/estoque/entrada', autenticar, ADMIN, async (req, res) => {
   try {
     const { produto_id, quantidade, valor_unitario, observacao } = req.body
@@ -485,7 +433,6 @@ router.post('/estoque/entrada', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao registrar entrada' })
   }
 })
-
 // Lê todos os movimentos de uma unidade (paginado: passa do limite de 1000).
 async function _movimentosUnidade(unidade_id, produto_id) {
   const pageSize = 1000; let from = 0; let all = []
@@ -512,7 +459,6 @@ function _saldoPorProduto(movs) {
   }
   return s
 }
-
 // GET /estoque/saldo?unidade_id=xxx — saldo atual de cada produto ativo na unidade
 router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','caixa'), TELA_ESTOQUE, async (req, res) => {
   try {
@@ -538,7 +484,6 @@ router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','
     return res.status(500).json({ erro: 'Erro ao buscar saldo de estoque' })
   }
 })
-
 // POST /estoque/acerto — digita a CONTAGEM real e o sistema ajusta o saldo (só Proprietário)
 router.post('/estoque/acerto', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
@@ -563,9 +508,7 @@ router.post('/estoque/acerto', autenticar, exigirPerfil('proprietario'), async (
     return res.status(500).json({ erro: 'Erro ao registrar acerto' })
   }
 })
-
 // ============ PLANOS ============
-
 router.get('/planos', autenticar, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -578,7 +521,6 @@ router.get('/planos', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar planos' })
   }
 })
-
 router.post('/planos', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
     const { servico_ids, ...plano } = req.body
@@ -593,7 +535,6 @@ router.post('/planos', autenticar, exigirPerfil('proprietario'), async (req, res
     return res.status(500).json({ erro: 'Erro ao criar plano' })
   }
 })
-
 router.get('/assinaturas', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -606,14 +547,13 @@ router.get('/assinaturas', autenticar, exigirPerfil('proprietario','gerente','ca
     return res.status(500).json({ erro: 'Erro ao buscar assinaturas' })
   }
 })
-
 // PATCH /assinaturas/:id — edita campos da assinatura (plano, status, datas, titular)
 router.patch('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
-    // Caixa só pode vincular o barbeiro titular; gerente/proprietário editam tudo
-    const permitidos = req.usuario.perfil === 'caixa'
-      ? ['vendedor_id']
-      : ['plano_id','status','data_inicio','data_renovacao','vendedor_id','forma_pgto']
+    // ITEM 7 (corrigido): caixa, gerente e proprietário editam TODOS os campos.
+    // Antes o caixa só podia trocar o barbeiro titular e o resto (inclusive a
+    // data de renovação) era descartado silenciosamente — parecia que salvava.
+    const permitidos = ['plano_id','status','data_inicio','data_renovacao','vendedor_id','forma_pgto']
     const campos = {}
     for (const k of permitidos) if (k in req.body) campos[k] = (req.body[k] === '' ? null : req.body[k])
     if (Object.keys(campos).length === 0) {
@@ -628,7 +568,6 @@ router.patch('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerent
     return res.status(500).json({ erro: 'Erro ao atualizar assinatura' })
   }
 })
-
 // DELETE /assinaturas/:id — remove uma assinatura
 router.delete('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
@@ -639,7 +578,6 @@ router.delete('/assinaturas/:id', autenticar, exigirPerfil('proprietario','geren
     return res.status(500).json({ erro: 'Erro ao remover assinatura' })
   }
 })
-
 router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from('assinaturas').insert(req.body).select().single()
@@ -649,7 +587,6 @@ router.post('/assinaturas', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao criar assinatura' })
   }
 })
-
 // ============================================================
 // POST /assinaturas/cobrar — VENDE/ATIVA ou RENOVA um plano.
 //   - cria/renova a assinatura (vendedor_id = barbeiro responsável)
@@ -671,22 +608,18 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
     if (!plano_id) return res.status(400).json({ erro: 'Informe o plano.' })
     if (!vendedor_id) return res.status(400).json({ erro: 'Informe o barbeiro responsável da mensalidade.' })
     if (!forma_pgto) return res.status(400).json({ erro: 'Informe a forma de pagamento.' })
-
     const { data: plano } = await supabaseAdmin.from('planos').select('id, nome, valor_mensal, fichas_bar_mes').eq('id', plano_id).single()
     if (!plano) return res.status(404).json({ erro: 'Plano não encontrado.' })
     const valor = parseFloat(plano.valor_mensal) || 0
-
     const { data: cli } = await supabaseAdmin.from('clientes').select('id, unidade_pref').eq('id', cliente_id).single()
     const unidade_id = req.usuario.unidade_id || req.body.unidade_id || (cli && cli.unidade_pref) || null
     if (!unidade_id) return res.status(400).json({ erro: 'Não consegui identificar a unidade. Selecione a unidade.' })
-
     const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
     function maisUmMes(baseYMD) {
       const d = new Date(baseYMD + 'T12:00:00-03:00')
       d.setMonth(d.getMonth() + 1)
       return d.toISOString().slice(0, 10)
     }
-
     // ===== assinatura: renovar OU criar =====
     let assinatura, criouNova = false, antes = null
     if (assinatura_id) {
@@ -716,7 +649,6 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       if (eN) throw eN
       assinatura = nova; criouNova = true
     }
-
     // ===== ITEM 7: gera lote de fichas de bar (acumulam, validade 90 dias) =====
     try {
       const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
@@ -735,7 +667,6 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
         })
       }
     } catch (e) { console.error('[fichas-plano] gerar:', e.message) }
-
     // ===== comanda da mensalidade (finalizada) =====
     // Se sem_comanda=true, a mensalidade é cobrada noutra comanda (ex: no próprio
     // atendimento). Aqui só ativamos/renovamos a assinatura.
@@ -752,21 +683,18 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
         aberta_em: agora, observacao: 'Mensalidade de plano', criado_por: req.usuario.id
       }).select().single()
       if (eC) throw eC
-
       const { error: eI } = await supabaseAdmin.from('itens_comanda').insert({
         comanda_id: comanda.id, tipo: 'plano',
         descricao: 'Mensalidade — ' + plano.nome,
         quantidade: 1, valor_unit: valor, colaborador_id: vendedor_id
       })
       if (eI) throw eI
-
       const pagamentos = [{ forma: forma_pgto, valor: valor }]
       const { error: eF } = await supabaseAdmin.from('comandas').update({
         status: 'finalizada', forma_pgto, pagamentos,
         subtotal: valor, total: valor, desconto: 0, finalizada_em: agora
       }).eq('id', comanda.id)
       if (eF) throw eF
-
       return res.status(201).json({
         ok: true, assinatura, comanda_id: comanda.id, valor,
         plano: plano.nome, data_renovacao: assinatura.data_renovacao, renovou: !!assinatura_id
@@ -790,10 +718,8 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
     return res.status(500).json({ erro: 'Erro ao processar o plano. Nada foi cobrado. ' + (err.message || '') })
   }
 })
-
 // ============ FERIADOS ============
 // Horário especial 09h-18h (igual sábado). Cadastrados por gerente/proprietário.
-
 router.get('/feriados', autenticar, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -804,7 +730,6 @@ router.get('/feriados', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao listar feriados' })
   }
 })
-
 router.post('/feriados', autenticar, ADMIN, async (req, res) => {
   try {
     const { data, descricao, fechado, hora_abre, hora_fecha } = req.body || {}
@@ -827,7 +752,6 @@ router.post('/feriados', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao salvar feriado' })
   }
 })
-
 router.delete('/feriados/:id', autenticar, ADMIN, async (req, res) => {
   try {
     const { error } = await supabaseAdmin.from('feriados').delete().eq('id', req.params.id)
@@ -837,12 +761,9 @@ router.delete('/feriados/:id', autenticar, ADMIN, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao excluir feriado' })
   }
 })
-
 // ===================== PUSH EM MASSA (Fase 3) =====================
 const { enviarPushParaVarios, enviarPushParaTodos } = require('./publico')
-
 function _uniq(arr){ return [...new Set(arr.filter(Boolean))] }
-
 async function _fetchPaged(table, select, applyFilters){
   const pageSize = 1000; let from = 0; let all = []
   while (true) {
@@ -857,10 +778,8 @@ async function _fetchPaged(table, select, applyFilters){
   }
   return all
 }
-
 async function _resolverSegmento(segmento, valor){
   const doze = new Date(); doze.setMonth(doze.getMonth() - 12); const iniISO = doze.toISOString()
-
   if (segmento === 'assinantes') {
     const { data } = await supabaseAdmin.from('assinaturas').select('cliente_id').eq('status', 'ativa')
     return _uniq((data || []).map(x => x.cliente_id))
@@ -892,18 +811,15 @@ async function _resolverSegmento(segmento, valor){
   const cls = await _fetchPaged('clientes', 'id', q => q)
   return cls.map(c => c.id)
 }
-
 // POST /push-massa  { segmento, valor, titulo, mensagem, tambem_whatsapp }
 router.post('/push-massa', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
   try {
     const { segmento, valor, titulo, mensagem, tambem_whatsapp } = req.body
     if (!segmento || !mensagem) return res.status(400).json({ erro: 'Informe o segmento e a mensagem' })
-
     let ids = await _resolverSegmento(segmento, valor)
     ids = ids.slice(0, 50000)
     const ehTodos = (segmento === 'todos')
     if (!ehTodos && !ids.length) return res.json({ alcance: 0, enviados: 0, whatsapp: 0 })
-
     const payloadPush = {
       titulo: titulo || 'Barbearia 1989',
       corpo: mensagem,
@@ -913,7 +829,6 @@ router.post('/push-massa', autenticar, exigirPerfil('proprietario', 'gerente'), 
       ? await enviarPushParaTodos(payloadPush)
       : await enviarPushParaVarios(ids, payloadPush)
     const enviados = rPush.enviados
-
     let zap = 0
     if (tambem_whatsapp) {
       for (let i = 0; i < ids.length; i += 200) {
@@ -926,12 +841,10 @@ router.post('/push-massa', autenticar, exigirPerfil('proprietario', 'gerente'), 
         if (linhas.length) { await supabaseAdmin.from('notificacoes_whatsapp').insert(linhas); zap += linhas.length }
       }
     }
-
     return res.json({ alcance: ids.length, enviados, whatsapp: zap })
   } catch (err) {
     console.error('[push-massa]', err.message)
     return res.status(500).json({ erro: 'Erro ao enviar push em massa' })
   }
 })
-
 module.exports = router
