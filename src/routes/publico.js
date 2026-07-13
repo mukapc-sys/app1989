@@ -8,7 +8,6 @@ const router = express.Router()
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { supabaseAdmin } = require('../config/supabase')
-
 // ============================================================
 // Busca de cliente por telefone — normalização robusta.
 // Mesmo critério do sync do AppBarber (tira DDI 55, compara 11 dígitos).
@@ -35,7 +34,20 @@ async function acharClientePorTel(whatsapp, campos) {
   if (d2 && d2.length) return d2[0]
   return null
 }
-
+// ============================================================
+// "Cliente voltou" — reativa o cadastro.
+//
+// IMPORTANTE: `ativo` é uma ETIQUETA DE NEGÓCIO (cliente ausente da barbearia),
+// NÃO uma tranca de acesso. Usá-la para barrar login prendia ~30 mil clientes
+// importados do AppBarber do lado de fora: não entravam ("conta inativa") e não
+// conseguiam se cadastrar ("WhatsApp já cadastrado"). Beco sem saída.
+// Se o cliente entrou ou agendou, ele VOLTOU -> reativa.
+// ============================================================
+async function reativarCliente(cliente_id) {
+  try {
+    await supabaseAdmin.from('clientes').update({ ativo: true }).eq('id', cliente_id)
+  } catch (e) { /* não bloqueia o fluxo do cliente por causa disso */ }
+}
 // ---- Token do cliente (mesmo JWT_SECRET do sistema) ----
 // Horário de funcionamento da barbearia (minutos desde 00:00). Retorna null se fechado.
 //  Seg-Sex: 10h-20h · Sábado e feriados: 9h-18h · Domingo: fechado
@@ -51,7 +63,15 @@ function hmToMin(hm) {
   const p = String(hm || '').split(':'); const h = parseInt(p[0], 10) || 0; const m = parseInt(p[1], 10) || 0
   return h * 60 + m
 }
-
+// ============================================================
+// Status que OCUPAM o horário de um barbeiro.
+//
+// 'concluido' PRECISA estar aqui. Sem ele, um cliente atendido mais cedo
+// LIBERAVA o próprio horário: às 16h o barbeiro finalizava o atendimento das
+// 17h, e o app passava a oferecer as 17h para outro cliente — em cima do
+// mesmo horário. (Bug real, relatado em 13/07/2026.)
+// ============================================================
+const STATUS_OCUPA_HORARIO = ['agendado', 'confirmado', 'andamento', 'bloqueado', 'concluido']
 function tokenCliente(c) {
   return jwt.sign({ id: c.id, tipo: 'cliente', nome: c.nome }, process.env.JWT_SECRET, { expiresIn: '30d' })
 }
@@ -68,7 +88,6 @@ function autenticarCliente(req, res, next) {
     return res.status(401).json({ erro: 'Sessão expirada. Entre de novo.' })
   }
 }
-
 // ---- Realtime: avisa "agenda mudou" (broadcast, SEM dados de cliente) ----
 async function pingAgenda(unidade_id) {
   try {
@@ -82,7 +101,6 @@ async function pingAgenda(unidade_id) {
     })
   } catch (e) { console.error('[ping agenda]', e.message) }
 }
-
 // ---- WhatsApp: pronto para a Evolution API (no-op se não configurada) ----
 async function enviarWhatsApp(numero, texto) {
   try {
@@ -116,7 +134,6 @@ async function enviarWhatsApp(numero, texto) {
     return false
   }
 }
-
 // ============================================================
 // GET /publico/barbeiros — barbeiros ativos (com foto e unidade)
 // ============================================================
@@ -132,7 +149,6 @@ router.get('/barbeiros', async (_req, res) => {
     return res.status(500).json({ erro: 'Erro ao listar barbeiros' })
   }
 })
-
 // ============================================================
 // GET /publico/servicos?colaborador_id= — serviços do barbeiro (online)
 // Se o barbeiro não tiver serviços configurados, mostra todos os online.
@@ -140,13 +156,11 @@ router.get('/barbeiros', async (_req, res) => {
 router.get('/servicos', async (req, res) => {
   try {
     const { colaborador_id } = req.query
-
     // Todos os serviços ativos e disponíveis online
     const { data: todos, error } = await supabaseAdmin.from('servicos')
       .select('id,nome,duracao_min,valor,disponivel_online,ativo,restrito_barbeiro')
       .eq('ativo', true).eq('disponivel_online', true).order('nome')
     if (error) throw error
-
     // Vínculos do barbeiro escolhido (colaborador_servicos)
     let vinc = []
     if (colaborador_id) {
@@ -155,20 +169,16 @@ router.get('/servicos', async (req, res) => {
       vinc = (v || []).map(x => x.servico_id)
     }
     const vincSet = new Set(vinc)
-
     const lista     = todos || []
     const gerais    = lista.filter(s => !s.restrito_barbeiro)
     const restritos = lista.filter(s => s.restrito_barbeiro)
     const idsGerais = new Set(gerais.map(s => s.id))
-
     // Só aplica a "config de serviços do barbeiro" se ele tiver vínculo com algum serviço GERAL
     const temConfigGeral = colaborador_id && vinc.some(id => idsGerais.has(id))
     const gOut = temConfigGeral ? gerais.filter(s => vincSet.has(s.id)) : gerais
     // Serviço restrito só aparece se o barbeiro escolhido estiver vinculado a ele
     const rOut = colaborador_id ? restritos.filter(s => vincSet.has(s.id)) : []
-
     let result = gOut.concat(rOut).sort((a, b) => (a.nome || '').localeCompare(b.nome || ''))
-
     // tempo de cada serviço para ESTE barbeiro (sobrepõe a duração padrão)
     if (colaborador_id && result.length) {
       const { data: tempos } = await supabaseAdmin
@@ -183,7 +193,6 @@ router.get('/servicos', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao listar serviços' })
   }
 })
-
 // ============================================================
 // GET /publico/horarios?colaborador_id=&data=&duracao= — slots livres
 // ============================================================
@@ -195,12 +204,12 @@ router.get('/horarios', async (req, res) => {
     }
     const ini = new Date(data + 'T00:00:00-03:00').toISOString()
     const fim = new Date(data + 'T23:59:59-03:00').toISOString()
-
     const [{ data: ocupados }, { data: bloqueios }, { data: importados }, { data: feriados }] = await Promise.all([
       supabaseAdmin.from('agendamentos')
         .select('data_hora_ini, data_hora_fim')
         .eq('colaborador_id', colaborador_id)
-        .in('status', ['agendado', 'confirmado', 'andamento', 'bloqueado'])
+        // 'concluido' incluído: atendimento finalizado NÃO libera o horário.
+        .in('status', STATUS_OCUPA_HORARIO)
         .gte('data_hora_ini', ini).lte('data_hora_ini', fim),
       supabaseAdmin.from('bloqueios')
         .select('data_ini, data_fim')
@@ -215,7 +224,6 @@ router.get('/horarios', async (req, res) => {
       // feriados cadastrados nessa data (afetam o horário de funcionamento)
       supabaseAdmin.from('feriados').select('*').eq('data', data),
     ])
-
     // Horário de funcionamento do dia (feriado manda; senão, dia da semana)
     const fer = (feriados || [])[0]
     let hf
@@ -231,14 +239,12 @@ router.get('/horarios', async (req, res) => {
     const passo = 15
     const agora = new Date()
     const dur = parseInt(duracao) || 30
-
     const slots = []
     for (let min = inicio; min + dur <= fimDia; min += passo) {
       const hh = String(Math.floor(min / 60)).padStart(2, '0')
       const mm = String(min % 60).padStart(2, '0')
       const slotIni = new Date(`${data}T${hh}:${mm}:00-03:00`)
       const slotFim = new Date(slotIni.getTime() + dur * 60000)
-
       const ocupado = (ocupados || []).some(a => {
         const i = new Date(a.data_hora_ini), f = new Date(a.data_hora_fim)
         return slotIni < f && slotFim > i
@@ -252,7 +258,6 @@ router.get('/horarios', async (req, res) => {
         return slotIni < f && slotFim > i
       })
       const passou = slotIni < agora
-
       const hora = `${hh}:${mm}`
       slots.push({ hora, disponivel: !ocupado && !bloqueado && !importadoOcupa && !passou, data_hora: slotIni.toISOString() })
     }
@@ -262,7 +267,6 @@ router.get('/horarios', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar horários' })
   }
 })
-
 // ============================================================
 // POST /publico/agendar — cria o agendamento do cliente
 // body: { nome, whatsapp, colaborador_id, servico_id, data_hora }
@@ -273,7 +277,6 @@ router.post('/agendar', async (req, res) => {
     if (!nome || !whatsapp || !colaborador_id || !servico_id || !data_hora) {
       return res.status(400).json({ erro: 'Preencha nome, WhatsApp, barbeiro, serviço e horário' })
     }
-
     // Se o cliente está LOGADO, o token é a fonte da verdade do cliente_id.
     // (evita agendamento cair em cadastro duplicado e sumir do histórico)
     let clienteIdToken = null
@@ -285,21 +288,17 @@ router.post('/agendar', async (req, res) => {
         if (d.tipo === 'cliente') clienteIdToken = d.id
       }
     } catch (_) { /* token inválido -> segue por whatsapp */ }
-
     // barbeiro -> unidade
     const { data: col } = await supabaseAdmin.from('colaboradores')
       .select('id,unidade_id,nome,ativo').eq('id', colaborador_id).single()
     if (!col || !col.ativo) return res.status(400).json({ erro: 'Barbeiro indisponível' })
-
     // serviço -> duração/valor
     const { data: sv } = await supabaseAdmin.from('servicos')
       .select('id,nome,duracao_min,valor').eq('id', servico_id).single()
     if (!sv) return res.status(400).json({ erro: 'Serviço inválido' })
-
     const ini = new Date(data_hora)
     if (isNaN(ini.getTime())) return res.status(400).json({ erro: 'Horário inválido' })
     if (ini < new Date()) return res.status(400).json({ erro: 'Esse horário já passou' })
-
     // valida o horário de funcionamento (dia da semana + feriado), em horário de Brasília
     const _p = {}
     new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -323,12 +322,12 @@ router.post('/agendar', async (req, res) => {
     }
     const fim = new Date(ini)
     fim.setMinutes(fim.getMinutes() + (sv.duracao_min || 30))
-
     // evita dois clientes no mesmo horário do mesmo barbeiro (inclui bloqueios e importados)
+    // 'concluido' incluído: atendimento já finalizado continua ocupando o horário dele.
     const [{ data: conflito }, { data: confImport }] = await Promise.all([
       supabaseAdmin.from('agendamentos')
         .select('id').eq('colaborador_id', colaborador_id)
-        .in('status', ['agendado', 'confirmado', 'andamento', 'bloqueado'])
+        .in('status', STATUS_OCUPA_HORARIO)
         .lt('data_hora_ini', fim.toISOString()).gt('data_hora_fim', ini.toISOString()),
       supabaseAdmin.from('agenda_appbarber')
         .select('id').eq('colaborador_id', colaborador_id)
@@ -338,7 +337,6 @@ router.post('/agendar', async (req, res) => {
     if ((conflito && conflito.length) || (confImport && confImport.length)) {
       return res.status(409).json({ erro: 'Esse horário acabou de ser ocupado. Escolha outro, por favor.' })
     }
-
     // cliente: token (logado) tem prioridade; senão acha por WhatsApp; senão cria
     const tel = String(whatsapp).replace(/\D/g, '')
     let cliente_id = clienteIdToken || null
@@ -352,8 +350,10 @@ router.post('/agendar', async (req, res) => {
         .select('id').single()
       if (ec) throw ec
       cliente_id = novo.id
+    } else {
+      // Cliente marcou horário = ele VOLTOU. Tira a etiqueta de "ausente".
+      reativarCliente(cliente_id)
     }
-
     // cria o agendamento
     const { data: ag, error: ea } = await supabaseAdmin.from('agendamentos').insert({
       data_hora_ini: ini.toISOString(),
@@ -367,29 +367,24 @@ router.post('/agendar', async (req, res) => {
       servico_id,
     }).select('id').single()
     if (ea) throw ea
-
     // avisa as agendas abertas (Realtime) que algo mudou
     pingAgenda(col.unidade_id)
-
     // confirmação no WhatsApp (pronto p/ Evolution; não quebra se não tiver)
     const quando = ini.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' })
     const primeiro = String(nome).trim().split(' ')[0]
     enviarWhatsApp(tel, `Olá ${primeiro}! Seu horário na Barbearia 1989 está marcado: ${sv.nome} com ${col.nome} em ${quando}. Até já! ✂️`)
-
     // confirmação por push (se o cliente tiver notificações ativas no app)
     enviarPushParaCliente(cliente_id, {
       titulo: 'Agendamento confirmado ✂️',
       corpo: `${sv.nome} com ${col.nome} — ${quando}`,
       url: 'https://barbearia1989.com.br'
     }).catch(() => {})
-
     return res.json({ ok: true, agendamento_id: ag.id })
   } catch (e) {
     console.error('[publico/agendar]', e.message)
     return res.status(500).json({ erro: 'Erro ao agendar', detalhe: e.message })
   }
 })
-
 // ============================================================
 // GET /publico/meus-agendamentos — agendamentos do cliente
 // Usa o login (token) se houver; senão aceita ?whatsapp=
@@ -414,7 +409,6 @@ router.get('/meus-agendamentos', async (req, res) => {
       if (!cli) return res.json([])
       cliente_id = cli.id
     }
-
     // Busca os agendamentos SEM join embutido (evita erro de relação no Supabase).
     const { data: ags, error } = await supabaseAdmin.from('agendamentos')
       .select('id,data_hora_ini,data_hora_fim,status,valor,servico_id,colaborador_id,unidade_id')
@@ -424,7 +418,6 @@ router.get('/meus-agendamentos', async (req, res) => {
     if (error) throw error
     const lista = ags || []
     if (!lista.length) return res.json([])
-
     // Preenche nomes com buscas separadas (mesmo padrão do resto do sistema).
     const ids = (arr, campo) => [...new Set(arr.map(x => x[campo]).filter(Boolean))]
     const [svcs, cols, unis] = await Promise.all([
@@ -434,7 +427,6 @@ router.get('/meus-agendamentos', async (req, res) => {
     ])
     const mapa = (r) => Object.fromEntries(((r && r.data) || []).map(x => [x.id, x.nome]))
     const mSvc = mapa(svcs), mCol = mapa(cols), mUni = mapa(unis)
-
     const out = lista.map(a => ({
       id: a.id,
       data_hora_ini: a.data_hora_ini,
@@ -451,7 +443,6 @@ router.get('/meus-agendamentos', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao buscar agendamentos' })
   }
 })
-
 // ============================================================
 // GET /publico/meus-pontos — saldo de cashback do cliente logado
 // ============================================================
@@ -483,7 +474,6 @@ router.get('/meus-pontos', async (req, res) => {
     return res.json({ saldo: 0, total_acumulado: 0, expira_em: null })
   }
 })
-
 // ============================================================
 // POST /publico/cancelar-agendamento — cliente cancela o próprio horário
 // Regra: só até 15 minutos ANTES do horário marcado.
@@ -492,7 +482,6 @@ router.post('/cancelar-agendamento', async (req, res) => {
   try {
     const { agendamento_id } = req.body || {}
     if (!agendamento_id) return res.status(400).json({ erro: 'Agendamento não informado' })
-
     // identifica o cliente: token (logado) ou whatsapp
     let cliente_id = null
     const h = req.headers.authorization || ''
@@ -508,19 +497,16 @@ router.post('/cancelar-agendamento', async (req, res) => {
       if (!cli) return res.status(401).json({ erro: 'Não foi possível identificar você. Faça login.' })
       cliente_id = cli.id
     }
-
     // busca o agendamento e confere que é DESTE cliente
     const { data: ag } = await supabaseAdmin.from('agendamentos')
       .select('id,cliente_id,data_hora_ini,status,canal_origem')
       .eq('id', agendamento_id).single()
     if (!ag) return res.status(404).json({ erro: 'Agendamento não encontrado' })
     if (ag.cliente_id !== cliente_id) return res.status(403).json({ erro: 'Esse agendamento não é seu.' })
-
     // já cancelado/concluído?
     if (['cancelado', 'concluido', 'nao_compareceu'].includes(ag.status)) {
       return res.status(400).json({ erro: 'Esse agendamento não pode mais ser cancelado.' })
     }
-
     // REGRA DOS 15 MINUTOS
     const agora = new Date()
     const inicio = new Date(ag.data_hora_ini)
@@ -528,19 +514,16 @@ router.post('/cancelar-agendamento', async (req, res) => {
     if (agora > limite) {
       return res.status(400).json({ erro: 'O prazo para cancelar (até 15 minutos antes) já passou. Fale com a barbearia.' })
     }
-
     // cancela
     const { error: eu } = await supabaseAdmin.from('agendamentos')
       .update({ status: 'cancelado' }).eq('id', agendamento_id)
     if (eu) throw eu
-
     return res.json({ ok: true })
   } catch (e) {
     console.error('[publico/cancelar-agendamento]', e.message)
     return res.status(500).json({ erro: 'Erro ao cancelar' })
   }
 })
-
 // ============================================================
 // POST /publico/registrar — cria conta do cliente (nome, whatsapp, senha)
 // ============================================================
@@ -553,9 +536,7 @@ router.post('/registrar', async (req, res) => {
     const tel = String(whatsapp).replace(/\D/g, '')
     if (tel.length < 10) return res.status(400).json({ erro: 'WhatsApp inválido (use DDD + número)' })
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ erro: 'Digite um e-mail válido' })
-
     const hash = bcrypt.hashSync(String(senha), 10)
-
     // O e-mail já pertence a OUTRO cadastro? (respeita a unicidade do banco)
     // Se sim, não gravamos no campo email (guardamos em emails_extras) pra não quebrar.
     let emailLivre = true
@@ -564,16 +545,16 @@ router.post('/registrar', async (req, res) => {
         .select('id').ilike('email', email).limit(1)
       if (donoEmail && donoEmail.length) emailLivre = false
     } catch (_) {}
-
     // já existe um cliente com esse WhatsApp? (normalizado — casa com importados do AppBarber)
     const cliAchado = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash,email,emails_extras')
-
     let cli
     if (cliAchado) {
       cli = cliAchado
       if (cli.senha_hash) return res.status(409).json({ erro: 'Já existe uma conta com esse WhatsApp. Faça login.' })
-      // cliente já existia (importado do AppBarber ou criou agendando) e ainda não tinha senha -> define agora
-      const upd = { nome: String(nome).trim(), senha_hash: hash }
+      // Cliente já existia (importado do AppBarber ou criado ao agendar) e ainda não tinha
+      // senha -> ele ASSUME o cadastro: mantém histórico, pontos e agendamentos.
+      // ativo: true -> se estava marcado como ausente, voltou.
+      const upd = { nome: String(nome).trim(), senha_hash: hash, ativo: true }
       // e-mail: se o campo principal está vazio e o e-mail está livre, grava nele;
       // senão, guarda em emails_extras (sem duplicar) pra não perder o dado.
       if (emailLivre && (!cli.email || cli.email === '')) {
@@ -603,7 +584,6 @@ router.post('/registrar', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao criar conta' })
   }
 })
-
 // ============================================================
 // POST /publico/login — entra com WhatsApp + senha
 // ============================================================
@@ -613,7 +593,6 @@ router.post('/login', async (req, res) => {
     const bruto = String((req.body && (req.body.identificador || req.body.whatsapp || req.body.email)) || '').trim()
     const senha = req.body && req.body.senha
     if (!bruto || !senha) return res.status(400).json({ erro: 'Informe e-mail ou WhatsApp e a senha' })
-
     const ehEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bruto)
     let cli = null
     if (ehEmail) {
@@ -629,18 +608,22 @@ router.post('/login', async (req, res) => {
       if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
       cli = await acharClientePorTel(bruto, 'id,nome,whatsapp,senha_hash,ativo')
     }
-
     if (!cli || !cli.senha_hash) return res.status(401).json({ erro: 'Conta não encontrada. Crie uma conta.' })
-    if (cli.ativo === false) return res.status(401).json({ erro: 'Conta inativa. Fale com a barbearia.' })
     if (!bcrypt.compareSync(String(senha), cli.senha_hash)) return res.status(401).json({ erro: 'E-mail/WhatsApp ou senha incorretos' })
-
+    // ⚠️ NÃO barrar por `ativo`.
+    // `ativo = false` é só a ETIQUETA de "cliente ausente da barbearia" — controle interno.
+    // Antes, esta rota devolvia "Conta inativa. Fale com a barbearia." e o cliente ficava
+    // preso: não entrava, e ao tentar se cadastrar batia em "WhatsApp já cadastrado".
+    // Isso trancava ~30 mil clientes importados do AppBarber do lado de fora — justamente
+    // os ausentes que a barbearia quer de volta.
+    // Entrou com a senha certa = é ele, e voltou. Reativa.
+    if (cli.ativo === false) reativarCliente(cli.id)
     return res.json({ token: tokenCliente(cli), cliente: { id: cli.id, nome: cli.nome, whatsapp: cli.whatsapp } })
   } catch (e) {
     console.error('[publico/login]', e.message)
     return res.status(500).json({ erro: 'Erro ao entrar' })
   }
 })
-
 // ============================================================
 // POST /publico/senha/esqueci — gera um código e envia pelo WhatsApp
 // ============================================================
@@ -649,9 +632,7 @@ router.post('/senha/esqueci', async (req, res) => {
     const { whatsapp } = req.body || {}
     const tel = String(whatsapp || '').replace(/\D/g, '')
     if (tel.length < 10) return res.status(400).json({ erro: 'Informe o WhatsApp com DDD' })
-
     const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash')
-
     // Só envia se existir uma conta com senha. Mesmo assim, responde sempre "ok"
     // para não revelar se o número tem conta ou não.
     if (cli && cli.senha_hash) {
@@ -659,7 +640,6 @@ router.post('/senha/esqueci', async (req, res) => {
       const expira = new Date(Date.now() + 10 * 60 * 1000).toISOString()  // 10 min
       await supabaseAdmin.from('clientes')
         .update({ reset_codigo: codigo, reset_expira: expira }).eq('id', cli.id)
-
       const numero = '55' + String(cli.whatsapp || tel).replace(/\D/g, '')
       await supabaseAdmin.from('notificacoes_whatsapp').insert({
         destinatario: numero,
@@ -674,7 +654,6 @@ router.post('/senha/esqueci', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao enviar o código' })
   }
 })
-
 // ============================================================
 // POST /publico/senha/redefinir — confere o código e troca a senha
 // ============================================================
@@ -685,27 +664,24 @@ router.post('/senha/redefinir', async (req, res) => {
     const cod = String(codigo || '').replace(/\D/g, '')
     if (tel.length < 10 || !cod) return res.status(400).json({ erro: 'Informe o WhatsApp e o código' })
     if (String(senha || '').length < 4) return res.status(400).json({ erro: 'A nova senha precisa de pelo menos 4 caracteres' })
-
     const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,reset_codigo,reset_expira')
     if (!cli || !cli.reset_codigo) return res.status(400).json({ erro: 'Código inválido. Peça um novo.' })
     if (cli.reset_expira && new Date(cli.reset_expira).getTime() < Date.now()) {
       return res.status(400).json({ erro: 'Código expirado. Peça um novo.' })
     }
     if (String(cli.reset_codigo) !== cod) return res.status(400).json({ erro: 'Código incorreto.' })
-
     const hash = bcrypt.hashSync(String(senha), 10)
+    // redefiniu a senha e vai entrar -> também conta como "voltou"
     const { data: up, error: eu } = await supabaseAdmin.from('clientes')
-      .update({ senha_hash: hash, reset_codigo: null, reset_expira: null }).eq('id', cli.id)
+      .update({ senha_hash: hash, reset_codigo: null, reset_expira: null, ativo: true }).eq('id', cli.id)
       .select('id,nome,whatsapp').single()
     if (eu) throw eu
-
     return res.json({ token: tokenCliente(up), cliente: { id: up.id, nome: up.nome, whatsapp: up.whatsapp } })
   } catch (e) {
     console.error('[senha/redefinir]', e.message)
     return res.status(500).json({ erro: 'Erro ao redefinir a senha' })
   }
 })
-
 // ============================================================
 // GET /publico/eu — dados do cliente logado (perfil)
 // ============================================================
@@ -720,7 +696,6 @@ router.get('/eu', autenticarCliente, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao carregar perfil' })
   }
 })
-
 // ============================================================
 // PUT /publico/eu — atualiza o nome do cliente
 // ============================================================
@@ -738,7 +713,6 @@ router.put('/eu', autenticarCliente, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao salvar' })
   }
 })
-
 // ============================================================
 // GET /publico/meu-plano — assinatura ativa do cliente + uso do mês
 // ============================================================
@@ -751,11 +725,9 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
     if (!assin || !assin.length) return res.json({ ativo: false })
     const a = assin[0]
     const plano = a.planos || {}
-
     // serviços incluídos no plano + limite
     const { data: ps } = await supabaseAdmin.from('plano_servicos')
       .select('servico_id, limite_mes, servicos(nome)').eq('plano_id', plano.id)
-
     // uso do mês (agendamentos concluídos deste cliente neste mês)
     const agora = new Date()
     const ini = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
@@ -764,13 +736,11 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
       .eq('status', 'concluido').gte('data_hora_ini', ini)
     const cont = {}
     ;(usados || []).forEach(u => { cont[u.servico_id] = (cont[u.servico_id] || 0) + 1 })
-
     const servicos = (ps || []).map(x => ({
       nome: (x.servicos && x.servicos.nome) || 'Serviço',
       limite_mes: x.limite_mes,
       usado: cont[x.servico_id] || 0,
     }))
-
     // FICHAS DE BAR: disponíveis (acumulam, expiram em 90 dias) + validade do próximo lote
     let fichas_disponiveis = 0
     try {
@@ -789,7 +759,6 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
       const loteComSaldo = (lotes || []).find(l => ((l.quantidade || 0) - (l.usadas || 0)) > 0)
       if (loteComSaldo) fichas_validade = loteComSaldo.expira_em
     } catch (_) {}
-
     const barb = a.colaboradores || null
     const barbeiro = barb ? { id: barb.id, nome: barb.nome } : null
     const unidade = (barb && barb.unidades) ? { id: barb.unidades.id, nome: barb.unidades.nome } : null
@@ -806,7 +775,6 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao carregar plano' })
   }
 })
-
 // ============================================================
 //  PUSH NOTIFICATIONS — Fase 1 (base)
 //  Rotas: /publico/push/chave, /push/inscrever, /push/remover, /push/teste
@@ -829,7 +797,6 @@ try {
 } catch (e) {
   console.warn('[push] biblioteca web-push ainda não instalada:', e.message)
 }
-
 // Envia um push para TODOS os aparelhos ativos de um cliente.
 // Reutilizado nas próximas fases (lembretes automáticos e massa).
 async function enviarPushParaCliente(cliente_id, payload) {
@@ -858,13 +825,11 @@ async function enviarPushParaCliente(cliente_id, payload) {
   }
   return { enviados, falhas }
 }
-
 // Envia o MESMO push para vários clientes de uma vez (rápido: busca as inscrições
 // em lote em vez de uma consulta por cliente). Usado no push em massa.
 async function enviarPushParaVarios(clienteIds, payload) {
   if (!webpush || !process.env.VAPID_PUBLIC) return { enviados: 0, falhas: 0, aparelhos: 0 }
   if (!clienteIds || !clienteIds.length) return { enviados: 0, falhas: 0, aparelhos: 0 }
-
   let subs = []
   for (let i = 0; i < clienteIds.length; i += 300) {
     const parte = clienteIds.slice(i, i + 300)
@@ -873,7 +838,6 @@ async function enviarPushParaVarios(clienteIds, payload) {
       .eq('ativo', true).in('cliente_id', parte)
     if (data) subs = subs.concat(data)
   }
-
   const payloadStr = JSON.stringify(payload)
   let enviados = 0, falhas = 0
   for (let i = 0; i < subs.length; i += 50) {
@@ -892,7 +856,6 @@ async function enviarPushParaVarios(clienteIds, payload) {
   }
   return { enviados, falhas, aparelhos: subs.length }
 }
-
 // Envia o MESMO push para TODOS os aparelhos com notificação ativa
 // (não depende da lista de clientes nem de nenhum corte). Usado no "Todos".
 async function enviarPushParaTodos(payload) {
@@ -927,13 +890,11 @@ async function enviarPushParaTodos(payload) {
   }
   return { enviados, falhas, aparelhos: subs.length }
 }
-
 // Chave pública — o app usa pra se inscrever (não é segredo)
 router.get('/push/chave', (_req, res) => {
   if (!process.env.VAPID_PUBLIC) return res.status(503).json({ erro: 'Push não configurado' })
   res.json({ publicKey: process.env.VAPID_PUBLIC })
 })
-
 // Salva (ou atualiza) a inscrição do aparelho do cliente logado
 router.post('/push/inscrever', autenticarCliente, async (req, res) => {
   try {
@@ -956,7 +917,6 @@ router.post('/push/inscrever', autenticarCliente, async (req, res) => {
     res.status(500).json({ erro: 'Erro ao salvar inscrição' })
   }
 })
-
 // Remove/desativa a inscrição (quando o cliente desliga as notificações)
 router.post('/push/remover', autenticarCliente, async (req, res) => {
   try {
@@ -971,7 +931,6 @@ router.post('/push/remover', autenticarCliente, async (req, res) => {
     res.status(500).json({ erro: 'Erro ao remover' })
   }
 })
-
 // Envia um push de TESTE para o próprio cliente (confere se está tudo certo)
 router.post('/push/teste', autenticarCliente, async (req, res) => {
   try {
@@ -990,7 +949,6 @@ router.post('/push/teste', autenticarCliente, async (req, res) => {
     res.status(500).json({ erro: 'Erro ao enviar teste' })
   }
 })
-
 module.exports = router
 module.exports.enviarPushParaCliente = enviarPushParaCliente
 module.exports.enviarPushParaVarios = enviarPushParaVarios
