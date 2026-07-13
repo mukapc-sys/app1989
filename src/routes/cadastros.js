@@ -325,15 +325,26 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
 // Retorna também quem está VENCIDO/SUSPENSO (p/ a bolinha vermelha ao lado da coroa).
 router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
+    // CORREÇÃO: "vencido" tem que olhar a DATA de renovação, não só o campo status.
+    // O status não vira 'vencida' sozinho quando a data passa, então assinaturas
+    // com status='ativa' e data_renovacao no passado apareciam como em dia (coroa
+    // sem a bolinha vermelha). Agora usa o mesmo critério da comanda (situacao-plano).
+    const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
     const { data } = await supabaseAdmin.from('assinaturas')
-      .select('cliente_id, status, clientes(nome)').in('status', ['ativa','vencida','suspensa'])
+      .select('cliente_id, status, data_renovacao, clientes(nome)').in('status', ['ativa','vencida','suspensa'])
     const linhas = data || []
+    // Em dia = status 'ativa' E ainda não passou da data de renovação.
+    // Sem data cadastrada: não marca como vencido (evita bolinha vermelha errada).
+    function estaEmDia(a) {
+      if (a.status !== 'ativa') return false
+      if (!a.data_renovacao) return true
+      return String(a.data_renovacao).slice(0, 10) >= hoje
+    }
     const ids = Array.from(new Set(linhas.map(a => a.cliente_id).filter(Boolean)))
     const nomes = Array.from(new Set(linhas.map(a => a.clientes && a.clientes.nome).filter(Boolean)))
-    // Vencidos = quem NÃO tem nenhuma assinatura 'ativa' (só vencida/suspensa).
-    // Um cliente pode ter mais de uma linha; se tiver ao menos uma ativa, conta como ativo.
-    const ativosSet = new Set(linhas.filter(a => a.status === 'ativa').map(a => a.cliente_id))
-    const vencidos = linhas.filter(a => a.status !== 'ativa' && !ativosSet.has(a.cliente_id))
+    // Um cliente pode ter mais de uma linha; se ao menos uma estiver EM DIA, ele não é vencido.
+    const emDiaSet = new Set(linhas.filter(estaEmDia).map(a => a.cliente_id))
+    const vencidos = linhas.filter(a => !estaEmDia(a) && !emDiaSet.has(a.cliente_id))
     const ids_vencidos = Array.from(new Set(vencidos.map(a => a.cliente_id).filter(Boolean)))
     const nomes_vencidos = Array.from(new Set(vencidos.map(a => a.clientes && a.clientes.nome).filter(Boolean)))
     return res.json({ ids, nomes, ids_vencidos, nomes_vencidos })
