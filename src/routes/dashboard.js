@@ -3,10 +3,15 @@ const router  = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { calcularComissaoFaixa, limitesMes } = require('./comissao-faixa')
-
 // ============================================================
-// GET /dashboard/metricas
-// Retorna todos os dados do dashboard de acordo com o perfil
+// GET /dashboard/metricas[?data=AAAA-MM-DD]
+// Retorna todos os dados do dashboard de acordo com o perfil.
+//
+// ?data= (opcional): dia a ser analisado. Sem ela, usa HOJE.
+// Serve para os cards do topo navegarem por dia (setinhas / calendário),
+// sem mexer na agenda — que tem o seletor de data dela.
+// Só as métricas DO DIA seguem essa data. O que é do mês (comissões do mês,
+// top clientes, desempenho do mês) continua sendo do mês corrente.
 // ============================================================
 router.get('/dashboard/metricas', autenticar, async (req, res) => {
   try {
@@ -15,19 +20,20 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     const anoHoje = agora.toLocaleString('en-CA', { timeZone: 'America/Sao_Paulo' }).split(',')[0]
     const inicioHoje = anoHoje + 'T00:00:00-03:00'
     const fimHoje    = anoHoje + 'T23:59:59-03:00'
-    const inicioMes  = anoHoje.slice(0,7) + '-01T00:00:00-03:00' 
-
+    const inicioMes  = anoHoje.slice(0,7) + '-01T00:00:00-03:00'
+    // Dia selecionado nos cards (padrão: hoje). Formato AAAA-MM-DD.
+    const dataSel   = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.data || '')) ? String(req.query.data) : anoHoje
+    const inicioDia = dataSel + 'T00:00:00-03:00'
+    const fimDia    = dataSel + 'T23:59:59-03:00'
+    const ehHoje    = (dataSel === anoHoje)
     // Busca colaborador logado — tenta por user_id (Supabase Auth) ou id direto
-    console.log('[dashboard] usuario:', JSON.stringify(usuario))
     let colab = null
-    
     // Tenta pelo user_id do Supabase Auth
     const { data: c1 } = await supabaseAdmin
       .from('colaboradores')
       .select('id, nome, perfil, unidade_id, comissao_pct, unidades(id, nome)')
       .eq('user_id', usuario.id)
       .single()
-    
     if (c1) {
       colab = c1
     } else {
@@ -39,66 +45,52 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
         .single()
       colab = c2
     }
-
     if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
-
     const perfil     = colab.perfil
     const unidade_id = colab.unidade_id
-    const result     = { perfil, colaborador: colab }
-
-    // ---- Métricas de agendamentos ----
+    const result     = { perfil, colaborador: colab, data: dataSel, eh_hoje: ehHoje }
+    // ---- Métricas de agendamentos (DO DIA SELECIONADO) ----
     const buildMetricas = async (uid) => {
-      // Agendamentos hoje
+      // Agendamentos do dia
       let qAgend = supabaseAdmin.from('agendamentos')
         .select('id, status, valor, colaborador_id, data_hora_ini')
-        .gte('data_hora_ini', inicioHoje)
-        .lte('data_hora_ini', fimHoje)
+        .gte('data_hora_ini', inicioDia)
+        .lte('data_hora_ini', fimDia)
         .not('status', 'in', '("cancelado","bloqueado")')
       if (uid) qAgend = qAgend.eq('unidade_id', uid)
       const { data: agends } = await qAgend
-
       const total = agends?.filter(a => ['agendado','confirmado','concluido','nao_compareceu'].includes(a.status)).length || 0
       const finalizados = agends?.filter(a => a.status === 'concluido').length || 0
       const pendentes   = agends?.filter(a => ['agendado','confirmado'].includes(a.status)).length || 0
       const faturamento = agends?.filter(a => a.status === 'concluido').reduce((s,a) => s + (parseFloat(a.valor)||0), 0) || 0
-
       // ---- Importados do AppBarber que AINDA NÃO viraram agendamento de verdade ----
       // (agendamento_id IS NULL evita contar 2x quando já foi finalizado no sistema)
       let qAB = supabaseAdmin.from('agenda_appbarber')
         .select('status, valor, inicio')
         .eq('tipo', 'agendamento')
         .is('agendamento_id', null)
-        .gte('inicio', inicioHoje).lte('inicio', fimHoje)
+        .gte('inicio', inicioDia).lte('inicio', fimDia)
       if (uid) qAB = qAB.eq('unidade_id', uid)
       const { data: abrows } = await qAB
       const abValidos     = (abrows || []).filter(a => ['agendado','realizado'].includes(a.status))
       const abFinalizados = abValidos.filter(a => a.status === 'realizado').length
       const abPendentes   = abValidos.filter(a => a.status === 'agendado').length
       const abFaturamento = abValidos.filter(a => a.status === 'realizado').reduce((s,a) => s + (parseFloat(a.valor)||0), 0)
-
       const totalAll       = total + abValidos.length
       const finalizadosAll = finalizados + abFinalizados
       const pendentesAll   = pendentes + abPendentes
       const faturamentoAll = faturamento + abFaturamento
       const ticket         = finalizadosAll > 0 ? faturamentoAll / finalizadosAll : 0
-
-      // Clientes a reativar (sem visita há +15 dias)
-      let qReativar = supabaseAdmin.from('clientes').select('id', { count: 'exact', head: true })
-        .lt('ultima_visita', new Date(Date.now() - 15*24*60*60*1000).toISOString().split('T')[0])
-      if (uid) qReativar = qReativar.eq('unidade_pref', uid)
-      const { count: reativar } = await qReativar
-
+      // (o card "A reativar" foi removido do dashboard — a consulta saiu junto)
       return {
         total: totalAll,
         finalizados: finalizadosAll,
         pendentes: pendentesAll,
         faturamento: faturamentoAll.toFixed(2),
         faturamento_appbarber: abFaturamento.toFixed(2), // sinal: parte já paga no AppBarber (não entra no caixa do sistema)
-        ticket: ticket.toFixed(2),
-        reativar: reativar || 0
+        ticket: ticket.toFixed(2)
       }
     }
-
     if (perfil === 'proprietario') {
       // Busca as 3 unidades
       const { data: unidades } = await supabaseAdmin.from('unidades').select('id, nome').order('nome')
@@ -110,8 +102,9 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     } else {
       result.metricas = await buildMetricas(unidade_id)
     }
-
     // ---- Agenda do dia ----
+    // Continua sendo a de HOJE: a agenda tem o seletor de data dela
+    // (rota /dashboard/agenda-dia). Os cards navegam sem mexer nela.
     let qAgenda = supabaseAdmin
       .from('agendamentos')
       .select('id, data_hora_ini, data_hora_fim, status, valor, clientes(id, nome, data_nasc), servicos(nome), colaboradores(id, nome, unidade_id, unidades(nome))')
@@ -119,17 +112,14 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       .lte('data_hora_ini', fimHoje)
       .not('status', 'eq', 'cancelado')
       .order('data_hora_ini')
-
     if (perfil === 'colaborador') {
       qAgenda = qAgenda.eq('colaborador_id', colab.id)
     } else if (perfil === 'gerente' && unidade_id) {
       qAgenda = qAgenda.eq('unidade_id', unidade_id)
     }
     // proprietario e caixa: veem todos sem filtro de unidade
-
     const { data: agenda } = await qAgenda
     result.agenda = agenda || []
-
     // ---- Aniversariantes hoje ----
     const diaHoje = new Date().toISOString().slice(5,10) // MM-DD
     let qAniv = supabaseAdmin.from('clientes')
@@ -138,10 +128,8 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     if (unidade_id && perfil !== 'proprietario') qAniv = qAniv.eq('unidade_pref', unidade_id)
     const { data: aniversariantes } = await qAniv
     result.aniversariantes = aniversariantes || []
-
     // ---- Alertas ----
     const alertas = []
-
     // Planos vencendo em 10 dias
     const em10 = new Date()
     em10.setDate(em10.getDate() + 10)
@@ -154,9 +142,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     if (planosVenc?.length) {
       alertas.push({ tipo: 'gold', texto: `${planosVenc.length} plano(s) vencem em 10 dias`, sub: planosVenc.map(p => p.clientes?.nome).join(' · ') })
     }
-
     result.alertas = alertas
-
     // ---- Comissões do MÊS por faixa (mesmo motor do Caixa e do Relatório) ----
     if (['proprietario','gerente'].includes(perfil)) {
       try {
@@ -176,12 +162,12 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
         const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: colab.unidade_id || null })
         const minha = (fx.linhas || []).find(l => l.colaborador_id === colab.id) ||
           { comissao_total: 0, servico_pct: 40, produto_pct: 10, servico_total: 0, produto_total: 0, produto_unidades: 0 }
-        // estimativa de hoje: receita de hoje × a faixa do mês
-        const fxHoje = await calcularComissaoFaixa({ ini: inicioHoje, fim: fimHoje, unidade_id: colab.unidade_id || null })
-        const h = (fxHoje.linhas || []).find(l => l.colaborador_id === colab.id) || { servico_total: 0, produto_total: 0 }
-        const hojeVal = h.servico_total * minha.servico_pct / 100 + h.produto_total * minha.produto_pct / 100
+        // comissão do DIA SELECIONADO: receita do dia × a faixa do mês
+        const fxDia = await calcularComissaoFaixa({ ini: inicioDia, fim: fimDia, unidade_id: colab.unidade_id || null })
+        const h = (fxDia.linhas || []).find(l => l.colaborador_id === colab.id) || { servico_total: 0, produto_total: 0 }
+        const diaVal = h.servico_total * minha.servico_pct / 100 + h.produto_total * minha.produto_pct / 100
         result.comissoes = {
-          hoje: hojeVal.toFixed(2),
+          hoje: diaVal.toFixed(2),   // "hoje" = dia selecionado nos cards
           mes: Number(minha.comissao_total).toFixed(2),
           pct_servico: minha.servico_pct,
           servico_total: minha.servico_total,
@@ -190,8 +176,7 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
         }
       } catch (e) { console.error('[dashboard comissoes-faixa colab]', e.message); result.comissoes = { hoje: '0.00', mes: '0.00', pct_servico: 40 } }
     }
-
-    // ---- Meu desempenho (barbeiro): hoje + mês ----
+    // ---- Meu desempenho (barbeiro): dia selecionado + mês ----
     if (perfil === 'colaborador') {
       try {
         const r2 = n => Math.round((n || 0) * 100) / 100
@@ -235,8 +220,8 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
           ;(cmdsFin.data || []).forEach(c => { if (c.cliente_id) cli.add('c:' + c.cliente_id) })
           return { feitos, agendados, faltas, prod_qtd, prod_valor: r2(prod_valor), servico_valor: r2(servico_valor), geral: r2(geral), ticket: feitos > 0 ? r2(geral / feitos) : 0, _cli: cli }
         }
-        const dHoje = await desemp(inicioHoje, fimHoje)
-        const dMes  = await desemp(inicioMes, fimHoje)
+        const dDia = await desemp(inicioDia, fimDia)   // dia selecionado nos cards
+        const dMes = await desemp(inicioMes, fimHoje)  // mês corrente (não muda com a navegação)
         // novos x recorrentes (mês): cliente que NÃO apareceu antes do mês = novo
         let novos = 0, recorrentes = 0
         try {
@@ -248,10 +233,9 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
           dMes._cli.forEach(k => { if (antesSet.has(k)) recorrentes++; else novos++ })
         } catch (e) {}
         const limpar = d => ({ feitos: d.feitos, agendados: d.agendados, faltas: d.faltas, prod_qtd: d.prod_qtd, prod_valor: d.prod_valor, servico_valor: d.servico_valor, geral: d.geral, ticket: d.ticket, clientes: d._cli.size })
-        result.desempenho = { hoje: limpar(dHoje), mes: { ...limpar(dMes), clientes_novos: novos, clientes_recorrentes: recorrentes } }
+        result.desempenho = { hoje: limpar(dDia), mes: { ...limpar(dMes), clientes_novos: novos, clientes_recorrentes: recorrentes } }
       } catch (e) { console.error('[dashboard desempenho]', e.message) }
     }
-
     // ---- Top clientes do mês (comandas finalizadas + AppBarber realizado) ----
     const topMap = {}
     const addTop = (key, nome, unidade, barbeiro) => {
@@ -262,7 +246,6 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
       if (barbeiro && !topMap[key].barbeiro) topMap[key].barbeiro = barbeiro
       topMap[key].visitas++
     }
-
     let qTopC = supabaseAdmin.from('comandas')
       .select('cliente_id, clientes(nome), colaboradores(nome), unidades(nome)')
       .eq('status', 'finalizada').gte('finalizada_em', inicioMes).not('cliente_id', 'is', null)
@@ -270,7 +253,6 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     else if (perfil === 'gerente') qTopC = qTopC.eq('unidade_id', unidade_id)
     const { data: topCmds } = await qTopC
     for (const c of (topCmds || [])) addTop(c.cliente_id, c.clientes?.nome, c.unidades?.nome, c.colaboradores?.nome)
-
     let qTopAB = supabaseAdmin.from('agenda_appbarber')
       .select('cliente_id, cliente_nome')
       .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
@@ -279,16 +261,13 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     else if (perfil === 'gerente') qTopAB = qTopAB.eq('unidade_id', unidade_id)
     const { data: topAB } = await qTopAB
     for (const a of (topAB || [])) addTop(a.cliente_id || ('n:' + (a.cliente_nome || '?')), a.cliente_nome, null, null)
-
     result.top_clientes = Object.values(topMap).sort((a,b)=>b.visitas-a.visitas).slice(0,10)
-
     return res.json(result)
   } catch (err) {
     console.error('[dashboard]', err)
     return res.status(500).json({ erro: 'Erro ao buscar métricas' })
   }
 })
-
 // ============================================================
 // GET /dashboard/agenda/:unidade_id
 // Agenda completa de uma unidade (para multi-agenda do caixa)
@@ -298,7 +277,6 @@ router.get('/dashboard/agenda/:unidade_id', autenticar, async (req, res) => {
     const hoje       = new Date()
     const inicioHoje = new Date(hoje.setHours(0,0,0,0)).toISOString()
     const fimHoje    = new Date(hoje.setHours(23,59,59,999)).toISOString()
-
     const { data } = await supabaseAdmin
       .from('agendamentos')
       .select('id, data_hora_ini, data_hora_fim, status, valor, clientes(id, nome, data_nasc), servicos(nome), colaboradores(id, nome)')
@@ -306,13 +284,11 @@ router.get('/dashboard/agenda/:unidade_id', autenticar, async (req, res) => {
       .gte('data_hora_ini', inicioHoje)
       .lte('data_hora_ini', fimHoje)
       .order('data_hora_ini')
-
     return res.json(data || [])
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao buscar agenda' })
   }
 })
-
 // ITEM 11 — contagem de clientes: total, importados (AppBarber) e com login no app
 router.get('/clientes/contagem', autenticar, async (req, res) => {
   try {
@@ -327,12 +303,10 @@ router.get('/clientes/contagem', autenticar, async (req, res) => {
     const sistema     = await conta(q => q.eq('origem', 'sistema'))
     const autocad     = await conta(q => q.in('origem', ['app', 'online']))
     const com_login   = await conta(q => q.not('senha_hash', 'is', null))
-
     return res.json({ total, importados, sistema, autocadastro: autocad, com_login_app: com_login })
   } catch (err) {
     console.error('[clientes/contagem]', err.message)
     return res.status(500).json({ erro: 'Erro ao contar clientes' })
   }
 })
-
 module.exports = router
