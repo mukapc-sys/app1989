@@ -94,13 +94,15 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
     const itensFat = await fetchAll(() => {
       let q = supabaseAdmin
         .from('itens_comanda')
-        .select('tipo, produto_id, quantidade, valor_unit, comandas!inner(unidade_id, status, finalizada_em)')
+        .select('comanda_id, tipo, produto_id, quantidade, valor_unit, comandas!inner(unidade_id, status, finalizada_em)')
         .eq('comandas.status', 'finalizada')
         .gte('comandas.finalizada_em', ini).lte('comandas.finalizada_em', fim)
       if (uid) q = q.eq('comandas.unidade_id', uid)
       return q
     })
     let fatServicos = 0, fatBarbearia = 0, fatBar = 0
+    // ATENDIMENTO = comanda com item de SERVIÇO (tipo != 'produto'). Venda só de bar não conta.
+    const comServicoResumo = new Set()
     ;(itensFat || []).forEach(it => {
       const v = (parseFloat(it.valor_unit) || 0) * (parseInt(it.quantidade) || 1)
       const tipo = String(it.tipo || '').toLowerCase()
@@ -109,6 +111,7 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
         else fatBarbearia += v
       } else {
         fatServicos += v   // serviço + plano (mensalidade)
+        if (it.comanda_id) comServicoResumo.add(it.comanda_id)
       }
     })
     fatServicos += abFaturamento   // serviços realizados no AppBarber
@@ -128,7 +131,7 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
     })
     const faturamentoTotal = fatServicos + fatBarbearia + fatBar
     const comissoesTotal   = comissoes + abComissao
-    const atendimentos     = comandas.length + ab.length
+    const atendimentos     = comServicoResumo.size + ab.length
     return res.json({
       periodo,
       faturamento:    round(faturamentoTotal),
@@ -138,7 +141,7 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
       comissoes:      round(comissoesTotal),
       liquido:        round(faturamentoTotal - comissoesTotal),
       total_comandas: atendimentos,
-      ticket_medio:   atendimentos ? round(faturamentoTotal / atendimentos) : 0,
+      ticket_medio:   atendimentos ? round(fatServicos / atendimentos) : 0,
       faturamento_appbarber: round(abFaturamento),  // observação: pago no AppBarber
       comissao_appbarber:    round(abComissao),
       formas: {
@@ -325,19 +328,33 @@ router.get('/por-unidade', autenticar, SEM_ACESSO, TELA_COMP, async (req, res) =
     // PAGINADO: o proprietário puxa as 3 unidades de uma vez — passava de 1000 e truncava.
     const comandas = await fetchAll(() => {
       let q = supabaseAdmin
-        .from('comandas').select('total, unidade_id, colaborador_id')
+        .from('comandas').select('id, total, unidade_id, colaborador_id')
         .eq('status', 'finalizada').gte('finalizada_em', ini).lte('finalizada_em', fim)
       if (u.perfil !== 'proprietario' && u.unidade_id) q = q.eq('unidade_id', u.unidade_id)
       return q
     })
+    // ATENDIMENTO = comanda com pelo menos 1 item de SERVIÇO (tipo != 'produto').
+    // Venda só de bar não conta como atendimento (nem o caixa/quem operou vira "barbeiro").
+    const comServicoU = await fetchAll(() => {
+      let q = supabaseAdmin.from('itens_comanda')
+        .select('comanda_id, comandas!inner(status, finalizada_em, unidade_id)')
+        .neq('tipo', 'produto')
+        .eq('comandas.status', 'finalizada')
+        .gte('comandas.finalizada_em', ini).lte('comandas.finalizada_em', fim)
+      if (u.perfil !== 'proprietario' && u.unidade_id) q = q.eq('comandas.unidade_id', u.unidade_id)
+      return q
+    })
+    const setServicoU = new Set((comServicoU || []).map(i => i.comanda_id))
     const { data: unidades } = await supabaseAdmin.from('unidades').select('id, nome')
     const mapa = {}
     ;(comandas || []).forEach(c => {
       if (!c.unidade_id) return
       if (!mapa[c.unidade_id]) mapa[c.unidade_id] = { atendimentos: 0, faturado: 0, ab_faturado: 0, barbeiros: new Set() }
-      mapa[c.unidade_id].atendimentos += 1
       mapa[c.unidade_id].faturado += parseFloat(c.total || 0)
-      if (c.colaborador_id) mapa[c.unidade_id].barbeiros.add(c.colaborador_id)
+      if (setServicoU.has(c.id)) {
+        mapa[c.unidade_id].atendimentos += 1
+        if (c.colaborador_id) mapa[c.unidade_id].barbeiros.add(c.colaborador_id)
+      }
     })
     // AppBarber finalizado fora do sistema
     const abUid = u.perfil === 'proprietario' ? null : u.unidade_id
@@ -557,25 +574,33 @@ router.get('/comparativo', autenticar, SEM_ACESSO, async (req, res) => {
       // A mesma tela mostrava 314 para um e 344 para o outro.
       const cmds = await fetchAll(() => {
         let q = supabaseAdmin.from('comandas')
-          .select('colaborador_id, unidade_id')
+          .select('id, colaborador_id, unidade_id')
           .eq('status','finalizada').gte('finalizada_em', ini).lt('finalizada_em', fim)
         if (uidFiltro) q = q.eq('unidade_id', uidFiltro)
         return q
       })
-      for (const c of (cmds||[])) {
-        if (c.colaborador_id) eC(c.colaborador_id).atend++
-        if (c.unidade_id)     eU(c.unidade_id).atend++
-      }
       // Itens (serviço x produto) — paginado e com filtro de data NO BANCO.
       const itens = await fetchAll(() => {
         let q = supabaseAdmin.from('itens_comanda')
-          .select('tipo, produto_id, descricao, valor_unit, quantidade, comandas!inner(colaborador_id, unidade_id, finalizada_em, status)')
+          .select('comanda_id, tipo, produto_id, descricao, valor_unit, quantidade, comandas!inner(colaborador_id, unidade_id, finalizada_em, status)')
           .eq('comandas.status', 'finalizada')
           .gte('comandas.finalizada_em', ini)
           .lt('comandas.finalizada_em', fim)
         if (uidFiltro) q = q.eq('comandas.unidade_id', uidFiltro)
         return q
       })
+      // ATENDIMENTO = comanda com pelo menos 1 item de SERVIÇO (tipo != 'produto').
+      // Venda só de bar/produto NÃO é atendimento (o caixa opera venda de bar e não atende;
+      // barbeiro que vende um refri também não ganha atendimento por isso).
+      const comandasComServico = new Set()
+      for (const i of (itens||[])) {
+        if (i && i.tipo !== 'produto' && i.comanda_id) comandasComServico.add(i.comanda_id)
+      }
+      for (const c of (cmds||[])) {
+        if (!comandasComServico.has(c.id)) continue
+        if (c.colaborador_id) eC(c.colaborador_id).atend++
+        if (c.unidade_id)     eU(c.unidade_id).atend++
+      }
       for (const i of (itens||[])) {
         const c = i.comandas
         if (!c || c.status !== 'finalizada') continue
