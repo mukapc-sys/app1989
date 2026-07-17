@@ -683,6 +683,38 @@ router.post('/senha/redefinir', async (req, res) => {
   }
 })
 // ============================================================
+// POST /publico/senha/redefinir-direto — reset SEM código (rápido/prático)
+//   Identidade leve: WhatsApp + primeiro nome (quando o cadastro tem nome).
+//   Não depende do WhatsApp/e-mail sair. Segurança baixa, por decisão do negócio.
+//   Para desligar o check de nome (reset só com WhatsApp), remova o bloco marcado.
+// ============================================================
+router.post('/senha/redefinir-direto', async (req, res) => {
+  try {
+    const { whatsapp, nome, senha } = req.body || {}
+    const tel = String(whatsapp || '').replace(/\D/g, '')
+    if (tel.length < 10) return res.status(400).json({ erro: 'Informe o WhatsApp com DDD' })
+    if (String(senha || '').length < 4) return res.status(400).json({ erro: 'A nova senha precisa de pelo menos 4 caracteres' })
+    const cli = await acharClientePorTel(whatsapp, 'id,nome,whatsapp,senha_hash')
+    if (!cli) return res.status(404).json({ erro: 'Não encontramos uma conta com esse WhatsApp.' })
+    // --- check de nome (leve). Remova este bloco para reset só com WhatsApp. ---
+    const norm = (s) => String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    const primeiro = (s) => norm(s).split(/\s+/)[0] || ''
+    if (norm(cli.nome) && primeiro(nome) !== primeiro(cli.nome)) {
+      return res.status(400).json({ erro: 'Nome não confere com o cadastro deste WhatsApp.' })
+    }
+    // --- fim do check de nome ---
+    const hash = bcrypt.hashSync(String(senha), 10)
+    const { data: up, error: eu } = await supabaseAdmin.from('clientes')
+      .update({ senha_hash: hash, reset_codigo: null, reset_expira: null, ativo: true }).eq('id', cli.id)
+      .select('id,nome,whatsapp').single()
+    if (eu) throw eu
+    return res.json({ token: tokenCliente(up), cliente: { id: up.id, nome: up.nome, whatsapp: up.whatsapp } })
+  } catch (e) {
+    console.error('[senha/redefinir-direto]', e.message)
+    return res.status(500).json({ erro: 'Erro ao redefinir a senha' })
+  }
+})
+// ============================================================
 // GET /publico/eu — dados do cliente logado (perfil)
 // ============================================================
 router.get('/eu', autenticarCliente, async (req, res) => {
