@@ -287,9 +287,20 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
       if (faltando) return res.status(400).json({ erro: 'Informe o barbeiro de cada produto de barbearia.' })
     }
 
+    // Resolve a unidade da avulsa: body (tela) → token → cadastro do colaborador.
+    // O proprietário não tem unidade fixa; se nada resolver, BARRA (não grava órfã).
+    let unidadeAvulsa = req.body.unidade_id || req.usuario.unidade_id || null
+    if (!unidadeAvulsa && req.usuario.id && req.usuario.perfil !== 'proprietario' && req.usuario.perfil !== 'cliente') {
+      const { data: colU } = await supabaseAdmin.from('colaboradores').select('unidade_id').eq('id', req.usuario.id).single()
+      if (colU && colU.unidade_id) unidadeAvulsa = colU.unidade_id
+    }
+    if (!unidadeAvulsa) {
+      return res.status(400).json({ erro: 'Não foi possível definir a unidade desta comanda. Selecione a unidade ou peça para o gerente lançar.' })
+    }
+
     const { data: comanda, error: errC } = await supabaseAdmin
       .from('comandas')
-      .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: colaborador_id || req.usuario.id, unidade_id: req.usuario.unidade_id, aberta_em: new Date().toISOString(), observacao: 'Comanda avulsa', criado_por: req.usuario.id })
+      .insert({ agendamento_id: null, cliente_id: cliente_id || null, colaborador_id: colaborador_id || req.usuario.id, unidade_id: unidadeAvulsa, aberta_em: new Date().toISOString(), observacao: 'Comanda avulsa', criado_por: req.usuario.id })
       .select().single()
     if (errC) throw errC
 
