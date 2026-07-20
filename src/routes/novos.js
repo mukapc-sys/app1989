@@ -269,6 +269,17 @@ router.post('/comandas/:id/reabrir', autenticar, async (req, res) => {
       .update({ status: 'aberta', status_pagamento: 'aberta' }).eq('id', id)
     if (error) throw error
 
+    // SYNC comanda↔agendamento: se a comanda é de um agendamento CONCLUÍDO, volta ele
+    // para reaberto também (senão a agenda continua mostrando "concluído" com a comanda aberta).
+    try {
+      const { data: cmd } = await supabaseAdmin.from('comandas')
+        .select('agendamento_id').eq('id', id).single()
+      if (cmd && cmd.agendamento_id) {
+        await supabaseAdmin.from('agendamentos')
+          .update({ status: 'agendado' }).eq('id', cmd.agendamento_id).eq('status', 'concluido')
+      }
+    } catch (eSync) { console.error('[reabrir sync agendamento]', eSync.message) }
+
     // Registra log: quem autorizou + motivo
     await supabaseAdmin.from('log_reaberturas').insert({
       comanda_id: id, gerente_id: autorizador.id, motivo: motivo
@@ -857,6 +868,14 @@ router.post('/agendamentos/:id/reabrir-autorizado', autenticar, async (req, res)
     const { data, error } = await supabaseAdmin
       .from('agendamentos').update({ status: 'agendado' }).eq('id', req.params.id).select().single()
     if (error) throw error
+    // SYNC comanda↔agendamento: reabre a comanda finalizada deste agendamento.
+    // Sem isso, ao re-finalizar o fluxo cria/finaliza OUTRA comanda e o valor DOBRA no caixa.
+    // Deixando a comanda 'aberta', o abrir-comanda/finalizar REUSA a mesma (não duplica).
+    try {
+      await supabaseAdmin.from('comandas')
+        .update({ status: 'aberta', status_pagamento: 'aberta' })
+        .eq('agendamento_id', req.params.id).eq('status', 'finalizada')
+    } catch (eSync) { console.error('[reabrir-autorizado sync comanda]', eSync.message) }
     return res.json({ ok: true, autorizado_por: autorizador.nome })
   } catch (err) {
     console.error('[reabrir-autorizado]', err.message)
