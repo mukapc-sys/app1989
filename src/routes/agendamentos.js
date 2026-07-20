@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
+const { enviarPushParaColaborador } = require('./push-pro')
 
 // ============================================================
 // Status que OCUPAM o horário de um barbeiro.
@@ -213,6 +214,23 @@ router.post('/', autenticar, async (req, res) => {
       .single()
     if (error) throw error
     pingAgenda(unidade_id)
+    // Push pro barbeiro: só se o agendamento é pra HOJE (fuso SP) e quem criou
+    // NÃO é o próprio barbeiro (ele já sabe).
+    try {
+      const ymdSP = (d) => new Date(new Date(d).getTime() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+      const ehHoje = ymdSP(ini) === ymdSP(Date.now())
+      const criadoPeloProprio = (req.usuario.perfil === 'colaborador' && req.usuario.id === colaborador_id)
+      if (ehHoje && !criadoPeloProprio) {
+        const hora = new Date(ini.getTime() - 3 * 3600 * 1000).toISOString().slice(11, 16)
+        const quem = cliente_nome || 'Cliente'
+        enviarPushParaColaborador(colaborador_id, {
+          titulo: '📅 Novo agendamento hoje',
+          corpo:  hora + ' — ' + quem + (servico.nome ? ' · ' + servico.nome : ''),
+          url:    '/app1989-dashboard',
+          tag:    'ag-' + novo.id
+        }).catch(() => {})
+      }
+    } catch (e) { console.error('[push agendamento]', e.message) }
     return res.status(201).json(novo)
   } catch (err) {
     console.error(err)
