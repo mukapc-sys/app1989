@@ -8,6 +8,7 @@ const router = express.Router()
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { supabaseAdmin } = require('../config/supabase')
+const { enviarPushParaColaborador } = require('./push-pro')
 // ============================================================
 // Busca de cliente por telefone — normalização robusta.
 // Mesmo critério do sync do AppBarber (tira DDI 55, compara 11 dígitos).
@@ -379,6 +380,19 @@ router.post('/agendar', async (req, res) => {
       corpo: `${sv.nome} com ${col.nome} — ${quando}`,
       url: 'https://barbearia1989.com.br'
     }).catch(() => {})
+    // push pro BARBEIRO: cliente marcou um horário pra HOJE (fuso SP)
+    try {
+      const hojeSP = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+      if (dataBR === hojeSP) {
+        const horaBR = String(_hh).padStart(2, '0') + ':' + _p.minute
+        enviarPushParaColaborador(colaborador_id, {
+          titulo: '📅 Novo agendamento hoje',
+          corpo:  horaBR + ' — ' + (primeiro || 'Cliente') + (sv.nome ? ' · ' + sv.nome : ''),
+          url:    '/app1989-dashboard',
+          tag:    'ag-' + ag.id
+        }).catch(() => {})
+      }
+    } catch (e) { console.error('[push agendamento cliente]', e.message) }
     return res.json({ ok: true, agendamento_id: ag.id })
   } catch (e) {
     console.error('[publico/agendar]', e.message)
