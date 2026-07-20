@@ -61,7 +61,7 @@ router.post('/login', async (req, res) => {
     // Colaboradores (barbeiro/gerente/caixa/proprietário) ficam conectados por
     // 15 dias no celular do balcão. Clientes seguem com validade curta (12h)
     // por segurança — o app deles é público.
-    const validade = perfil === 'cliente' ? '12h' : '15d'
+    const validade = perfil === 'cliente' ? '12h' : '90d'
 
     // Gera JWT com dados do usuário
     const token = jwt.sign(
