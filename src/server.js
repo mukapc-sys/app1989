@@ -44,6 +44,7 @@ app.use('/balanco',      require('./routes/balanco'))
 app.use('/permissoes',   require('./routes/permissoes'))
 app.use('/publico',      require('./routes/publico'))
 app.use('/whatsapp',     require('./routes/whatsapp'))
+app.use('/push',         require('./routes/push-pro'))   // push do PRO (barbeiro)
 
 // ---- Configurações do sistema ----
 const { createClient } = require('@supabase/supabase-js')
