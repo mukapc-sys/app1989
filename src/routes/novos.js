@@ -4,6 +4,7 @@ const bcrypt  = require('bcryptjs')
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
+const { enviarPushParaColaborador } = require('./push-pro')
 
 const ADMIN    = exigirPerfil('proprietario')
 const ADM_GER  = exigirPerfil('proprietario','gerente')
@@ -463,7 +464,7 @@ router.post('/agendamentos', autenticar, async (req, res) => {
       // Busca tempo do serviço para esse barbeiro
       const { data: tempo } = await supabaseAdmin.from('colaborador_servico_tempo')
         .select('duracao_min').eq('colaborador_id', item.colaborador_id).eq('servico_id', item.servico_id).single()
-      const { data: servico } = await supabaseAdmin.from('servicos').select('duracao_min,valor').eq('id', item.servico_id).single()
+      const { data: servico } = await supabaseAdmin.from('servicos').select('duracao_min,valor,nome').eq('id', item.servico_id).single()
       const duracao = tempo?.duracao_min || servico?.duracao_min || 30
 
       const ini = new Date(item.data_hora_ini)
@@ -483,6 +484,22 @@ router.post('/agendamentos', autenticar, async (req, res) => {
       }).select().single()
       if (error) throw error
       inserted.push(data)
+      // Push pro barbeiro: agendamento pra HOJE (fuso SP) criado por outra pessoa.
+      try {
+        const ymdSP = (x) => new Date(new Date(x).getTime() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+        const ehHoje = ymdSP(ini) === ymdSP(Date.now())
+        const criadoPeloProprio = (req.usuario.perfil === 'colaborador' && req.usuario.id === item.colaborador_id)
+        if (ehHoje && !criadoPeloProprio) {
+          const hora = new Date(ini.getTime() - 3 * 3600 * 1000).toISOString().slice(11, 16)
+          const quem = cliente_nome || 'Cliente'
+          enviarPushParaColaborador(item.colaborador_id, {
+            titulo: '📅 Novo agendamento hoje',
+            corpo:  hora + ' — ' + quem + (servico && servico.nome ? ' · ' + servico.nome : ''),
+            url:    '/app1989-dashboard',
+            tag:    'ag-' + data.id
+          }).catch(() => {})
+        }
+      } catch (e) { console.error('[push agendamento novos]', e.message) }
     }
     return res.status(201).json(inserted)
   } catch (err) {
