@@ -5,6 +5,7 @@
 const express           = require('express')
 const router            = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
+const { slotsDisponiveis } = require('./publico')   // fonte ÚNICA de horários livres (mesma do app)
 const bcrypt            = require('bcryptjs')
 const jwt               = require('jsonwebtoken')
 // ============================================================
@@ -1096,48 +1097,29 @@ async function buscarSlots(dados) {
     const { data: cols } = await colQuery
     if (!cols || cols.length === 0) return []
 
-    // Função: slots livres de um colaborador num dia
+    // Função: slots livres de um colaborador num dia — USA A FONTE CANÔNICA
+    // (mesma do app: agendamentos + bloqueios + importados + feriados + funcionamento + 15 min).
+    // Antes olhava só 'agendamentos' e ignorava bloqueios/importados → marcava por cima.
     async function slotsLivresDia(col, dStr) {
-      const { data: agds } = await supabaseAdmin.from('agendamentos')
-        .select('data_hora_ini, data_hora_fim')
-        .eq('colaborador_id', col.id)
-        .gte('data_hora_ini', dStr + 'T00:00:00')
-        .lte('data_hora_ini', dStr + 'T23:59:59')
-        .in('status', ['agendado','confirmado','andamento','concluido','bloqueado'])
-
-      // Intervalos ocupados em minutos-do-dia (horário de Brasília).
-      // Considera a DURAÇÃO de cada agendamento/bloqueio, não só o minuto de início —
-      // sem isso, um bloqueio 13:00–13:30 deixava 13:15 "livre" e um serviço de 30min
-      // às 12:45 invadia o bloqueio das 13:00.
-      const minutoBR = (iso) => {
-        const br = new Date(new Date(iso).getTime() - 3 * 60 * 60 * 1000)
-        return br.getUTCHours() * 60 + br.getUTCMinutes()
-      }
-      const ocupados = (agds||[]).map(a => {
-        const iniMin = minutoBR(a.data_hora_ini)
-        const fimMin = a.data_hora_fim ? minutoBR(a.data_hora_fim) : iniMin + 30
-        return { ini: iniMin, fim: Math.max(fimMin, iniMin + 1) }
-      })
-      const slotLivre = (h) => {
-        const [hh, mm] = h.split(':').map(Number)
-        const sIni = hh * 60 + mm
-        const sFim = sIni + duracaoMin
-        // conflito se [sIni, sFim) sobrepõe qualquer [o.ini, o.fim)
-        return !ocupados.some(o => sIni < o.fim && sFim > o.ini)
-      }
+      let canon = []
+      try { canon = await slotsDisponiveis(col.id, dStr, duracaoMin) || [] }
+      catch (e) { console.error('[slotsLivresDia canon]', e.message); canon = [] }
 
       const dObj = new Date(dStr + 'T12:00:00')
       const fmt  = `${diasSemana[dObj.getDay()]} ${String(dObj.getDate()).padStart(2,'0')}/${String(dObj.getMonth()+1).padStart(2,'0')}`
 
-      return horariosBase.filter(slotLivre).map(h => ({
-        colaborador_id: col.id,
-        barbeiro_nome:  col.nome,
-        data_iso:       dStr,
-        hora_iso:       h,
-        data_fmt:       fmt,
-        hora_fmt:       h,
-        label:          `${h} — ${col.nome} (${fmt})`
-      }))
+      // só os livres de verdade E que caem na faixa/período pedido (horariosBase)
+      return canon
+        .filter(s => s.disponivel && horariosBase.includes(s.hora))
+        .map(s => ({
+          colaborador_id: col.id,
+          barbeiro_nome:  col.nome,
+          data_iso:       dStr,
+          hora_iso:       s.hora,
+          data_fmt:       fmt,
+          hora_fmt:       s.hora,
+          label:          `${s.hora} — ${col.nome} (${fmt})`
+        }))
     }
 
     // Coleta slots
