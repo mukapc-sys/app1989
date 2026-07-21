@@ -477,7 +477,7 @@ async function processarFluxo(conversa, mensagemCliente) {
         dados.barbeiro_id   = null
         dados.barbeiro_nome = 'Mais disponível'
       } else {
-        const colQ = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${nomeBarbeiro}%`).limit(1)
+        const colQ = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).neq('perfil','caixa').ilike('nome', `%${nomeBarbeiro}%`).limit(1)
         if (dados.unidade_id) colQ.eq('unidade_id', dados.unidade_id)
         const { data: col } = await colQ.maybeSingle()
         if (col) {
@@ -486,7 +486,7 @@ async function processarFluxo(conversa, mensagemCliente) {
         } else {
           // Busca em outras unidades
           const { data: colOutra } = await supabaseAdmin.from('colaboradores')
-            .select('id,nome,unidades(nome)').eq('ativo', true).ilike('nome', `%${nomeBarbeiro}%`).limit(1).maybeSingle()
+            .select('id,nome,unidades(nome)').eq('ativo', true).neq('perfil','caixa').ilike('nome', `%${nomeBarbeiro}%`).limit(1).maybeSingle()
           if (colOutra) {
             const uniDele = colOutra.unidades?.nome || 'outra unidade'
             dados._barbeiro_pendente_id   = colOutra.id
@@ -544,7 +544,7 @@ async function processarFluxo(conversa, mensagemCliente) {
       if (dados._sem_horario_hoje && /outro|hoje/.test(msg)) {
         if (dados.unidade_id && dados.barbeiro_id) {
           const { data: cols } = await supabaseAdmin.from('colaboradores')
-            .select('id,nome').eq('ativo', true).eq('unidade_id', dados.unidade_id).neq('id', dados.barbeiro_id)
+            .select('id,nome').eq('ativo', true).neq('perfil','caixa').eq('unidade_id', dados.unidade_id).neq('id', dados.barbeiro_id)
           if (cols && cols.length > 0) {
             const hoje = new Date().toISOString().slice(0,10)
             const slotsHoje = await buscarSlots({ ...dados, barbeiro_id: cols[0].id, data_raw: hoje, hora_raw: null })
@@ -683,7 +683,7 @@ async function irParaFase2(conversa, dados) {
   }
   // Resolve barbeiro_id se tem nome mas não tem id
   if (dados.barbeiro_raw && !dados.barbeiro_id && dados.barbeiro_raw !== 'historico') {
-    const colQ = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).ilike('nome', `%${dados.barbeiro_raw}%`).limit(1)
+    const colQ = supabaseAdmin.from('colaboradores').select('id,nome').eq('ativo', true).neq('perfil','caixa').ilike('nome', `%${dados.barbeiro_raw}%`).limit(1)
     if (dados.unidade_id) colQ.eq('unidade_id', dados.unidade_id)
     const { data: col } = await colQ.maybeSingle()
     if (col) { dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome }
@@ -1091,7 +1091,7 @@ async function buscarSlots(dados) {
     }
 
     // Busca colaboradores disponíveis
-    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true)
+    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true).neq('perfil', 'caixa')
     if (dados.unidade_id)  colQuery = colQuery.eq('unidade_id', dados.unidade_id)
     if (dados.barbeiro_id) colQuery = colQuery.eq('id', dados.barbeiro_id)
     const { data: cols } = await colQuery
@@ -1152,7 +1152,7 @@ async function buscarOutrosBarbeirosNoHorario(dados) {
     if (!dados.hora_raw || !dados.data_raw) return []
     const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
 
-    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true)
+    let colQuery = supabaseAdmin.from('colaboradores').select('id, nome').eq('ativo', true).neq('perfil', 'caixa')
     if (dados.unidade_id) colQuery = colQuery.eq('unidade_id', dados.unidade_id)
     // Exclui o barbeiro atual
     if (dados.barbeiro_id) colQuery = colQuery.neq('id', dados.barbeiro_id)
