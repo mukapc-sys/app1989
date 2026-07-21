@@ -195,6 +195,71 @@ router.get('/servicos', async (req, res) => {
   }
 })
 // ============================================================
+// slotsDisponiveis — DISPONIBILIDADE CANÔNICA de um colaborador num dia.
+// Fonte ÚNICA de verdade: agendamentos + bloqueios + importados (AppBarber) +
+// feriados + funcionamento + 15 min. Usada pela rota /horarios E pelo bot do
+// WhatsApp (via require), pra os dois nunca divergirem.
+// Retorna [{ hora:'HH:MM', disponivel:bool, data_hora:ISO }].
+// ============================================================
+async function slotsDisponiveis(colaborador_id, data, duracao = 30) {
+  const ini = new Date(data + 'T00:00:00-03:00').toISOString()
+  const fim = new Date(data + 'T23:59:59-03:00').toISOString()
+  const [{ data: ocupados }, { data: bloqueios }, { data: importados }, { data: feriados }] = await Promise.all([
+    supabaseAdmin.from('agendamentos')
+      .select('data_hora_ini, data_hora_fim')
+      .eq('colaborador_id', colaborador_id)
+      .in('status', STATUS_OCUPA_HORARIO)
+      .gte('data_hora_ini', ini).lte('data_hora_ini', fim),
+    supabaseAdmin.from('bloqueios')
+      .select('data_ini, data_fim')
+      .eq('colaborador_id', colaborador_id)
+      .gte('data_ini', ini).lte('data_ini', fim),
+    supabaseAdmin.from('agenda_appbarber')
+      .select('inicio, fim')
+      .eq('colaborador_id', colaborador_id)
+      .eq('finalizado', false)
+      .gte('inicio', ini).lte('inicio', fim),
+    supabaseAdmin.from('feriados').select('*').eq('data', data),
+  ])
+  const fer = (feriados || [])[0]
+  let hf
+  if (fer) {
+    if (fer.fechado) hf = null
+    else if (fer.hora_abre && fer.hora_fecha) hf = { abre: hmToMin(fer.hora_abre), fecha: hmToMin(fer.hora_fecha) }
+    else hf = { abre: 9 * 60, fecha: 18 * 60 }
+  } else {
+    hf = horarioFuncionamento(data, false)
+  }
+  const inicio = hf ? hf.abre : 0
+  const fimDia = hf ? hf.fecha : 0
+  const passo = 15
+  const agora = new Date()
+  const dur = parseInt(duracao) || 30
+  const slots = []
+  for (let min = inicio; min + dur <= fimDia; min += passo) {
+    const hh = String(Math.floor(min / 60)).padStart(2, '0')
+    const mm = String(min % 60).padStart(2, '0')
+    const slotIni = new Date(`${data}T${hh}:${mm}:00-03:00`)
+    const slotFim = new Date(slotIni.getTime() + dur * 60000)
+    const ocupado = (ocupados || []).some(a => {
+      const i = new Date(a.data_hora_ini), f = new Date(a.data_hora_fim)
+      return slotIni < f && slotFim > i
+    })
+    const bloqueado = (bloqueios || []).some(b => {
+      const i = new Date(b.data_ini), f = new Date(b.data_fim)
+      return slotIni < f && slotFim > i
+    })
+    const importadoOcupa = (importados || []).some(a => {
+      const i = new Date(a.inicio), f = new Date(a.fim)
+      return slotIni < f && slotFim > i
+    })
+    const passou = slotIni < new Date(agora.getTime() + 15 * 60 * 1000)  // 15 min de antecedência mínima
+    slots.push({ hora: `${hh}:${mm}`, disponivel: !ocupado && !bloqueado && !importadoOcupa && !passou, data_hora: slotIni.toISOString() })
+  }
+  return slots
+}
+
+// ============================================================
 // GET /publico/horarios?colaborador_id=&data=&duracao= — slots livres
 // ============================================================
 router.get('/horarios', async (req, res) => {
@@ -203,65 +268,7 @@ router.get('/horarios', async (req, res) => {
     if (!colaborador_id || !data) {
       return res.status(400).json({ erro: 'colaborador_id e data são obrigatórios' })
     }
-    const ini = new Date(data + 'T00:00:00-03:00').toISOString()
-    const fim = new Date(data + 'T23:59:59-03:00').toISOString()
-    const [{ data: ocupados }, { data: bloqueios }, { data: importados }, { data: feriados }] = await Promise.all([
-      supabaseAdmin.from('agendamentos')
-        .select('data_hora_ini, data_hora_fim')
-        .eq('colaborador_id', colaborador_id)
-        // 'concluido' incluído: atendimento finalizado NÃO libera o horário.
-        .in('status', STATUS_OCUPA_HORARIO)
-        .gte('data_hora_ini', ini).lte('data_hora_ini', fim),
-      supabaseAdmin.from('bloqueios')
-        .select('data_ini, data_fim')
-        .eq('colaborador_id', colaborador_id)
-        .gte('data_ini', ini).lte('data_ini', fim),
-      // importados do AppBarber ainda não finalizados (agendamentos E bloqueios ocupam o horário)
-      supabaseAdmin.from('agenda_appbarber')
-        .select('inicio, fim')
-        .eq('colaborador_id', colaborador_id)
-        .eq('finalizado', false)
-        .gte('inicio', ini).lte('inicio', fim),
-      // feriados cadastrados nessa data (afetam o horário de funcionamento)
-      supabaseAdmin.from('feriados').select('*').eq('data', data),
-    ])
-    // Horário de funcionamento do dia (feriado manda; senão, dia da semana)
-    const fer = (feriados || [])[0]
-    let hf
-    if (fer) {
-      if (fer.fechado) hf = null                                              // feriado fechado
-      else if (fer.hora_abre && fer.hora_fecha) hf = { abre: hmToMin(fer.hora_abre), fecha: hmToMin(fer.hora_fecha) } // personalizado
-      else hf = { abre: 9 * 60, fecha: 18 * 60 }                              // feriado padrão 9h-18h
-    } else {
-      hf = horarioFuncionamento(data, false)
-    }
-    const inicio = hf ? hf.abre : 0
-    const fimDia = hf ? hf.fecha : 0   // fechado -> inicio=fimDia=0 -> não gera nenhum slot
-    const passo = 15
-    const agora = new Date()
-    const dur = parseInt(duracao) || 30
-    const slots = []
-    for (let min = inicio; min + dur <= fimDia; min += passo) {
-      const hh = String(Math.floor(min / 60)).padStart(2, '0')
-      const mm = String(min % 60).padStart(2, '0')
-      const slotIni = new Date(`${data}T${hh}:${mm}:00-03:00`)
-      const slotFim = new Date(slotIni.getTime() + dur * 60000)
-      const ocupado = (ocupados || []).some(a => {
-        const i = new Date(a.data_hora_ini), f = new Date(a.data_hora_fim)
-        return slotIni < f && slotFim > i
-      })
-      const bloqueado = (bloqueios || []).some(b => {
-        const i = new Date(b.data_ini), f = new Date(b.data_fim)
-        return slotIni < f && slotFim > i
-      })
-      const importadoOcupa = (importados || []).some(a => {
-        const i = new Date(a.inicio), f = new Date(a.fim)
-        return slotIni < f && slotFim > i
-      })
-      const passou = slotIni < new Date(agora.getTime() + 15 * 60 * 1000)  // cliente: 15 min de antecedência mínima
-      const hora = `${hh}:${mm}`
-      slots.push({ hora, disponivel: !ocupado && !bloqueado && !importadoOcupa && !passou, data_hora: slotIni.toISOString() })
-    }
+    const slots = await slotsDisponiveis(colaborador_id, data, duracao)
     return res.json(slots)
   } catch (e) {
     console.error('[publico/horarios]', e.message)
@@ -996,6 +1003,7 @@ router.post('/push/teste', autenticarCliente, async (req, res) => {
   }
 })
 module.exports = router
+module.exports.slotsDisponiveis = slotsDisponiveis
 module.exports.enviarPushParaCliente = enviarPushParaCliente
 module.exports.enviarPushParaVarios = enviarPushParaVarios
 module.exports.enviarPushParaTodos = enviarPushParaTodos
