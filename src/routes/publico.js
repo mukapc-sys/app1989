@@ -258,7 +258,7 @@ router.get('/horarios', async (req, res) => {
         const i = new Date(a.inicio), f = new Date(a.fim)
         return slotIni < f && slotFim > i
       })
-      const passou = slotIni < agora
+      const passou = slotIni < new Date(agora.getTime() + 15 * 60 * 1000)  // cliente: 15 min de antecedência mínima
       const hora = `${hh}:${mm}`
       slots.push({ hora, disponivel: !ocupado && !bloqueado && !importadoOcupa && !passou, data_hora: slotIni.toISOString() })
     }
