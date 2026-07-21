@@ -1103,7 +1103,7 @@ async function buscarSlots(dados) {
         .eq('colaborador_id', col.id)
         .gte('data_hora_ini', dStr + 'T00:00:00')
         .lte('data_hora_ini', dStr + 'T23:59:59')
-        .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
+        .in('status', ['agendado','confirmado','andamento','concluido','bloqueado'])
 
       // Intervalos ocupados em minutos-do-dia (horário de Brasília).
       // Considera a DURAÇÃO de cada agendamento/bloqueio, não só o minuto de início —
@@ -1182,7 +1182,7 @@ async function buscarOutrosBarbeirosNoHorario(dados) {
       .select('colaborador_id')
       .in('colaborador_id', cols.map(c => c.id))
       .eq('data_hora', `${dataStr}T${dados.hora_raw}:00`)
-      .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
+      .in('status', ['agendado','confirmado','andamento','concluido','bloqueado'])
     const ocupSet = new Set((agds||[]).map(a => a.colaborador_id))
 
     const data = new Date(dataStr + 'T12:00:00')
@@ -1278,6 +1278,7 @@ async function fazerAgendamento(conversa, dados) {
       cliente_nome:   dados._nome || conversa.nome_contato || null,
       data_hora_ini:  ini.toISOString(),
       data_hora_fim:  fim.toISOString(),
+      status:         'agendado',
       valor:          dados.servico_valor || 0,
       canal_origem:   'whatsapp',
       observacao:     `Agendado via WhatsApp — ${conversa.nome_contato || conversa.numero}`
@@ -1291,7 +1292,7 @@ async function fazerAgendamento(conversa, dados) {
       .eq('colaborador_id', slot.colaborador_id)
       .gte('data_hora_ini', slot.data_iso + 'T00:00:00')
       .lte('data_hora_ini', slot.data_iso + 'T23:59:59')
-      .in('status', ['agendado','confirmado','bloqueado','em_atendimento'])
+      .in('status', ['agendado','confirmado','andamento','concluido','bloqueado'])
     const temConflito = (doDia||[]).some(a => {
       const aIni = new Date(a.data_hora_ini).getTime()
       const aFim = a.data_hora_fim ? new Date(a.data_hora_fim).getTime() : aIni + 30 * 60 * 1000
