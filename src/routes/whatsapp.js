@@ -460,6 +460,35 @@ async function processarFluxo(conversa, mensagemCliente) {
 
     if (fase === 'fase2_barbeiro') {
       const msg = mensagemCliente.toLowerCase()
+      const raw = String(mensagemCliente || '').trim()
+      const lista = dados._barbeiros_lista || []
+
+      // "não lembro quem me atende" → foto-painel da unidade + reapresenta a lista
+      if (raw === 'nao_lembro' || /n[ãa]o lembro|n[ãa]o sei o nome|esqueci o nome/.test(msg)) {
+        const painel = painelDaUnidade(dados.unidade_nome)
+        if (painel) await enviarImagem(conversa, painel, `Estes são os barbeiros da ${dados.unidade_nome} 💈 Reconheceu? É só tocar no nome na lista 👇`)
+        else await enviar(conversa, `Dá uma olhada nas fotos em barbearia1989.com.br e me diz o nome 😊`)
+        await mostrarListaBarbeiros(conversa, dados)
+        return
+      }
+      // "sem preferência" (clique, frase, ou número da opção)
+      if (raw === 'sem_pref' || /sem prefer|qualquer|tanto faz|pode ser|n[ãa]o tenho/.test(msg)) {
+        dados.sem_preferencia = true; dados.barbeiro_id = null; dados.barbeiro_nome = null; dados._erros = 0
+        await irParaFase3(conversa, dados); return
+      }
+      // clique num barbeiro (rowId 'barb:ID') ou número digitado (lista virou texto)
+      let idClicado = raw.startsWith('barb:') ? raw.slice(5) : null
+      if (!idClicado && /^\d+$/.test(raw)) {
+        const n = parseInt(raw, 10)
+        if (n >= 1 && n <= lista.length) idClicado = lista[n - 1].id
+        else if (n === lista.length + 1) { dados.sem_preferencia = true; dados.barbeiro_id = null; dados.barbeiro_nome = null; await irParaFase3(conversa, dados); return }
+        else if (n === lista.length + 2) { const p = painelDaUnidade(dados.unidade_nome); if (p) await enviarImagem(conversa, p, `Barbeiros da ${dados.unidade_nome} 💈`); await mostrarListaBarbeiros(conversa, dados); return }
+      }
+      if (idClicado) {
+        const b = lista.find(x => String(x.id) === String(idClicado))
+        if (b) { dados.barbeiro_id = b.id; dados.barbeiro_nome = b.nome; dados._erros = 0; await irParaFase3(conversa, dados); return }
+      }
+
       const ext = await extrairTudo(mensagemCliente)
       if (ext.fora_escopo) { await escalarHumano(conversa, MSG.fora_escopo); return }
 
@@ -673,6 +702,22 @@ async function processarFluxo(conversa, mensagemCliente) {
 }
 
 // ── Lógica de avanço da Fase 2 (verifica o que já tem e pula etapas) ──
+async function mostrarListaBarbeiros(conversa, dados) {
+  const { data: barbs } = await supabaseAdmin.from('colaboradores')
+    .select('id, nome').eq('ativo', true).neq('perfil', 'caixa')
+    .eq('unidade_id', dados.unidade_id).order('nome')
+  dados._barbeiros_lista = (barbs || []).map(b => ({ id: b.id, nome: b.nome }))
+  const rows = (barbs || []).map(b => ({ title: b.nome, rowId: 'barb:' + b.id }))
+  rows.push({ title: 'Sem preferência', description: 'Marco com quem estiver mais livre', rowId: 'sem_pref' })
+  rows.push({ title: 'Não lembro quem me atende', description: 'Te mostro as fotos pra reconhecer', rowId: 'nao_lembro' })
+  await enviarLista(conversa, {
+    title: 'Escolha o barbeiro',
+    description: (dados._nome ? dados._nome + ', com' : 'Com') + ` quem você quer marcar na unidade ${dados.unidade_nome}?`,
+    buttonText: 'Ver barbeiros',
+    rows
+  })
+}
+
 async function irParaFase2(conversa, dados) {
   const nome = dados._nome || null
 
@@ -704,8 +749,8 @@ async function irParaFase2(conversa, dados) {
     await setFase(conversa.id, 'fase2_unidade', dados)
     return
   }
-  if (dados.barbeiro_id === undefined && !dados.barbeiro_raw) {
-    await responder(conversa, 'pede_barbeiro', { ...ctx, unidade: dados.unidade_nome }, MSG.pede_barbeiro(nome))
+  if (dados.barbeiro_id === undefined && !dados.barbeiro_raw && !dados.sem_preferencia) {
+    await mostrarListaBarbeiros(conversa, dados)
     await setFase(conversa.id, 'fase2_barbeiro', dados)
     return
   }
@@ -1123,7 +1168,19 @@ async function buscarSlots(dados) {
     }
 
     // Coleta slots
-    const col  = cols[0]
+    // SEM PREFERÊNCIA (nenhum barbeiro_id + vários na unidade) → escolhe o com MAIS
+    // horários livres no DIA TODO. Depois mostra os slots dele (respeitando a faixa).
+    let col = cols[0]
+    if (!dados.barbeiro_id && cols.length > 1) {
+      let melhorQtd = -1
+      for (const c of cols) {
+        let canon = []
+        try { canon = await slotsDisponiveis(c.id, dataStr, duracaoMin) || [] } catch (e) {}
+        const qtd = canon.filter(s => s.disponivel).length
+        if (qtd > melhorQtd) { melhorQtd = qtd; col = c }
+      }
+      dados.barbeiro_id = col.id; dados.barbeiro_nome = col.nome
+    }
     const slots = await slotsLivresDia(col, dataStr)
 
     // Se tem hora específica — ordena por proximidade
@@ -1357,6 +1414,81 @@ async function enviar(conversa, texto, remetente = 'ia') {
       .eq('id', conversa.id)
   } catch (e) {
     console.error('[whatsapp/enviar]', e.message)
+  }
+}
+
+// ============================================================
+// Envia UMA imagem (foto do barbeiro) com legenda, via Evolution.
+// Obs.: o formato do payload de mídia varia por versão da Evolution — este é o
+// padrão v2 (mediatype/media/caption). Se a foto não chegar no teste, é aqui que se ajusta.
+// ============================================================
+async function enviarImagem(conversa, urlImagem, legenda = '') {
+  const EVOLUTION_URL = process.env.EVOLUTION_API_URL
+  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
+  const INSTANCIA     = process.env.EVOLUTION_INSTANCIA || 'barbearia1989'
+  if (!urlImagem) { if (legenda) await enviar(conversa, legenda); return }
+  try {
+    await fetch(`${EVOLUTION_URL}/message/sendMedia/${INSTANCIA}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
+      body: JSON.stringify({ number: conversa.numero, mediatype: 'image', media: urlImagem, caption: legenda, options: { delay: 900 } })
+    })
+    await supabaseAdmin.from('whatsapp_conversas')
+      .update({ ultima_msg_em: new Date().toISOString() }).eq('id', conversa.id)
+  } catch (e) {
+    console.error('[whatsapp/enviarImagem]', e.message)
+    if (legenda) { try { await enviar(conversa, legenda) } catch (_e) {} }   // fallback: manda só o texto
+  }
+}
+
+// Fotos-painel (carrossel achatado) de cada unidade — pra opção "não lembro quem me atende".
+const PAINEL_UNIDADE = {
+  'timbaúva': 'https://pub-d8c17953a575480084b80982d84262c2.r2.dev/timbauva.webp',
+  'timbauva': 'https://pub-d8c17953a575480084b80982d84262c2.r2.dev/timbauva.webp',
+  'centro':   'https://pub-d8c17953a575480084b80982d84262c2.r2.dev/centro.webp',
+  'são joão': 'https://pub-d8c17953a575480084b80982d84262c2.r2.dev/sao_joao.webp',
+  'sao joao': 'https://pub-d8c17953a575480084b80982d84262c2.r2.dev/sao_joao.webp',
+  'sao_joao': 'https://pub-d8c17953a575480084b80982d84262c2.r2.dev/sao_joao.webp',
+}
+function painelDaUnidade(nomeUnidade) {
+  return PAINEL_UNIDADE[String(nomeUnidade || '').toLowerCase().trim()] || null
+}
+
+// ============================================================
+// Envia uma LISTA INTERATIVA (sendList). Formato da doc da Evolution:
+// { number, title, description, buttonText, sections:[{ title, rows:[{ title, description, rowId }] }] }
+// Fallback embutido: se a lista não renderizar no aparelho, o WhatsApp mostra o texto,
+// e o cliente pode responder o NÚMERO (as fases também aceitam número/rowId).
+// ============================================================
+async function enviarLista(conversa, { title, description, buttonText, rows, remetente = 'ia' }) {
+  const EVOLUTION_URL = process.env.EVOLUTION_API_URL
+  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
+  const INSTANCIA     = process.env.EVOLUTION_INSTANCIA || 'barbearia1989'
+  try {
+    const resp = await fetch(`${EVOLUTION_URL}/message/sendList/${INSTANCIA}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
+      body: JSON.stringify({
+        number: conversa.numero,
+        title:  title || '',
+        description: description || '',
+        buttonText:  buttonText || 'Ver opções',
+        sections: [{ title: title || ' ', rows: (rows || []).map(r => ({ title: r.title, description: r.description || '', rowId: String(r.rowId) })) }]
+      })
+    })
+    const result = await resp.json().catch(() => ({}))
+    await supabaseAdmin.from('whatsapp_mensagens').upsert({
+      conversa_id: conversa.id, evolution_msg_id: result.key?.id || null,
+      direcao: 'saida', tipo: 'lista',
+      conteudo: (title ? title + '\n' : '') + (rows || []).map((r, i) => `${i + 1}. ${r.title}`).join('\n'),
+      remetente
+    }, { onConflict: 'evolution_msg_id', ignoreDuplicates: true })
+    await supabaseAdmin.from('whatsapp_conversas').update({ ultima_msg_em: new Date().toISOString() }).eq('id', conversa.id)
+  } catch (e) {
+    console.error('[whatsapp/enviarLista]', e.message)
+    // fallback total em texto numerado
+    const txt = (description ? description + '\n\n' : '') + (rows || []).map((r, i) => `${i + 1}. ${r.title}`).join('\n')
+    try { await enviar(conversa, txt) } catch (_e) {}
   }
 }
 
