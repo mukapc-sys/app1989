@@ -838,6 +838,16 @@ router.patch('/agendamentos/:id', autenticar, async (req, res) => {
       estorno = await estornarComandasDoAgendamento(req.params.id)
     }
 
+    // "Não compareceu": apaga a comanda ABERTA órfã ligada ao agendamento — senão ela
+    // fica aberta e TRAVA o fechamento do caixa. NÃO mexe em pontos: comanda de
+    // não-comparecimento não tem ponto resgatado (o cliente não consumiu nada). Só 'aberta'.
+    if (normalizarStatus(status) === 'nao_compareceu') {
+      try {
+        await supabaseAdmin.from('comandas').delete()
+          .eq('agendamento_id', req.params.id).eq('status', 'aberta')
+      } catch (eLimp) { console.error('[PATCH nao_compareceu limpar comanda]', eLimp.message) }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('agendamentos').update({ status }).eq('id', req.params.id).select().single()
     if (error) throw error
