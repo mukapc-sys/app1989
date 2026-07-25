@@ -772,7 +772,7 @@ router.put('/eu', autenticarCliente, async (req, res) => {
 router.get('/meu-plano', autenticarCliente, async (req, res) => {
   try {
     const { data: assin } = await supabaseAdmin.from('assinaturas')
-      .select('*, planos(id,nome,valor_mensal), colaboradores!vendedor_id(id,nome,unidade_id,unidades(id,nome))')
+      .select('*, planos(id,nome,valor_mensal), titular1:colaboradores!vendedor_id(id,nome,foto_url,unidade_id,unidades(id,nome)), titular2:colaboradores!vendedor_id_2(id,nome,foto_url,unidade_id,unidades(id,nome))')
       .eq('cliente_id', req.cliente.id)
       .eq('status', 'ativa').limit(1)
     if (!assin || !assin.length) return res.json({ ativo: false })
@@ -812,14 +812,17 @@ router.get('/meu-plano', autenticarCliente, async (req, res) => {
       const loteComSaldo = (lotes || []).find(l => ((l.quantidade || 0) - (l.usadas || 0)) > 0)
       if (loteComSaldo) fichas_validade = loteComSaldo.expira_em
     } catch (_) {}
-    const barb = a.colaboradores || null
-    const barbeiro = barb ? { id: barb.id, nome: barb.nome } : null
-    const unidade = (barb && barb.unidades) ? { id: barb.unidades.id, nome: barb.unidades.nome } : null
+    const b1 = a.titular1 || null
+    const b2 = a.titular2 || null
+    const mapB = (b) => b ? { id: b.id, nome: b.nome, foto_url: b.foto_url || null } : null
+    const barbeiro = mapB(b1)                                   // titular 1 (compatibilidade)
+    const barbeiros = [mapB(b1), mapB(b2)].filter(Boolean)      // 1 ou 2 titulares
+    const unidade = (b1 && b1.unidades) ? { id: b1.unidades.id, nome: b1.unidades.nome } : null
     return res.json({
       ativo: true,
       plano: { id: plano.id, nome: plano.nome, valor_mensal: plano.valor_mensal },
       data_renovacao: a.data_renovacao || null,   // vencimento do plano
-      servicos, barbeiro, unidade,
+      servicos, barbeiro, barbeiros, unidade,
       fichas_disponiveis,
       fichas_validade
     })
