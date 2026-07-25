@@ -564,7 +564,7 @@ router.patch('/assinaturas/:id', autenticar, exigirPerfil('proprietario','gerent
     // ITEM 7 (corrigido): caixa, gerente e proprietário editam TODOS os campos.
     // Antes o caixa só podia trocar o barbeiro titular e o resto (inclusive a
     // data de renovação) era descartado silenciosamente — parecia que salvava.
-    const permitidos = ['plano_id','status','data_inicio','data_renovacao','vendedor_id','forma_pgto']
+    const permitidos = ['plano_id','status','data_inicio','data_renovacao','vendedor_id','vendedor_id_2','valor_split_1','forma_pgto']
     const campos = {}
     for (const k of permitidos) if (k in req.body) campos[k] = (req.body[k] === '' ? null : req.body[k])
     if (Object.keys(campos).length === 0) {
