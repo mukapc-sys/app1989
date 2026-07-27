@@ -159,6 +159,28 @@ router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'geren
     return res.status(500).json({ erro: 'Erro ao atualizar colaborador' })
   }
 })
+
+// POST /colaboradores/:id/transferir — troca SÓ a unidade do barbeiro.
+// Autonomia total (A1): proprietário ou gerente, qualquer barbeiro pra qualquer unidade.
+// Ação dedicada de propósito: não abre edição de salário/comissão entre unidades.
+router.post('/colaboradores/:id/transferir', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
+  try {
+    const { nova_unidade_id } = req.body
+    if (!nova_unidade_id) return res.status(400).json({ erro: 'nova_unidade_id é obrigatório' })
+    const { data: alvo } = await supabaseAdmin.from('colaboradores').select('id, nome, unidade_id').eq('id', req.params.id).single()
+    if (!alvo) return res.status(404).json({ erro: 'Colaborador não encontrado' })
+    if (String(alvo.unidade_id) === String(nova_unidade_id)) return res.status(400).json({ erro: 'O barbeiro já está nessa unidade' })
+    const { data, error } = await supabaseAdmin.from('colaboradores')
+      .update({ unidade_id: nova_unidade_id }).eq('id', req.params.id)
+      .select('id, nome, unidade_id, unidades(nome)').single()
+    if (error) throw error
+    console.log(`[transferencia] ${req.usuario.nome} transferiu ${alvo.nome} de ${alvo.unidade_id} -> ${nova_unidade_id}`)
+    return res.json(data)
+  } catch (e) {
+    console.error('[colaboradores/transferir]', e.message)
+    return res.status(500).json({ erro: 'Erro ao transferir colaborador' })
+  }
+})
 // ============ CLIENTES ============
 router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
