@@ -232,6 +232,40 @@ router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','geren
     return res.status(500).json({ erro: 'Erro ao carregar plano do cliente' })
   }
 })
+
+// GET /clientes/:id/historico — últimas visitas do cliente (todos os perfis do PRO).
+// Colunas: data/hora, unidade, barbeiro, serviço, total da comanda ligada.
+router.get('/clientes/:id/historico', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const clienteId = req.params.id
+    const limite = Math.min(parseInt(req.query.limite) || 20, 50)
+    const { data: ags, error } = await supabaseAdmin.from('agendamentos')
+      .select('id, data_hora_ini, servicos(nome), colaboradores!colaborador_id(nome), unidades(nome)')
+      .eq('cliente_id', clienteId)
+      .eq('status', 'concluido')
+      .order('data_hora_ini', { ascending: false })
+      .limit(limite)
+    if (error) throw error
+    const agIds = (ags || []).map(a => a.id)
+    let totalPorAg = {}
+    if (agIds.length) {
+      const { data: cmds } = await supabaseAdmin.from('comandas')
+        .select('agendamento_id, total').in('agendamento_id', agIds)
+      ;(cmds || []).forEach(c => { if (c.agendamento_id != null) totalPorAg[c.agendamento_id] = c.total })
+    }
+    const visitas = (ags || []).map(a => ({
+      data_hora: a.data_hora_ini,
+      unidade:   a.unidades ? a.unidades.nome : null,
+      barbeiro:  a.colaboradores ? a.colaboradores.nome : null,
+      servico:   a.servicos ? a.servicos.nome : null,
+      total:     totalPorAg[a.id] != null ? totalPorAg[a.id] : null
+    }))
+    return res.json(visitas)
+  } catch (e) {
+    console.error('[clientes/historico]', e.message)
+    return res.status(500).json({ erro: 'Erro ao carregar histórico do cliente' })
+  }
+})
 router.put('/clientes/:id', autenticar, async (req, res) => {
   try {
     const u = req.usuario
