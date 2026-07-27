@@ -238,6 +238,53 @@ router.post('/', autenticar, async (req, res) => {
   }
 })
 // PUT /agendamentos/:id/status
+// GET /agendamentos/transferidos-presos — agendamentos FUTUROS que ficaram numa unidade,
+// mas cujo barbeiro HOJE está em outra (foi transferido). Detecção dinâmica; não resolvidos.
+// Gerente/caixa veem só a própria unidade; proprietário pode passar ?unidade_id.
+router.get('/transferidos-presos', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
+  try {
+    let unidadeAlvo = req.query.unidade_id
+    if (req.usuario.perfil !== 'proprietario') unidadeAlvo = req.usuario.unidade_id
+    if (!unidadeAlvo) return res.json([])
+    const agora = new Date().toISOString()
+    const { data: ags, error } = await supabaseAdmin.from('agendamentos')
+      .select('id, data_hora_ini, cliente_nome, status, unidade_id, servicos(nome), colaboradores!colaborador_id(nome, unidade_id)')
+      .eq('unidade_id', unidadeAlvo)
+      .in('status', ['agendado', 'confirmado', 'andamento'])
+      .gte('data_hora_ini', agora)
+      .eq('transferencia_resolvida', false)
+      .order('data_hora_ini', { ascending: true })
+    if (error) throw error
+    const presos = (ags || [])
+      .filter(a => a.colaboradores && a.colaboradores.unidade_id && String(a.colaboradores.unidade_id) !== String(a.unidade_id))
+      .map(a => ({
+        id: a.id,
+        data_hora: a.data_hora_ini,
+        cliente:  a.cliente_nome,
+        servico:  a.servicos ? a.servicos.nome : null,
+        barbeiro: a.colaboradores ? a.colaboradores.nome : null
+      }))
+    return res.json(presos)
+  } catch (e) {
+    console.error('[transferidos-presos]', e.message)
+    return res.status(500).json({ erro: 'Erro ao buscar agendamentos presos' })
+  }
+})
+
+// POST /agendamentos/:id/transferencia-resolvida — tira o agendamento da lista de pendências
+// (só marca o alerta como resolvido; NÃO move nem cancela o agendamento).
+router.post('/:id/transferencia-resolvida', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa'), async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin.from('agendamentos')
+      .update({ transferencia_resolvida: true }).eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[transferencia-resolvida]', e.message)
+    return res.status(500).json({ erro: 'Erro ao marcar como resolvido' })
+  }
+})
+
 router.put('/:id/status', autenticar, async (req, res) => {
   try {
     const { id } = req.params
