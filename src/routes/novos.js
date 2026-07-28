@@ -1397,7 +1397,7 @@ router.get('/produtos', autenticar, async (req, res) => {
 
 router.get('/colaboradores-todos', autenticar, TODOS, async (req, res) => {
   try {
-    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,unidades(nome)').eq('ativo', true).order('nome')
+    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,mostrar_sobrenome,unidades(nome)').eq('ativo', true).order('nome')
     return res.json(data || [])
   } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
 })
@@ -1410,7 +1410,7 @@ router.get('/colaboradores-minha-unidade', autenticar, async (req, res) => {
     const u = req.usuario
     const { unidade_id } = req.query
     let q = supabaseAdmin.from('colaboradores')
-      .select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,unidades(nome)')
+      .select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,mostrar_sobrenome,unidades(nome)')
       .eq('ativo', true).order('nome')
     if (u.perfil === 'proprietario') {
       if (unidade_id) q = q.eq('unidade_id', unidade_id)
