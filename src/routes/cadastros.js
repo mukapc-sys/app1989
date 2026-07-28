@@ -66,13 +66,20 @@ router.put('/unidades/:id', autenticar, exigirPerfil('proprietario', 'gerente'),
   }
 })
 // ============ COLABORADORES ============
+// Nome de exibição do barbeiro: sobrenome só quando o toggle 'mostrar_sobrenome'
+// está ligado no cadastro. Padrão = só o primeiro nome. Fonte única desta regra.
+function nomeExibicao(c){
+  if(!c) return ''
+  return c.mostrar_sobrenome ? String(c.nome || '') : String(c.nome || '').split(' ')[0]
+}
+
 router.get('/colaboradores', autenticar, async (req, res) => {
   try {
     const { unidade_id } = req.query
     const u = req.usuario
     let query = supabaseAdmin
       .from('colaboradores')
-      .select('id, nome, email, whatsapp, perfil, comissao_pct, salario, ativo, foto_url, unidade_id, unidades(nome)')
+      .select('id, nome, email, whatsapp, perfil, comissao_pct, salario, ativo, foto_url, unidade_id, mostrar_sobrenome, unidades(nome)')
       .eq('ativo', true)
       .in('perfil', ['colaborador','gerente'])   // só quem ATENDE (nunca o caixa)
       .order('nome')
@@ -85,14 +92,14 @@ router.get('/colaboradores', autenticar, async (req, res) => {
     }
     const { data, error } = await query
     if (error) throw error
-    return res.json(data)
+    return res.json((data || []).map(c => ({ ...c, nome_exibicao: nomeExibicao(c) })))
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao buscar colaboradores' })
   }
 })
 router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
-    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2 } = req.body
+    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2, mostrar_sobrenome } = req.body
     // Gerente: força a própria unidade e não pode criar proprietário
     let unidadeFinal = unidade_id
     let perfilFinal = perfil
@@ -114,6 +121,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
       user_id: userId, nome, whatsapp, cpf, data_nasc,
       perfil: perfilFinal, unidade_id: unidadeFinal, foto_url, foto_url_2,
       comissao_pct: ehFuncionario ? 0 : comissao_pct,
+      mostrar_sobrenome: !!mostrar_sobrenome,
     }
     if (email) registro.email = email
     if (ehFuncionario) registro.salario = parseFloat(salario) || 0
