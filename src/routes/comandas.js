@@ -5,6 +5,21 @@ const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 const { exigirFuncao, podeFuncao } = require('./permissoes')
 
+// TRAVA DE CAIXA: nenhum movimento (finalizar, vender, lançar item) pode ocorrer com
+// o caixa da unidade FECHADO. Checa se existe sessão 'aberto' para a unidade.
+async function caixaAbertoNaUnidade(unidadeId) {
+  if (!unidadeId) return false
+  const { data } = await supabaseAdmin.from('caixa_sessoes')
+    .select('id').eq('status', 'aberto').eq('unidade_id', unidadeId).limit(1)
+  return !!(data && data.length)
+}
+// Descobre a unidade de uma comanda existente (p/ travar item/finalizar).
+async function unidadeDaComanda(comandaId) {
+  const { data } = await supabaseAdmin.from('comandas').select('unidade_id').eq('id', comandaId).single()
+  return data ? data.unidade_id : null
+}
+const ERRO_CAIXA_FECHADO = { erro: 'Caixa fechado. Abra o caixa da unidade antes de registrar qualquer movimento.' }
+
 // Normaliza a forma de pagamento para os valores que o banco aceita.
 function normalizarForma(f) {
   const s = String(f || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -246,6 +261,8 @@ router.post('/', autenticar, exigirPerfil('proprietario','gerente','colaborador'
   try {
     const { agendamento_id, cliente_id, colaborador_id, unidade_id, observacao } = req.body
 
+    if (!(await caixaAbertoNaUnidade(unidade_id || req.usuario.unidade_id))) return res.status(409).json(ERRO_CAIXA_FECHADO)
+
     const { data, error } = await supabaseAdmin
       .from('comandas')
       .insert({
@@ -297,6 +314,8 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     if (!unidadeAvulsa) {
       return res.status(400).json({ erro: 'Não foi possível definir a unidade desta comanda. Selecione a unidade ou peça para o gerente lançar.' })
     }
+
+    if (!(await caixaAbertoNaUnidade(unidadeAvulsa))) return res.status(409).json(ERRO_CAIXA_FECHADO)
 
     const { data: comanda, error: errC } = await supabaseAdmin
       .from('comandas')
@@ -352,6 +371,7 @@ router.post('/:id/itens', autenticar, async (req, res) => {
   try {
     const { tipo, servico_id, produto_id, quantidade = 1, colaborador_id, ficha } = req.body
     const comanda_id = req.params.id
+    if (!(await caixaAbertoNaUnidade(await unidadeDaComanda(comanda_id)))) return res.status(409).json(ERRO_CAIXA_FECHADO)
 
     let descricao, valor_unit, ficha_bar = false
 
@@ -411,6 +431,7 @@ router.delete('/:id/itens/:item_id', autenticar, async (req, res) => {
 // (permite cobrar mais, menos ou zerar; o total da comanda recalcula sozinho)
 router.patch('/:id/itens/:item_id', autenticar, async (req, res) => {
   try {
+    if (!(await caixaAbertoNaUnidade(await unidadeDaComanda(req.params.id)))) return res.status(409).json(ERRO_CAIXA_FECHADO)
     const patch = {}
     if (req.body.valor_unit !== undefined && req.body.valor_unit !== null) {
       const v = parseFloat(req.body.valor_unit)
@@ -448,6 +469,8 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
   try {
     const { forma_pgto, desconto = 0 } = req.body
     const { id } = req.params
+
+    if (!(await caixaAbertoNaUnidade(await unidadeDaComanda(id)))) return res.status(409).json(ERRO_CAIXA_FECHADO)
 
     if (!forma_pgto) return res.status(400).json({ erro: 'forma_pgto é obrigatório' })
     // Camada 2: quem não pode dar desconto não pode enviar desconto > 0
