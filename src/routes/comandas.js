@@ -53,7 +53,7 @@ router.get('/', autenticar, exigirPerfil('proprietario','gerente','colaborador',
       .select(`
         id, status, subtotal, desconto, total, forma_pgto, pagamentos, aberta_em, finalizada_em, observacao, colaborador_id, cliente_nome,
         clientes(nome, whatsapp),
-        colaboradores!colaborador_id(id, nome)
+        colaboradores!colaborador_id(id, nome, mostrar_sobrenome)
       `)
       .order('aberta_em', { ascending: false })
 
@@ -146,7 +146,7 @@ router.get('/:id', autenticar, async (req, res) => {
       .select(`
         *, 
         clientes(id, nome, whatsapp),
-        colaboradores!colaborador_id(id, nome),
+        colaboradores!colaborador_id(id, nome, mostrar_sobrenome),
         unidades(id, nome),
         itens_comanda(*)
       `)
