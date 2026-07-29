@@ -288,6 +288,24 @@ router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','geren
 
 // GET /clientes/:id/historico — últimas visitas do cliente (todos os perfis do PRO).
 // Colunas: data/hora, unidade, barbeiro, serviço, total da comanda ligada.
+// GET /clientes/contato-por-nome?nome=X — acha o WhatsApp de um cliente pelo nome, mas
+// SÓ quando o match é ÚNICO (0 ou vários = não arrisca abrir a pessoa errada).
+// Fallback pra agendamento sem cliente_id nem número salvo. Todos os perfis do PRO.
+router.get('/clientes/contato-por-nome', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const nome = String(req.query.nome || '').trim()
+    if (!nome) return res.json({ whatsapp: null })
+    const { data } = await supabaseAdmin.from('clientes')
+      .select('nome, whatsapp').ilike('nome', nome).limit(5)
+    const comZap = (data || []).filter(c => c.whatsapp)
+    if (comZap.length === 1) return res.json({ nome: comZap[0].nome, whatsapp: comZap[0].whatsapp })
+    return res.json({ whatsapp: null, ambiguo: comZap.length > 1 })
+  } catch (e) {
+    console.error('[clientes/contato-por-nome]', e.message)
+    return res.status(500).json({ erro: 'Erro ao buscar contato' })
+  }
+})
+
 // GET /clientes/:id/contato — nome + WhatsApp do cliente (p/ o barbeiro falar sobre o
 // agendamento pelo WhatsApp do próprio celular). Todos os perfis do PRO.
 router.get('/clientes/:id/contato', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
