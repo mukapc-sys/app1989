@@ -171,6 +171,29 @@ router.put('/colaboradores/:id', autenticar, exigirPerfil('proprietario', 'geren
 // POST /colaboradores/:id/transferir — troca SÓ a unidade do barbeiro.
 // Autonomia total (A1): proprietário ou gerente, qualquer barbeiro pra qualquer unidade.
 // Ação dedicada de propósito: não abre edição de salário/comissão entre unidades.
+// POST /colaboradores/:id/redefinir-acesso — corrige o email de LOGIN e/ou define a senha
+// do colaborador (opera no usuário de Auth via admin, que gera o hash correto da senha).
+// A senha é digitada pelo gestor na tela; nunca fica no código.
+router.post('/colaboradores/:id/redefinir-acesso', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
+  try {
+    const { email, senha } = req.body
+    if (!email && !senha) return res.status(400).json({ erro: 'Informe o novo email e/ou a nova senha' })
+    const { data: colab } = await supabaseAdmin.from('colaboradores').select('id, user_id, nome').eq('id', req.params.id).single()
+    if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
+    if (!colab.user_id) return res.status(400).json({ erro: 'Este colaborador não tem usuário de login (ex.: funcionário sem acesso ao sistema).' })
+    const patch = { email_confirm: true }
+    if (email) patch.email = String(email).trim()
+    if (senha) patch.password = String(senha)
+    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(colab.user_id, patch)
+    if (authErr) throw authErr
+    if (email) await supabaseAdmin.from('colaboradores').update({ email: String(email).trim() }).eq('id', req.params.id)
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[redefinir-acesso]', e.message)
+    return res.status(500).json({ erro: e.message || 'Erro ao redefinir acesso' })
+  }
+})
+
 router.post('/colaboradores/:id/transferir', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
     const { nova_unidade_id } = req.body
