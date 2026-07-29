@@ -22,6 +22,7 @@ const TELAS = [
   { chave:'clientes',    nome:'Clientes',         padrao:['gerente'] },
   { chave:'push',        nome:'Disparos / Push',  padrao:['gerente'] },
   { chave:'cadastros',   nome:'Cadastros',        padrao:['gerente'] },
+  { chave:'whatsapp',    nome:'WhatsApp',         padrao:['gerente','caixa'] },
 ]
 const CHAVES = TELAS.map(t => t.chave)
 const BASES_VALIDAS = ['gerente','caixa','colaborador','funcionario']
