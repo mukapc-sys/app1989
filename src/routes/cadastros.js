@@ -288,6 +288,19 @@ router.get('/clientes/:id/plano', autenticar, exigirPerfil('proprietario','geren
 
 // GET /clientes/:id/historico — últimas visitas do cliente (todos os perfis do PRO).
 // Colunas: data/hora, unidade, barbeiro, serviço, total da comanda ligada.
+// GET /clientes/:id/contato — nome + WhatsApp do cliente (p/ o barbeiro falar sobre o
+// agendamento pelo WhatsApp do próprio celular). Todos os perfis do PRO.
+router.get('/clientes/:id/contato', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const { data } = await supabaseAdmin.from('clientes').select('nome, whatsapp').eq('id', req.params.id).single()
+    if (!data) return res.status(404).json({ erro: 'Cliente não encontrado' })
+    return res.json({ nome: data.nome || null, whatsapp: data.whatsapp || null })
+  } catch (e) {
+    console.error('[clientes/contato]', e.message)
+    return res.status(500).json({ erro: 'Erro ao buscar contato do cliente' })
+  }
+})
+
 router.get('/clientes/:id/historico', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
     const clienteId = req.params.id
