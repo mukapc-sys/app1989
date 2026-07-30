@@ -194,6 +194,36 @@ router.post('/colaboradores/:id/redefinir-acesso', autenticar, exigirPerfil('pro
   }
 })
 
+// POST /colaboradores/:id/demitir — corta o acesso e tira da lista (ativo=false + marca
+// a data da demissão). Histórico intacto; login já é bloqueado pelo auth (ativo=false).
+router.post('/colaboradores/:id/demitir', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('colaboradores')
+      .update({ ativo: false, demitido_em: new Date().toISOString() }).eq('id', req.params.id)
+      .select('id, nome').single()
+    if (error) throw error
+    return res.json({ ok: true, colaborador: data })
+  } catch (e) {
+    console.error('[demitir]', e.message)
+    return res.status(500).json({ erro: 'Erro ao demitir colaborador' })
+  }
+})
+
+// POST /colaboradores/:id/readmitir — reativa (ativo=true, limpa a demissão). Volta pra lista,
+// agenda e app, e volta a conseguir logar.
+router.post('/colaboradores/:id/readmitir', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('colaboradores')
+      .update({ ativo: true, demitido_em: null }).eq('id', req.params.id)
+      .select('id, nome').single()
+    if (error) throw error
+    return res.json({ ok: true, colaborador: data })
+  } catch (e) {
+    console.error('[readmitir]', e.message)
+    return res.status(500).json({ erro: 'Erro ao readmitir colaborador' })
+  }
+})
+
 router.post('/colaboradores/:id/transferir', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
     const { nova_unidade_id } = req.body
