@@ -1397,7 +1397,10 @@ router.get('/produtos', autenticar, async (req, res) => {
 
 router.get('/colaboradores-todos', autenticar, TODOS, async (req, res) => {
   try {
-    const { data } = await supabaseAdmin.from('colaboradores').select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,mostrar_sobrenome,unidades(nome)').eq('ativo', true).order('nome')
+    const verDemitidos = req.query.demitidos === 'true'   // ?demitidos=true → lista os demitidos
+    const { data } = await supabaseAdmin.from('colaboradores')
+      .select('id,nome,email,whatsapp,perfil,comissao_pct,foto_url,foto_url_2,ativo,unidade_id,mostrar_sobrenome,demitido_em,unidades(nome)')
+      .eq('ativo', verDemitidos ? false : true).order('nome')
     return res.json(data || [])
   } catch (err) { return res.status(500).json({ erro: 'Erro' }) }
 })
