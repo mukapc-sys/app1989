@@ -563,7 +563,8 @@ router.post('/produtos', autenticar, ADMIN, async (req, res) => {
     if (error) throw error
     return res.status(201).json(data)
   } catch (err) {
-    return res.status(500).json({ erro: 'Erro ao criar produto' })
+    console.error('[produtos POST]', err.message)
+    return res.status(500).json({ erro: 'Erro ao criar produto: ' + err.message })
   }
 })
 router.put('/produtos/:id', autenticar, ADMIN, async (req, res) => {
@@ -572,7 +573,8 @@ router.put('/produtos/:id', autenticar, ADMIN, async (req, res) => {
     if (error) throw error
     return res.json(data)
   } catch (err) {
-    return res.status(500).json({ erro: 'Erro ao atualizar produto' })
+    console.error('[produtos PUT]', err.message)
+    return res.status(500).json({ erro: 'Erro ao atualizar produto: ' + err.message })
   }
 })
 // ============ ESTOQUE ============
