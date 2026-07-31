@@ -195,6 +195,10 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
       .eq('id', colaborador_id).single()
     if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
     const unidade_id = colab.unidade_id
+    // Estoque sai de ONDE O PRODUTO ESTÁ = unidade de quem está lançando (importante p/
+    // barbeiro transferido: o consumo acontece na unidade antiga, não na nova dele).
+    // Proprietário (sem unidade fixa) cai na unidade do colaborador.
+    const unidade_estoque = req.usuario.unidade_id || colab.unidade_id
 
     // 1) registra o vale
     const { data: vale, error: eVale } = await supabaseAdmin.from('vales').insert({
@@ -223,7 +227,7 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
       .filter(it => it.produto_id)
       .map(it => ({
         produto_id:     it.produto_id,
-        unidade_id,
+        unidade_id:     unidade_estoque,
         tipo:           'saida',
         quantidade:     parseInt(it.qtd) || 1,
         valor_unitario: parseFloat(it.valor) || 0,
