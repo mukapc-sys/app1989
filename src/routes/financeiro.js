@@ -308,11 +308,13 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, exigirFuncao('ver_comi
       descPorColab[v.colaborador_id] = (descPorColab[v.colaborador_id] || 0) + (parseFloat(v.valor) || 0)
     })
     try {
-      const { data: vProd } = await supabaseAdmin.from('vales').select('colaborador_id, valor').gte('criado_em', ini).lte('criado_em', fim)
+      const { data: vProd } = await supabaseAdmin.from('vales').select('colaborador_id, valor')
+        .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
       somaVales(vProd)
     } catch (e) { console.error('[comissoes-barbeiro vales]', e.message) }
     try {
-      const { data: vPix } = await supabaseAdmin.from('vales_pix').select('colaborador_id, valor').gte('criado_em', ini).lte('criado_em', fim)
+      const { data: vPix } = await supabaseAdmin.from('vales_pix').select('colaborador_id, valor')
+        .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
       somaVales(vPix)
     } catch (e) { console.error('[comissoes-barbeiro vales_pix]', e.message) }
     const lista = (fx.linhas || []).map(l => {
