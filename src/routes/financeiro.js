@@ -302,17 +302,35 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, exigirFuncao('ver_comi
     })
     const { data: unidades } = await supabaseAdmin.from('unidades').select('id, nome')
     const unome = (id) => { const un = (unidades || []).find(x => x.id === id); return un ? un.nome.replace('Unidade ', '') : '' }
-    const lista = (fx.linhas || []).map(l => ({
+    // DESCONTOS do período por colaborador = vales (consumo de produto) + vales_pix (adiantamentos)
+    const descPorColab = {}
+    const somaVales = (rows) => (rows || []).forEach(v => {
+      descPorColab[v.colaborador_id] = (descPorColab[v.colaborador_id] || 0) + (parseFloat(v.valor) || 0)
+    })
+    try {
+      const { data: vProd } = await supabaseAdmin.from('vales').select('colaborador_id, valor').gte('criado_em', ini).lte('criado_em', fim)
+      somaVales(vProd)
+    } catch (e) { console.error('[comissoes-barbeiro vales]', e.message) }
+    try {
+      const { data: vPix } = await supabaseAdmin.from('vales_pix').select('colaborador_id, valor').gte('criado_em', ini).lte('criado_em', fim)
+      somaVales(vPix)
+    } catch (e) { console.error('[comissoes-barbeiro vales_pix]', e.message) }
+    const lista = (fx.linhas || []).map(l => {
+      const descontos = round(descPorColab[l.colaborador_id] || 0)
+      return {
       nome: l.nome,
       unidade: unome(unidDe[l.colaborador_id]) || l.unidade || '',
       atendimentos: cont[l.colaborador_id] || 0,
       faturado: round(l.servico_total + l.produto_total),
       comissao_pct: l.servico_pct,
       comissao: l.comissao_total,
+      descontos: descontos,
+      a_receber: round((l.comissao_total || 0) - descontos),
       servico_total: l.servico_total, servico_pct: l.servico_pct, servico_comissao: l.servico_comissao,
       produto_total: l.produto_total, produto_unidades: l.produto_unidades, produto_pct: l.produto_pct, produto_comissao: l.produto_comissao,
       ab_faturado: 0
-    })).sort((a, b) => b.comissao - a.comissao)
+      }
+    }).sort((a, b) => b.comissao - a.comissao)
     return res.json(lista)
   } catch (err) {
     console.error('[comissoes-barbeiro]', err.message)
