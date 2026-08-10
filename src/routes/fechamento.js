@@ -66,10 +66,51 @@ async function valesDoPeriodo(colaborador_id, iniStr, fimStr) {
 }
 
 // monta o objeto completo do contracheque (sem salvar)
+// Prêmio de gestão: % sobre o faturamento TOTAL da unidade no período.
+// 5% se a unidade bateu a meta de faturamento do mês, senão 3%.
+// Divisão: subgerentes 25% (rateado) / gerentes 75% (rateado). Sem subgerente → gerente 100%.
+// Só para perfil 'gerente' (subgerente é gerente com is_subgerente=true).
+async function premioGestao(colab, ini, fim, mes) {
+  if (colab.perfil !== 'gerente' || !colab.unidade_id) return null
+  // faturamento total da unidade no período (comandas finalizadas — inclui tudo)
+  const { data: cmds } = await supabaseAdmin.from('comandas')
+    .select('total').eq('status', 'finalizada').eq('unidade_id', colab.unidade_id)
+    .gte('finalizada_em', ini).lte('finalizada_em', fim)
+  const unitFat = (cmds || []).reduce((s, c) => s + (parseFloat(c.total) || 0), 0)
+  // meta de faturamento da unidade no mês
+  const { data: metaU } = await supabaseAdmin.from('metas_unidade')
+    .select('faturamento').eq('unidade_id', colab.unidade_id).eq('mes', mes).maybeSingle()
+  const metaFat = parseFloat(metaU && metaU.faturamento) || 0
+  const bateu = metaFat > 0 && unitFat >= metaFat
+  const pct = bateu ? 0.05 : 0.03
+  const premioUnidade = unitFat * pct
+  // gestores ativos da unidade
+  const { data: gestores } = await supabaseAdmin.from('colaboradores')
+    .select('id, is_subgerente').eq('perfil', 'gerente').eq('unidade_id', colab.unidade_id).eq('ativo', true)
+  const nSub = (gestores || []).filter(g => g.is_subgerente).length
+  const nGer = (gestores || []).filter(g => !g.is_subgerente).length
+  let valor = 0
+  if (colab.is_subgerente) {
+    valor = nSub > 0 ? (premioUnidade * 0.25 / nSub) : 0
+  } else {
+    const pool = nSub > 0 ? 0.75 : 1.0   // sem subgerente, o gerente leva 100%
+    valor = nGer > 0 ? (premioUnidade * pool / nGer) : 0
+  }
+  return {
+    unidade_faturamento: round(unitFat),
+    unidade_meta: round(metaFat),
+    bateu_meta: bateu,
+    pct_premio: pct,
+    premio_unidade: round(premioUnidade),
+    is_subgerente: !!colab.is_subgerente,
+    valor: round(valor),
+  }
+}
+
 async function montarFechamento(colaborador_id, iniStr, fimStr) {
   // unidade do colaborador
   const { data: colab } = await supabaseAdmin.from('colaboradores')
-    .select('id, nome, perfil, salario, unidade_id, saldo_vales_pix, unidades(nome)')
+    .select('id, nome, perfil, salario, unidade_id, saldo_vales_pix, is_subgerente, unidades(nome)')
     .eq('id', colaborador_id).single()
   if (!colab) return null
 
@@ -91,7 +132,10 @@ async function montarFechamento(colaborador_id, iniStr, fimStr) {
   }
 
   const total_descontos  = round(vales.total_adiantamento + vales.total_produtos)
-  const liquido          = round(comissao_bruta - total_descontos)
+  // prêmio de gestão (só gerente/subgerente) — soma ao líquido
+  const premio = ehFuncionario ? null : await premioGestao(colab, ini, fim, String(iniStr).slice(0, 7))
+  const premio_gestao = premio ? premio.valor : 0
+  const liquido          = round(comissao_bruta + premio_gestao - total_descontos)
 
   return {
     colaborador_id,
@@ -118,6 +162,9 @@ async function montarFechamento(colaborador_id, iniStr, fimStr) {
     lista_adiantamentos: vales.adiantamentos,
     lista_vale_produtos: vales.produtos,
     total_descontos,
+
+    premio_gestao,
+    premio_detalhe: premio,
 
     liquido,
   }
