@@ -114,9 +114,33 @@ async function realizadoMes(mes, unidade_id) {
         if (unitVal >= 0.10) { geral.produtos += q; if (bucket) bucket.produtos += q }
       }
     } else if (tipo.indexOf('plano') !== -1) {
-      geral.planos += 1; if (bucket) bucket.planos += 1
+      // planos são contados à parte (só NOVOS), fora do loop de itens — ver abaixo
     }
   })
+
+  // PLANOS NOVOS = assinaturas criadas no mês (data_inicio no período).
+  // Renovação ATUALIZA a assinatura (não mexe em data_inicio) → não conta aqui.
+  // Unidade/atribuição vêm do vendedor_id (a assinatura não grava unidade_id).
+  {
+    const dIni = String(ini).slice(0, 10), dFim = String(fim).slice(0, 10)
+    const { data: novasAssin } = await supabaseAdmin.from('assinaturas')
+      .select('vendedor_id, data_inicio, status')
+      .gte('data_inicio', dIni).lte('data_inicio', dFim)
+    const vendIds = [...new Set((novasAssin || []).map(a => a.vendedor_id).filter(Boolean))]
+    const uniDe = {}
+    if (vendIds.length) {
+      const { data: vends } = await supabaseAdmin.from('colaboradores').select('id, unidade_id').in('id', vendIds)
+      ;(vends || []).forEach(v => { uniDe[v.id] = v.unidade_id })
+    }
+    ;(novasAssin || []).forEach(a => {
+      if (String(a.status) === 'cancelada') return               // venda desfeita não conta
+      const uni = uniDe[a.vendedor_id]
+      if (unidade_id && uni !== unidade_id) return                // filtra pela unidade do vendedor
+      geral.planos += 1
+      const vid = a.vendedor_id
+      if (vid) { if (!porColab[vid]) porColab[vid] = novo(); porColab[vid].planos += 1 }
+    })
+  }
 
   // finaliza clientes (tamanho do set)
   function fechar(o) {
