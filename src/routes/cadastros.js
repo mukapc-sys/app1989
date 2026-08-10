@@ -99,7 +99,7 @@ router.get('/colaboradores', autenticar, async (req, res) => {
 })
 router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'), exigirFuncao('gerir_colaborador'), async (req, res) => {
   try {
-    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2, mostrar_sobrenome } = req.body
+    const { nome, email, whatsapp, cpf, data_nasc, perfil, unidade_id, comissao_pct, salario, servico_ids, senha_temp, foto_url, foto_url_2, mostrar_sobrenome, is_subgerente } = req.body
     // Gerente: força a própria unidade e não pode criar proprietário
     let unidadeFinal = unidade_id
     let perfilFinal = perfil
@@ -122,6 +122,7 @@ router.post('/colaboradores', autenticar, exigirPerfil('proprietario', 'gerente'
       perfil: perfilFinal, unidade_id: unidadeFinal, foto_url, foto_url_2,
       comissao_pct: ehFuncionario ? 0 : comissao_pct,
       mostrar_sobrenome: !!mostrar_sobrenome,
+      is_subgerente: (perfilFinal === 'gerente') ? !!is_subgerente : false,
     }
     if (email) registro.email = email
     if (ehFuncionario) registro.salario = parseFloat(salario) || 0
@@ -326,10 +327,12 @@ router.get('/clientes/contato-por-nome', autenticar, exigirPerfil('proprietario'
     const nome = String(req.query.nome || '').trim()
     if (!nome) return res.json({ whatsapp: null })
     const { data } = await supabaseAdmin.from('clientes')
-      .select('nome, whatsapp').ilike('nome', nome).limit(5)
+      .select('id, nome, whatsapp').ilike('nome', nome).limit(5)
     const comZap = (data || []).filter(c => c.whatsapp)
-    if (comZap.length === 1) return res.json({ nome: comZap[0].nome, whatsapp: comZap[0].whatsapp })
-    return res.json({ whatsapp: null, ambiguo: comZap.length > 1 })
+    if (comZap.length === 1) return res.json({ id: comZap[0].id, nome: comZap[0].nome, whatsapp: comZap[0].whatsapp })
+    // sem número mas nome único: ainda devolve o id (útil pra achar o plano do assinante)
+    if ((data || []).length === 1) return res.json({ id: data[0].id, nome: data[0].nome, whatsapp: data[0].whatsapp || null })
+    return res.json({ whatsapp: null, ambiguo: (data || []).length > 1 })
   } catch (e) {
     console.error('[clientes/contato-por-nome]', e.message)
     return res.status(500).json({ erro: 'Erro ao buscar contato' })
