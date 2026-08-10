@@ -182,7 +182,7 @@ router.get('/colaboradores', autenticar, GESTOR, TELA_METAS, async (req, res) =>
     const mes = req.query.mes || mesAtual()
     let uni = req.query.unidade_id
     if (req.usuario.perfil === 'gerente') uni = req.usuario.unidade_id
-    let q = supabaseAdmin.from('metas_colaborador').select('*, colaboradores(nome)').eq('mes', mes)
+    let q = supabaseAdmin.from('metas_colaborador').select('*').eq('mes', mes)
     if (uni) q = q.eq('unidade_id', uni)
     const { data } = await q
     return res.json(data || [])
@@ -273,7 +273,7 @@ router.get('/progresso', autenticar, async (req, res) => {
 
     // por barbeiro
     const { data: metasCol } = await supabaseAdmin.from('metas_colaborador')
-      .select('*, colaboradores(nome)').eq('unidade_id', unidade_id).eq('mes', mes)
+      .select('*, colaboradores!colaborador_id(nome)').eq('unidade_id', unidade_id).eq('mes', mes)
     const barbeiros = (metasCol || []).map(mc => ({
       colaborador_id: mc.colaborador_id,
       nome: (mc.colaboradores && mc.colaboradores.nome) || '—',
