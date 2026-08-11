@@ -103,18 +103,27 @@ router.post('/minha-senha/login', autenticar, async (req, res) => {
     if (nova.length < 4) return res.status(400).json({ erro: 'A nova senha precisa ter ao menos 4 caracteres.' })
 
     const { data: colab } = await supabaseAdmin
-      .from('colaboradores').select('senha_hash').eq('id', req.usuario.id).single()
+      .from('colaboradores').select('email, user_id, senha_hash').eq('id', req.usuario.id).single()
     if (!colab) return res.status(404).json({ erro: 'Usuário não encontrado.' })
-
-    // se já tem senha, confere a atual; se não tem (1ª vez), permite definir
-    if (colab.senha_hash) {
-      const ok = await bcrypt.compare(atual, colab.senha_hash)
-      if (!ok) return res.status(403).json({ erro: 'Senha atual incorreta.' })
+    if (!colab.user_id || !colab.email) {
+      return res.status(400).json({ erro: 'Cadastro sem login configurado. Peça ao administrador para redefinir.' })
     }
+
+    // O login usa o Supabase Auth — então a senha atual é conferida lá (não no senha_hash antigo).
+    const { supabase } = require('../config/supabase')
+    const { error: signErr } = await supabase.auth.signInWithPassword({
+      email: String(colab.email).toLowerCase().trim(), password: atual
+    })
+    if (signErr) return res.status(403).json({ erro: 'Senha atual incorreta.' })
+
+    // Troca a senha NO AUTH (fonte de verdade do login).
+    const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(colab.user_id, { password: nova })
+    if (updErr) throw updErr
+
+    // Mantém o hash local em sincronia (não é usado pelo login, mas evita divergência).
     const hash = await bcrypt.hash(nova, 10)
-    const { error } = await supabaseAdmin
-      .from('colaboradores').update({ senha_hash: hash }).eq('id', req.usuario.id)
-    if (error) throw error
+    await supabaseAdmin.from('colaboradores').update({ senha_hash: hash }).eq('id', req.usuario.id)
+
     return res.json({ ok: true })
   } catch (err) {
     console.error('[minha-senha/login]', err.message)
