@@ -176,6 +176,23 @@ router.get('/:id', autenticar, async (req, res) => {
   }
 })
 
+// POST /comandas/:id/plano-pendente — guarda (ou limpa) o plano contratado no atendimento,
+// direto NA COMANDA. Assim a assinatura é criada ao finalizar mesmo que a comanda seja
+// reaberta em OUTRO dispositivo (o registro não fica só na memória/sessão do navegador).
+// body: { plano: {...} } para guardar, ou { plano: null } para limpar.
+router.post('/:id/plano-pendente', autenticar, async (req, res) => {
+  try {
+    const plano = (req.body && req.body.plano) ? req.body.plano : null
+    const { error } = await supabaseAdmin
+      .from('comandas').update({ plano_pendente: plano }).eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[comandas/plano-pendente]', err.message)
+    return res.status(500).json({ erro: 'Erro ao salvar plano pendente' })
+  }
+})
+
 // POST /comandas/:id/corrigir-forma — troca a forma de pagamento de uma comanda
 // JÁ finalizada, direto pelo id (serve pra qualquer comanda, inclusive avulsa).
 // Gestor logado autoriza sozinho; caixa precisa da senha de autorização.
