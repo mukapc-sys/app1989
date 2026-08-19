@@ -593,7 +593,7 @@ router.post('/cashback/resgatar', autenticar, async (req, res) => {
     let pontos = parseInt(req.body && req.body.pontos) || 0
     if (!cliente_id || pontos <= 0) return res.json({ pontos_usados: 0 })
     pontos = Math.floor(pontos / 30) * 30   // sempre múltiplo de 30 (30 pts = R$1)
-    if (pontos > 600) pontos = 600          // teto por comanda: 600 pts (= R$20)
+    // sem teto por comanda (mantém o limite por produto + saldo do cliente)
     if (pontos <= 0) return res.json({ pontos_usados: 0 })
 
     // Trava: se essa comanda já teve resgate, não debita de novo.
@@ -638,7 +638,7 @@ router.post('/cashback/definir-resgate', autenticar, async (req, res) => {
     let pedido = parseInt(req.body && req.body.pontos) || 0
     if (pedido < 0) pedido = 0
     pedido = Math.floor(pedido / 30) * 30            // sempre múltiplo de 30 (30 pts = R$1)
-    if (pedido > 600) pedido = 600                   // teto por comanda: 600 pts (= R$20)
+    // sem teto por comanda (mantém o limite por produto + saldo do cliente)
 
     // Quanto já estava resgatado NESTA comanda (X). É o ponto de partida do ajuste.
     const { data: cmd } = await supabaseAdmin.from('comandas')
@@ -657,7 +657,7 @@ router.post('/cashback/definir-resgate', autenticar, async (req, res) => {
         limiteProdutos += Math.min(150, Math.floor(v) * 30)
       }
     }
-    limiteProdutos = Math.min(limiteProdutos, 600)
+    // sem teto por comanda: limiteProdutos = soma dos limites por produto (sem corte de 600)
 
     // Saldo atual da carteira (S). O disponível REAL para este resgate é S + X,
     // porque devolvemos o que já estava resgatado antes de aplicar o novo valor.
