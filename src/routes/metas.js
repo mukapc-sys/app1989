@@ -260,9 +260,8 @@ router.get('/progresso', autenticar, async (req, res) => {
     let unidade_id = req.query.unidade_id
     let colaborador_id = req.query.colaborador_id
     if (u.perfil === 'colaborador') { colaborador_id = u.id; unidade_id = u.unidade_id }
-    else if (u.perfil === 'gerente') { unidade_id = u.unidade_id }
+    else if (u.perfil === 'gerente') { unidade_id = u.unidade_id }   // gerente: meta própria + rank (ramo dedicado abaixo)
 
-    const real = await realizadoMes(mes, unidade_id)
     const diasRest = diasUteisRestantes(mes)
 
     function montar(meta, realizado) {
@@ -282,12 +281,43 @@ router.get('/progresso', autenticar, async (req, res) => {
       return out
     }
 
+    // PROPRIETÁRIO: visão por UNIDADE (todas as unidades ativas) — cada uma com meta + realizado
+    if (u.perfil === 'proprietario' && !colaborador_id && !unidade_id) {
+      const { data: unidades } = await supabaseAdmin.from('unidades')
+        .select('id, nome').eq('ativa', true).order('nome')
+      const lista = []
+      for (const un of (unidades || [])) {
+        const realU = await realizadoMes(mes, un.id)
+        const { data: metaU } = await supabaseAdmin.from('metas_unidade')
+          .select('*').eq('unidade_id', un.id).eq('mes', mes).maybeSingle()
+        lista.push({ unidade_id: un.id, nome: un.nome, ...montar(metaU, realU.geral) })
+      }
+      return res.json({ tipo:'proprietario', unidades: lista })
+    }
+
+    const real = await realizadoMes(mes, unidade_id)
+
     // COLABORADOR: só a própria meta
     if (colaborador_id) {
       const { data: metaCol } = await supabaseAdmin.from('metas_colaborador')
         .select('*').eq('colaborador_id', colaborador_id).eq('mes', mes).maybeSingle()
       const realizado = real.porColab[colaborador_id] || { clientes:0, faturamento:0, produtos:0, planos:0, bar:0 }
       return res.json({ tipo:'colaborador', colaborador_id, ...montar(metaCol, realizado) })
+    }
+
+    // GERENTE: meta PRÓPRIA (ele também atende) + rank dos barbeiros da unidade
+    if (u.perfil === 'gerente') {
+      const { data: metaGer } = await supabaseAdmin.from('metas_colaborador')
+        .select('*').eq('colaborador_id', u.id).eq('mes', mes).maybeSingle()
+      const minha = montar(metaGer, real.porColab[u.id] || {})
+      const { data: metasColG } = await supabaseAdmin.from('metas_colaborador')
+        .select('*, colaboradores!colaborador_id(nome)').eq('unidade_id', unidade_id).eq('mes', mes)
+      const barbeirosG = (metasColG || []).map(mc => ({
+        colaborador_id: mc.colaborador_id,
+        nome: (mc.colaboradores && mc.colaboradores.nome) || '—',
+        ...montar(mc, real.porColab[mc.colaborador_id] || {})
+      }))
+      return res.json({ tipo:'gerente', colaborador_id: u.id, mes, dias_uteis_restantes: diasRest, categorias: minha.categorias, barbeiros: barbeirosG })
     }
 
     // UNIDADE (gerente/proprietário): meta da unidade + progresso + lista por barbeiro
