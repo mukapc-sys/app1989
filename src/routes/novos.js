@@ -653,8 +653,9 @@ router.post('/cashback/definir-resgate', autenticar, async (req, res) => {
     let limiteProdutos = 0
     for (const it of (itens || [])) {
       if (String(it.tipo || '').toLowerCase() === 'produto') {
-        const v = (parseFloat(it.valor_unit) || 0) * (parseInt(it.quantidade) || 1)
-        limiteProdutos += Math.min(150, Math.floor(v) * 30)
+        const vUnit = parseFloat(it.valor_unit) || 0
+        const qtd = parseInt(it.quantidade) || 1
+        limiteProdutos += qtd * Math.min(150, Math.floor(vUnit) * 30)   // 150 pts por UNIDADE
       }
     }
     // sem teto por comanda: limiteProdutos = soma dos limites por produto (sem corte de 600)
