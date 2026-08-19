@@ -130,11 +130,18 @@ router.post('/', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
 router.get('/pendentes', autenticar, exigirFuncao('aprovar_balanco'), async (req, res) => {
   try {
     const { data } = await supabaseAdmin.from('balancos')
-      .select('id, unidade_id, criado_por_nome, criado_em, unidades(nome)')
+      .select('id, unidade_id, criado_por_nome, criado_em')
       .eq('status', 'pendente').order('criado_em', { ascending: false })
+    // nomes das unidades buscados à parte (não depende de FK/embed)
+    const uids = [...new Set((data || []).map(b => b.unidade_id).filter(Boolean))]
+    const nomeUni = {}
+    if (uids.length) {
+      const { data: unis } = await supabaseAdmin.from('unidades').select('id, nome').in('id', uids)
+      ;(unis || []).forEach(u => { nomeUni[u.id] = u.nome })
+    }
     const lista = (data || []).map(b => ({
       id: b.id, unidade_id: b.unidade_id,
-      unidade: (b.unidades && b.unidades.nome) || '—',
+      unidade: nomeUni[b.unidade_id] || '—',
       criado_por_nome: b.criado_por_nome, criado_em: b.criado_em,
     }))
     return res.json(lista)
@@ -161,17 +168,22 @@ router.get('/pendentes/contagem', autenticar, exigirFuncao('aprovar_balanco'), a
 router.get('/:id', autenticar, CONTADOR, async (req, res) => {
   try {
     const { data: bal } = await supabaseAdmin.from('balancos')
-      .select('*, unidades(nome)').eq('id', req.params.id).single()
+      .select('*').eq('id', req.params.id).single()
     if (!bal) return res.status(404).json({ erro: 'Balanço não encontrado' })
     // gerente/caixa só veem os da própria unidade
     if (req.usuario.perfil !== 'proprietario' && bal.unidade_id !== req.usuario.unidade_id) {
       return res.status(403).json({ erro: 'Sem permissão' })
     }
+    let nomeUni = '—'
+    if (bal.unidade_id) {
+      const { data: uni } = await supabaseAdmin.from('unidades').select('nome').eq('id', bal.unidade_id).maybeSingle()
+      if (uni && uni.nome) nomeUni = uni.nome
+    }
     const { data: itens } = await supabaseAdmin.from('balanco_itens')
       .select('*').eq('balanco_id', bal.id).order('produto_nome')
     return res.json({
       id: bal.id, unidade_id: bal.unidade_id,
-      unidade: (bal.unidades && bal.unidades.nome) || '—',
+      unidade: nomeUni,
       status: bal.status, criado_por_nome: bal.criado_por_nome,
       criado_em: bal.criado_em, concluido_em: bal.concluido_em,
       observacao: bal.observacao,
@@ -189,11 +201,15 @@ router.get('/:id', autenticar, CONTADOR, async (req, res) => {
 router.post('/item/:id/aprovar', autenticar, exigirFuncao('aprovar_balanco'), async (req, res) => {
   try {
     const { data: item } = await supabaseAdmin.from('balanco_itens')
-      .select('*, balancos(unidade_id)').eq('id', req.params.id).single()
+      .select('*').eq('id', req.params.id).single()
     if (!item) return res.status(404).json({ erro: 'Item não encontrado' })
     if (item.status === 'aprovado') return res.json({ ok: true, jaAprovado: true })
 
-    const unidade_id = item.balancos && item.balancos.unidade_id
+    let unidade_id = null
+    if (item.balanco_id) {
+      const { data: balPai } = await supabaseAdmin.from('balancos').select('unidade_id').eq('id', item.balanco_id).maybeSingle()
+      unidade_id = balPai && balPai.unidade_id
+    }
     const diff = Math.round(parseFloat(item.diferenca) || 0)
 
     // registra o ajuste no estoque (só se houver diferença)
