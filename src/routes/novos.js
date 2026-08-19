@@ -356,15 +356,32 @@ router.delete('/folgas/:id', autenticar, ADM_GER, async (req, res) => {
   }
 })
 
-// Desbloquear agenda (cancelar folga do dia)
+// Desbloquear agenda (folga): periodo 'dia_todo' cancela a folga; 'manha'/'tarde'
+// liberam só aquele período, deixando o oposto ainda bloqueado.
 router.post('/folgas/desbloquear', autenticar, ADM_GER, async (req, res) => {
   try {
-    const { colaborador_id, data_folga, horarios } = req.body
-    // Se horários específicos → cria novo registro parcial; se dia todo → apenas cancela
-    await supabaseAdmin.from('folgas').update({ status: 'cancelada' })
-      .eq('colaborador_id', colaborador_id).eq('data_folga', data_folga)
-    if (horarios && horarios.length) {
-      // Cria bloqueios apenas para os horários NÃO desbloqueados — por ora apenas cancela a folga
+    const { colaborador_id, data_folga, periodo } = req.body
+    const { data: folgas } = await supabaseAdmin.from('folgas')
+      .select('id, periodo')
+      .eq('colaborador_id', colaborador_id).eq('data_folga', data_folga).eq('status', 'aprovada')
+    if (!folgas || !folgas.length) return res.json({ ok: true })   // nada a desbloquear
+
+    // Dia todo (ou sem período) → cancela todas as folgas do dia
+    if (!periodo || periodo === 'dia_todo') {
+      await supabaseAdmin.from('folgas').update({ status: 'cancelada' })
+        .eq('colaborador_id', colaborador_id).eq('data_folga', data_folga).eq('status', 'aprovada')
+      return res.json({ ok: true })
+    }
+
+    // Período específico → libera só ele, mantém o oposto bloqueado
+    for (const f of folgas) {
+      let blocked = (f.periodo === 'dia_todo') ? ['manha', 'tarde'] : [f.periodo]
+      blocked = blocked.filter(p => p !== periodo)
+      if (blocked.length === 0) {
+        await supabaseAdmin.from('folgas').update({ status: 'cancelada' }).eq('id', f.id)
+      } else {
+        await supabaseAdmin.from('folgas').update({ periodo: blocked.length === 2 ? 'dia_todo' : blocked[0] }).eq('id', f.id)
+      }
     }
     return res.json({ ok: true })
   } catch (err) {
