@@ -305,11 +305,14 @@ router.get('/progresso', autenticar, async (req, res) => {
       return res.json({ tipo:'colaborador', colaborador_id, ...montar(metaCol, realizado) })
     }
 
-    // GERENTE: meta PRÓPRIA (ele também atende) + rank dos barbeiros da unidade
+    // GERENTE: meta PRÓPRIA + meta da UNIDADE (geral) + rank por barbeiro (p/ aba na página de metas)
     if (u.perfil === 'gerente') {
       const { data: metaGer } = await supabaseAdmin.from('metas_colaborador')
         .select('*').eq('colaborador_id', u.id).eq('mes', mes).maybeSingle()
       const minha = montar(metaGer, real.porColab[u.id] || {})
+      const { data: metaUniG } = await supabaseAdmin.from('metas_unidade')
+        .select('*').eq('unidade_id', unidade_id).eq('mes', mes).maybeSingle()
+      const unidadeG = montar(metaUniG, real.geral)
       const { data: metasColG } = await supabaseAdmin.from('metas_colaborador')
         .select('*, colaboradores!colaborador_id(nome)').eq('unidade_id', unidade_id).eq('mes', mes)
       const barbeirosG = (metasColG || []).map(mc => ({
@@ -317,7 +320,7 @@ router.get('/progresso', autenticar, async (req, res) => {
         nome: (mc.colaboradores && mc.colaboradores.nome) || '—',
         ...montar(mc, real.porColab[mc.colaborador_id] || {})
       }))
-      return res.json({ tipo:'gerente', colaborador_id: u.id, mes, dias_uteis_restantes: diasRest, categorias: minha.categorias, barbeiros: barbeirosG })
+      return res.json({ tipo:'gerente', colaborador_id: u.id, mes, dias_uteis_restantes: diasRest, categorias: minha.categorias, unidade: unidadeG.categorias, barbeiros: barbeirosG })
     }
 
     // UNIDADE (gerente/proprietário): meta da unidade + progresso + lista por barbeiro
