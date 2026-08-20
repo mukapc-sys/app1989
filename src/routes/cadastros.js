@@ -504,7 +504,7 @@ router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','
 // ============ SERVIÇOS ============
 router.get('/servicos', autenticar, async (req, res) => {
   try {
-    const { colaborador_id } = req.query
+    const { colaborador_id, ordenar } = req.query
     let query = supabaseAdmin.from('servicos').select('*').eq('ativo', true).order('nome')
     if (colaborador_id) {
       const { data: vinculos } = await supabaseAdmin
@@ -514,7 +514,18 @@ router.get('/servicos', autenticar, async (req, res) => {
     }
     const { data, error } = await query
     if (error) throw error
-    return res.json(data)
+    let lista = data || []
+    // ?ordenar=uso → mais usados primeiro (agendamentos dos últimos 90 dias), depois nome
+    if (ordenar === 'uso' && lista.length) {
+      const desde = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+      const { data: ags } = await supabaseAdmin.from('agendamentos')
+        .select('servico_id').gte('data_hora_ini', desde).not('status', 'eq', 'cancelado')
+      const uso = {}
+      ;(ags || []).forEach(a => { if (a.servico_id) uso[a.servico_id] = (uso[a.servico_id] || 0) + 1 })
+      lista = lista.slice().sort((a, b) =>
+        (uso[b.id] || 0) - (uso[a.id] || 0) || String(a.nome || '').localeCompare(String(b.nome || '')))
+    }
+    return res.json(lista)
   } catch (err) {
     return res.status(500).json({ erro: 'Erro ao buscar serviços' })
   }
