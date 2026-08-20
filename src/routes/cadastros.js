@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
+const bcrypt = require('bcryptjs')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const ADMIN = exigirPerfil('proprietario', 'gerente')
 const { exigirTela, exigirFuncao } = require('./permissoes')
@@ -381,6 +382,21 @@ router.get('/clientes/:id/historico', autenticar, exigirPerfil('proprietario','g
   } catch (e) {
     console.error('[clientes/historico]', e.message)
     return res.status(500).json({ erro: 'Erro ao carregar histórico do cliente' })
+  }
+})
+
+// POST /clientes/:id/resetar-senha — proprietário/gerente define uma nova senha para o cliente
+router.post('/clientes/:id/resetar-senha', autenticar, exigirPerfil('proprietario','gerente'), async (req, res) => {
+  try {
+    const nova = String((req.body && req.body.senha) || '').trim()
+    if (nova.length < 4) return res.status(400).json({ erro: 'Senha muito curta (mínimo 4 caracteres)' })
+    const hash = bcrypt.hashSync(nova, 10)
+    const { error } = await supabaseAdmin.from('clientes').update({ senha_hash: hash }).eq('id', req.params.id)
+    if (error) throw error
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[clientes/resetar-senha]', e.message)
+    return res.status(500).json({ erro: 'Erro ao redefinir senha do cliente' })
   }
 })
 router.put('/clientes/:id', autenticar, async (req, res) => {
