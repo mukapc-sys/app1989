@@ -314,10 +314,16 @@ router.get('/progresso', autenticar, async (req, res) => {
         .select('*').eq('unidade_id', unidade_id).eq('mes', mes).maybeSingle()
       const unidadeG = montar(metaUniG, real.geral)
       const { data: metasColG } = await supabaseAdmin.from('metas_colaborador')
-        .select('*, colaboradores!colaborador_id(nome)').eq('unidade_id', unidade_id).eq('mes', mes)
+        .select('*').eq('unidade_id', unidade_id).eq('mes', mes)
+      const cidsG = [...new Set((metasColG || []).map(m => m.colaborador_id).filter(Boolean))]
+      const nomeColG = {}
+      if (cidsG.length) {
+        const { data: colsG } = await supabaseAdmin.from('colaboradores').select('id, nome').in('id', cidsG)
+        ;(colsG || []).forEach(c => { nomeColG[c.id] = c.nome })
+      }
       const barbeirosG = (metasColG || []).map(mc => ({
         colaborador_id: mc.colaborador_id,
-        nome: (mc.colaboradores && mc.colaboradores.nome) || '—',
+        nome: nomeColG[mc.colaborador_id] || '—',
         ...montar(mc, real.porColab[mc.colaborador_id] || {})
       }))
       return res.json({ tipo:'gerente', colaborador_id: u.id, mes, dias_uteis_restantes: diasRest, categorias: minha.categorias, unidade: unidadeG.categorias, barbeiros: barbeirosG })
@@ -328,12 +334,18 @@ router.get('/progresso', autenticar, async (req, res) => {
       .select('*').eq('unidade_id', unidade_id).eq('mes', mes).maybeSingle()
     const unidadeProg = montar(metaUni, real.geral)
 
-    // por barbeiro
+    // por barbeiro (nomes buscados à parte — sem embed, que falha no PostgREST)
     const { data: metasCol } = await supabaseAdmin.from('metas_colaborador')
-      .select('*, colaboradores!colaborador_id(nome)').eq('unidade_id', unidade_id).eq('mes', mes)
+      .select('*').eq('unidade_id', unidade_id).eq('mes', mes)
+    const cidsU = [...new Set((metasCol || []).map(m => m.colaborador_id).filter(Boolean))]
+    const nomeColU = {}
+    if (cidsU.length) {
+      const { data: colsU } = await supabaseAdmin.from('colaboradores').select('id, nome').in('id', cidsU)
+      ;(colsU || []).forEach(c => { nomeColU[c.id] = c.nome })
+    }
     const barbeiros = (metasCol || []).map(mc => ({
       colaborador_id: mc.colaborador_id,
-      nome: (mc.colaboradores && mc.colaboradores.nome) || '—',
+      nome: nomeColU[mc.colaborador_id] || '—',
       ...montar(mc, real.porColab[mc.colaborador_id] || {})
     }))
 
