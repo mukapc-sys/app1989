@@ -488,10 +488,49 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
     return res.status(500).json({ erro: 'Erro ao carregar situação do plano' })
   }
 })
+
+// ============================================================
+// DESVINCULAR PLANOS VENCIDOS HÁ +60 DIAS
+// Assinatura vencida (data_renovacao) há mais de 60 dias → status 'cancelada'.
+// O cliente perde a coroa e sai da lista de assinantes (volta a ser cliente normal).
+// Se ele voltar a assinar, entra como assinatura NOVA (conta em "Planos Novos").
+// ============================================================
+async function desvincularVencidos() {
+  // limite = hoje (Brasília) - 60 dias
+  const limite = new Date(Date.now() - 3 * 3600 * 1000 - 60 * 24 * 3600 * 1000).toISOString().slice(0, 10)
+  const { data } = await supabaseAdmin.from('assinaturas')
+    .update({ status: 'cancelada' })
+    .in('status', ['ativa', 'vencida', 'suspensa'])
+    .not('data_renovacao', 'is', null)
+    .lt('data_renovacao', limite)
+    .select('id')
+  return (data || []).length
+}
+// roda no máximo 1x por hora quando alguém abre a coroa/quadro (poupa writes/egress)
+let _ultimaLimpezaVencidos = 0
+async function limpezaVencidosThrottled() {
+  const agora = Date.now()
+  if (agora - _ultimaLimpezaVencidos < 3600000) return
+  _ultimaLimpezaVencidos = agora
+  try { await desvincularVencidos() } catch (e) { /* silencioso */ }
+}
+// Endpoint manual — proprietário/gerente limpa na hora e vê quantos saíram.
+router.post('/assinaturas/desvincular-vencidos', autenticar, exigirPerfil('proprietario', 'gerente'), async (req, res) => {
+  try {
+    _ultimaLimpezaVencidos = Date.now()
+    const n = await desvincularVencidos()
+    return res.json({ ok: true, desvinculados: n })
+  } catch (e) {
+    console.error('[assinaturas/desvincular-vencidos]', e.message)
+    return res.status(500).json({ erro: 'Erro ao desvincular planos vencidos' })
+  }
+})
+
 // GET /clientes-assinantes-ids — ids E nomes dos clientes assinantes (p/ a coroa na agenda)
 // Retorna também quem está VENCIDO/SUSPENSO (p/ a bolinha vermelha ao lado da coroa).
 router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
+    limpezaVencidosThrottled()   // auto-limpa vencidos +60d (throttle 1x/h), sem travar a resposta
     // CORREÇÃO: "vencido" tem que olhar a DATA de renovação, não só o campo status.
     // O status não vira 'vencida' sozinho quando a data passa, então assinaturas
     // com status='ativa' e data_renovacao no passado apareciam como em dia (coroa
@@ -728,6 +767,7 @@ router.post('/planos', autenticar, exigirPerfil('proprietario'), async (req, res
 })
 router.get('/assinaturas', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
+    limpezaVencidosThrottled()   // auto-limpa vencidos +60d (throttle 1x/h)
     const { data, error } = await supabaseAdmin
       .from('assinaturas')
       .select('*, clientes(id, nome, whatsapp, email, unidade_pref), planos(id, nome, valor_mensal), colaboradores!vendedor_id(id, nome)')
