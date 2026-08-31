@@ -75,7 +75,7 @@ async function realizadoMes(mes, unidade_id) {
     for (let i = 0; i < comandaIds.length; i += 300) {
       const bloco = comandaIds.slice(i, i+300)
       const { data: it } = await supabaseAdmin.from('itens_comanda')
-        .select('comanda_id, tipo, produto_id, quantidade, valor_unit')
+        .select('comanda_id, tipo, produto_id, quantidade, valor_unit, colaborador_id')
         .in('comanda_id', bloco)
       if (it) itens = itens.concat(it)
     }
@@ -89,12 +89,11 @@ async function realizadoMes(mes, unidade_id) {
   const porColab = {}
 
   ;(comandas || []).forEach(c => {
-    geral.faturamento += parseFloat(c.total) || 0
+    // Faturamento NÃO vem mais do total da comanda — vem dos itens de serviço+plano (abaixo).
     if (c.cliente_id) geral._clientesSet.add(c.cliente_id)
     const cid = c.colaborador_id
     if (cid) {
       if (!porColab[cid]) porColab[cid] = novo()
-      porColab[cid].faturamento += parseFloat(c.total) || 0
       if (c.cliente_id) porColab[cid]._clientesSet.add(c.cliente_id)
     }
   })
@@ -102,30 +101,36 @@ async function realizadoMes(mes, unidade_id) {
   ;(itens || []).forEach(it => {
     const q = parseInt(it.quantidade) || 1
     const tipo = String(it.tipo || '').toLowerCase()
-    const cid = colDe[it.comanda_id]
-    const bucket = cid && porColab[cid] ? porColab[cid] : null
+    const v = (parseFloat(it.valor_unit) || 0) * q
     if (tipo.indexOf('produto') !== -1) {
-      const v = (parseFloat(it.valor_unit)||0) * q
+      // produtos/bar seguem o barbeiro da COMANDA (como antes)
+      const cid = colDe[it.comanda_id]
+      const bucket = cid && porColab[cid] ? porColab[cid] : null
       const ehBar = it.produto_id && barProdIds.has(it.produto_id)
-      if (ehBar) { geral.bar += v; if (bucket) bucket.bar += v }   // bar = R$
+      if (ehBar) { geral.bar += v; if (bucket) bucket.bar += v }        // Faturamento BAR = R$
       else {
         // produtos barbearia = UNIDADES vendidas; não conta cortesia/resgate (valor unit < R$0,10)
         const unitVal = parseFloat(it.valor_unit) || 0
         if (unitVal >= 0.10) { geral.produtos += q; if (bucket) bucket.produtos += q }
       }
-    } else if (tipo.indexOf('plano') !== -1) {
-      // planos são contados à parte (só NOVOS), fora do loop de itens — ver abaixo
+    } else if (tipo.indexOf('servico') !== -1 || tipo.indexOf('plano') !== -1) {
+      // Faturamento Serviços = SERVIÇOS + PLANOS (R$), atribuído ao barbeiro do ITEM
+      const icid = it.colaborador_id || colDe[it.comanda_id]
+      if (icid && !porColab[icid]) porColab[icid] = novo()
+      const b = icid ? porColab[icid] : null
+      geral.faturamento += v
+      if (b) b.faturamento += v
     }
   })
 
-  // PLANOS NOVOS = assinaturas criadas no mês (data_inicio no período).
-  // Renovação ATUALIZA a assinatura (não mexe em data_inicio) → não conta aqui.
+  // PLANOS NOVOS = assinaturas CRIADAS no mês (linha nova = venda nova).
+  // Usa criado_em: renovação ATUALIZA a assinatura (não muda criado_em) e o import antigo
+  // do AppBarber tem criado_em na data da importação → ambos ficam de fora. Assim conta só venda nova.
   // Unidade/atribuição vêm do vendedor_id (a assinatura não grava unidade_id).
   {
-    const dIni = String(ini).slice(0, 10), dFim = String(fim).slice(0, 10)
     const { data: novasAssin } = await supabaseAdmin.from('assinaturas')
-      .select('vendedor_id, data_inicio, status')
-      .gte('data_inicio', dIni).lte('data_inicio', dFim)
+      .select('vendedor_id, criado_em, status')
+      .gte('criado_em', ini).lt('criado_em', fim)
     const vendIds = [...new Set((novasAssin || []).map(a => a.vendedor_id).filter(Boolean))]
     const uniDe = {}
     if (vendIds.length) {
