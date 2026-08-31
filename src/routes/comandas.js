@@ -481,6 +481,63 @@ router.patch('/:id/itens/:item_id', autenticar, async (req, res) => {
   }
 })
 
+// Ativa (nova) ou RENOVA a assinatura + gera fichas. Núcleo idêntico ao do
+// /assinaturas/cobrar, usado na FINALIZAÇÃO quando a comanda cobra mensalidade
+// de plano. NÃO cria comanda — o pagamento já é o item de plano da comanda.
+// Lança erro em caso de problema (o finalizar decide como reagir).
+async function ativarOuRenovarPlano({ cliente_id, plano_id, vendedor_id, forma_pgto, assinatura_id = null, data_renovacao = null }) {
+  if (!cliente_id || !plano_id || !vendedor_id) throw new Error('Dados do plano incompletos.')
+  const dataVencManual = (data_renovacao && /^\d{4}-\d{2}-\d{2}$/.test(String(data_renovacao)))
+    ? String(data_renovacao).slice(0, 10) : null
+  const { data: plano } = await supabaseAdmin.from('planos').select('id, nome, valor_mensal, fichas_bar_mes').eq('id', plano_id).single()
+  if (!plano) throw new Error('Plano não encontrado.')
+  const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+  function maisUmMes(baseYMD) {
+    const d = new Date(baseYMD + 'T12:00:00-03:00'); d.setMonth(d.getMonth() + 1)
+    return d.toISOString().slice(0, 10)
+  }
+  let assinatura, criouNova = false
+  if (assinatura_id) {
+    const { data: atual } = await supabaseAdmin.from('assinaturas').select('*').eq('id', assinatura_id).single()
+    if (!atual) throw new Error('Assinatura não encontrada.')
+    // herda a divisão (2 barbeiros) que já estava salva na assinatura
+    const venceAtivo = atual.data_renovacao && String(atual.data_renovacao).slice(0, 10) >= hoje
+    const base = venceAtivo ? String(atual.data_renovacao).slice(0, 10) : hoje
+    const novaData = dataVencManual || maisUmMes(base)
+    const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
+      plano_id, status: 'ativa', data_renovacao: novaData,
+      vendedor_id, vendedor_id_2: atual.vendedor_id_2, valor_split_1: atual.valor_split_1,
+      forma_pgto: forma_pgto || atual.forma_pgto, atualizado_em: new Date().toISOString()
+    }).eq('id', assinatura_id).select().single()
+    if (eU) throw eU
+    assinatura = upd
+  } else {
+    const { data: jaTem } = await supabaseAdmin.from('assinaturas')
+      .select('id').eq('cliente_id', cliente_id).eq('status', 'ativa').limit(1)
+    if (jaTem && jaTem.length) { const e = new Error('Cliente já tem assinatura ativa.'); e.code = 'JA_ATIVA'; throw e }
+    const { data: nova, error: eN } = await supabaseAdmin.from('assinaturas').insert({
+      cliente_id, plano_id, status: 'ativa',
+      data_inicio: hoje, data_renovacao: dataVencManual || maisUmMes(hoje),
+      vendedor_id, forma_pgto
+    }).select().single()
+    if (eN) throw eN
+    assinatura = nova; criouNova = true
+  }
+  // fichas de bar do ciclo (acumulam, validade 90 dias)
+  try {
+    const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
+    if (qtdFichas > 0) {
+      const agora = new Date(); const expira = new Date(agora.getTime() + 90 * 24 * 3600 * 1000)
+      await supabaseAdmin.from('fichas_plano').insert({
+        cliente_id, assinatura_id: assinatura.id, plano_id, quantidade: qtdFichas, usadas: 0,
+        gerada_em: agora.toISOString(), expira_em: expira.toISOString(),
+        origem: assinatura_id ? 'renovacao' : 'nova_assinatura'
+      })
+    }
+  } catch (e) { console.error('[fichas-plano] gerar (finalizar):', e.message) }
+  return { assinatura, criouNova }
+}
+
 // PUT /comandas/:id/finalizar
 router.put('/:id/finalizar', autenticar, async (req, res) => {
   try {
@@ -547,7 +604,39 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
         .then(() => {}).catch(() => {})
     }
 
-    return res.json(data)
+    // RENOVAÇÃO/ATIVAÇÃO DE PLANO NA FINALIZAÇÃO (atômico).
+    // Trava de segurança: só renova se a comanda REALMENTE cobra mensalidade agora,
+    // ou seja, se existe item tipo='plano' com valor > 0. Sem isso, o plano_pendente
+    // é ignorado (ex.: cliente veio só fazer a barba) e é limpo pra não ficar sujeira.
+    let plano_renovado = false
+    try {
+      const { data: cmd } = await supabaseAdmin.from('comandas')
+        .select('cliente_id, plano_pendente').eq('id', id).single()
+      const pp = cmd && cmd.plano_pendente
+      const { data: itPlano } = await supabaseAdmin.from('itens_comanda')
+        .select('valor_unit').eq('comanda_id', id).eq('tipo', 'plano')
+      const temItemPlano = (itPlano || []).some(i => (parseFloat(i.valor_unit) || 0) > 0)
+      if (temItemPlano && pp && pp.plano_id && cmd.cliente_id) {
+        await ativarOuRenovarPlano({
+          cliente_id: cmd.cliente_id,
+          plano_id: pp.plano_id,
+          vendedor_id: pp.vendedor_id,
+          forma_pgto: data.forma_pgto,
+          assinatura_id: pp.assinatura_id || null
+        })
+        plano_renovado = true
+      }
+      // limpa o plano_pendente sempre (consumido ou descartado por não ter item de plano)
+      if (pp) {
+        await supabaseAdmin.from('comandas').update({ plano_pendente: null }).eq('id', id)
+      }
+    } catch (ePlano) {
+      console.error('[finalizar] renovar plano:', ePlano.message)
+      // não derruba a finalização: a comanda já está fechada. plano_renovado fica false
+      // e o widget cai no fallback (/assinaturas/cobrar).
+    }
+
+    return res.json({ ...data, plano_renovado })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ erro: 'Erro ao finalizar comanda' })
