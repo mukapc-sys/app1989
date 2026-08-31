@@ -7,6 +7,7 @@
 const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
+const { calcularComissaoFaixa } = require('./comissao-faixa')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { exigirTela } = require('./permissoes')
 
@@ -63,7 +64,7 @@ async function realizadoMes(mes, unidade_id) {
   let qc = supabaseAdmin.from('comandas')
     .select('id, total, colaborador_id, cliente_id, unidade_id, observacao')
     .eq('status', 'finalizada')
-    .gte('finalizada_em', ini).lte('finalizada_em', fim)
+    .gte('finalizada_em', ini).lt('finalizada_em', fim)
   if (unidade_id) qc = qc.eq('unidade_id', unidade_id)
   const { data: comandas } = await qc
   const comandaIds = (comandas || []).map(c => c.id)
@@ -113,15 +114,24 @@ async function realizadoMes(mes, unidade_id) {
         const unitVal = parseFloat(it.valor_unit) || 0
         if (unitVal >= 0.10) { geral.produtos += q; if (bucket) bucket.produtos += q }
       }
-    } else if (tipo.indexOf('servico') !== -1 || tipo.indexOf('plano') !== -1) {
-      // Faturamento Serviços = SERVIÇOS + PLANOS (R$), atribuído ao barbeiro do ITEM
-      const icid = it.colaborador_id || colDe[it.comanda_id]
-      if (icid && !porColab[icid]) porColab[icid] = novo()
-      const b = icid ? porColab[icid] : null
-      geral.faturamento += v
-      if (b) b.faturamento += v
     }
+    // Faturamento Serviços NÃO é somado aqui — vem da MESMA fonte da comissão
+    // (calcularComissaoFaixa.servico_total), aplicado logo abaixo.
   })
+
+  // FATURAMENTO SERVIÇOS = servico_total da comissão (mesma fonte do "Serv R$"):
+  // serviços + planos (itens de comanda, por barbeiro do item) + AppBarber realizado
+  // não-importado. Garante que o acompanhamento de metas bate com o card de comissão.
+  try {
+    const comi = await calcularComissaoFaixa({ ini, fim, unidade_id })
+    geral.faturamento = parseFloat(comi.total_servico) || 0
+    ;(comi.linhas || []).forEach(l => {
+      const cid = l.colaborador_id
+      if (!cid) return
+      if (!porColab[cid]) porColab[cid] = novo()
+      porColab[cid].faturamento = parseFloat(l.servico_total) || 0
+    })
+  } catch (e) { /* se falhar, faturamento fica 0 e não quebra o resto das metas */ }
 
   // PLANOS NOVOS = assinaturas CRIADAS no mês (linha nova = venda nova).
   // Usa criado_em: renovação ATUALIZA a assinatura (não muda criado_em) e o import antigo
