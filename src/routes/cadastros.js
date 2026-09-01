@@ -714,6 +714,66 @@ router.get('/estoque/saldo', autenticar, exigirPerfil('proprietario','gerente','
     return res.status(500).json({ erro: 'Erro ao buscar saldo de estoque' })
   }
 })
+// GET /estoque/movimentacoes — extrato de movimentações (por unidade, opcional por produto),
+// com saldo corrente calculado. referencia_id = comanda que originou a saída (p/ "Ver comanda").
+router.get('/estoque/movimentacoes', autenticar, exigirPerfil('proprietario','gerente','caixa'), TELA_ESTOQUE, async (req, res) => {
+  try {
+    const unidade_id = req.usuario.perfil === 'proprietario' ? (req.query.unidade_id || null) : req.usuario.unidade_id
+    if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade' })
+    const produto_id = req.query.produto_id || null
+
+    // busca ASC por data pra calcular o saldo corrente por produto
+    let all = []
+    { const pageSize = 1000; let from = 0
+      while (true) {
+        let q = supabaseAdmin.from('movimentacoes_estoque')
+          .select('id, produto_id, tipo, quantidade, referencia_id, observacao, criado_em')
+          .eq('unidade_id', unidade_id).order('criado_em', { ascending: true })
+        if (produto_id) q = q.eq('produto_id', produto_id)
+        const { data } = await q.range(from, from + pageSize - 1)
+        if (!data || !data.length) break
+        all = all.concat(data)
+        if (data.length < pageSize) break
+        from += pageSize; if (from > 200000) break
+      }
+    }
+    // nomes dos produtos
+    const pids = [...new Set(all.map(m => m.produto_id).filter(Boolean))]
+    const nome = {}
+    if (pids.length) {
+      const { data: ps } = await supabaseAdmin.from('produtos').select('id, nome').in('id', pids)
+      ;(ps || []).forEach(p => { nome[p.id] = p.nome })
+    }
+    // saldo corrente por produto
+    const saldo = {}
+    const linhas = all.map(m => {
+      const q = parseFloat(m.quantidade) || 0
+      const saida = String(m.tipo || '').startsWith('saida')
+      const mov = saida ? -Math.abs(q) : q      // saída negativa; entrada/ajuste = quantidade assinada
+      const antes = saldo[m.produto_id] || 0
+      const depois = antes + mov
+      saldo[m.produto_id] = depois
+      let tipo_label = 'Ajuste'
+      if (m.tipo === 'entrada') tipo_label = 'Compra'
+      else if (m.tipo === 'saida_venda') tipo_label = 'Venda'
+      else if (m.tipo === 'saida_consumo') tipo_label = 'Vale/Consumo'
+      return {
+        data: m.criado_em, produto_id: m.produto_id, produto: nome[m.produto_id] || '—',
+        tipo: m.tipo, tipo_label, movimentacao: mov,
+        estoque_antes: Math.round(antes), saldo: Math.round(depois),
+        comanda_id: (m.tipo === 'saida_venda' ? (m.referencia_id || null) : null),
+        observacao: m.observacao || ''
+      }
+    })
+    linhas.reverse()   // mais recente primeiro
+    return res.json({
+      unidade_id, pode_escolher: req.usuario.perfil === 'proprietario', movimentacoes: linhas
+    })
+  } catch (err) {
+    console.error('[estoque/movimentacoes]', err.message)
+    return res.status(500).json({ erro: 'Erro ao buscar movimentações' })
+  }
+})
 // POST /estoque/acerto — digita a CONTAGEM real e o sistema ajusta o saldo (só Proprietário)
 router.post('/estoque/acerto', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
