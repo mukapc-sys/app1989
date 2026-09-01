@@ -237,7 +237,7 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
       .map(it => ({
         produto_id:     it.produto_id,
         unidade_id:     unidade_estoque,
-        tipo:           'saida',
+        tipo:           'saida_consumo',
         quantidade:     parseInt(it.qtd) || 1,
         valor_unitario: parseFloat(it.valor) || 0,
         responsavel_id: req.usuario.id,
