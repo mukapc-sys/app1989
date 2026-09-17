@@ -1379,6 +1379,25 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       ;(encs || []).forEach(e => encaixeSet.add(e.id))
     }
 
+    // CLIENTE NOVO 🆕 = primeiro agendamento de SEMPRE (nenhum atendimento ANTES deste dia:
+    // nem comanda finalizada, nem agendamento concluído, nem AppBarber realizado).
+    const cids = [...new Set((agenda || []).map(a => a.cliente_id).filter(Boolean))]
+    const novoSet = new Set(cids)   // começa todos como novos; remove quem tem histórico
+    if (cids.length) {
+      const inicioDia = dia + 'T00:00:00-03:00'
+      const [cAnt, aAnt, abAnt] = await Promise.all([
+        supabaseAdmin.from('comandas').select('cliente_id')
+          .in('cliente_id', cids).eq('status', 'finalizada').lt('finalizada_em', inicioDia),
+        supabaseAdmin.from('agendamentos').select('cliente_id')
+          .in('cliente_id', cids).eq('status', 'concluido').lt('data_hora_ini', inicioDia),
+        supabaseAdmin.from('agenda_appbarber').select('cliente_id')
+          .in('cliente_id', cids).eq('tipo', 'agendamento').eq('status', 'realizado').lt('inicio', inicioDia)
+      ])
+      ;(cAnt.data || []).forEach(c => novoSet.delete(c.cliente_id))
+      ;(aAnt.data || []).forEach(a => novoSet.delete(a.cliente_id))
+      ;(abAnt.data || []).forEach(a => novoSet.delete(a.cliente_id))
+    }
+
     const flat = (agenda || []).map(a => ({
       id:               a.id,
       data_hora_ini:    a.data_hora_ini,
@@ -1394,7 +1413,8 @@ router.get('/dashboard/agenda-dia', autenticar, async (req, res) => {
       servico_nome:     a.servico_nome || null,
       duracao_min:      a.duracao_min || 30,
       canal_origem:     a.canal_origem || null,
-      encaixe:          encaixeSet.has(a.id)
+      encaixe:          encaixeSet.has(a.id),
+      cliente_novo:     !!(a.cliente_id && novoSet.has(a.cliente_id))
     }))
 
     return res.json(flat)
