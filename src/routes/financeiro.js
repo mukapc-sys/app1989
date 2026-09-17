@@ -40,6 +40,42 @@ async function fetchAll(buildQuery, max = 200000) {
 }
 
 // GET /financeiro/resumo?unidade_id=xxx&periodo=mes
+// Conta clientes NOVOS = cujo PRIMEIRO atendimento de sempre caiu no período.
+// Atendimento = comanda finalizada OU agendamento concluído OU AppBarber realizado.
+// O período é filtrado por unidade; o "nunca foi antes" é GLOBAL (primeiro de sempre).
+async function contarNovosClientes(ini, fim, uid) {
+  const setPeriodo = new Set()
+  {
+    let qc = supabaseAdmin.from('comandas').select('cliente_id')
+      .eq('status', 'finalizada').not('cliente_id', 'is', null).gte('finalizada_em', ini).lte('finalizada_em', fim)
+    if (uid) qc = qc.eq('unidade_id', uid)
+    let qa = supabaseAdmin.from('agendamentos').select('cliente_id')
+      .eq('status', 'concluido').not('cliente_id', 'is', null).gte('data_hora_ini', ini).lte('data_hora_ini', fim)
+    if (uid) qa = qa.eq('unidade_id', uid)
+    let qab = supabaseAdmin.from('agenda_appbarber').select('cliente_id')
+      .eq('tipo', 'agendamento').eq('status', 'realizado').not('cliente_id', 'is', null).gte('inicio', ini).lte('inicio', fim)
+    if (uid) qab = qab.eq('unidade_id', uid)
+    const [c, a, ab] = await Promise.all([qc, qa, qab])
+    ;(c.data || []).forEach(x => x.cliente_id && setPeriodo.add(x.cliente_id))
+    ;(a.data || []).forEach(x => x.cliente_id && setPeriodo.add(x.cliente_id))
+    ;(ab.data || []).forEach(x => x.cliente_id && setPeriodo.add(x.cliente_id))
+  }
+  if (!setPeriodo.size) return 0
+  const cids = [...setPeriodo]
+  const comHist = new Set()
+  const [hc, ha, hab] = await Promise.all([
+    supabaseAdmin.from('comandas').select('cliente_id').in('cliente_id', cids).eq('status', 'finalizada').lt('finalizada_em', ini),
+    supabaseAdmin.from('agendamentos').select('cliente_id').in('cliente_id', cids).eq('status', 'concluido').lt('data_hora_ini', ini),
+    supabaseAdmin.from('agenda_appbarber').select('cliente_id').in('cliente_id', cids).eq('tipo', 'agendamento').eq('status', 'realizado').lt('inicio', ini)
+  ])
+  ;(hc.data || []).forEach(x => comHist.add(x.cliente_id))
+  ;(ha.data || []).forEach(x => comHist.add(x.cliente_id))
+  ;(hab.data || []).forEach(x => comHist.add(x.cliente_id))
+  let n = 0
+  cids.forEach(id => { if (!comHist.has(id)) n++ })
+  return n
+}
+
 router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
   try {
     const { unidade_id, periodo = 'mes' } = req.query
@@ -132,8 +168,20 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
     const faturamentoTotal = fatServicos + fatBarbearia + fatBar
     const comissoesTotal   = comissoes + abComissao
     const atendimentos     = comServicoResumo.size + ab.length
+
+    // Novos clientes (primeiro atendimento de sempre) no período + no período anterior (mesma duração)
+    let novosAtual = 0, novosAnterior = 0
+    try {
+      novosAtual = await contarNovosClientes(ini, fim, uid)
+      const dur = new Date(fim) - new Date(ini)
+      const prevFim = new Date(new Date(ini).getTime() - 1).toISOString()
+      const prevIni = new Date(new Date(ini).getTime() - dur).toISOString()
+      novosAnterior = await contarNovosClientes(prevIni, prevFim, uid)
+    } catch (e) { console.error('[resumo/novos-clientes]', e.message) }
+
     return res.json({
       periodo,
+      novos_clientes: { atual: novosAtual, anterior: novosAnterior },
       faturamento:    round(faturamentoTotal),
       fat_servicos:        round(fatServicos),
       fat_prod_barbearia:  round(fatBarbearia),
