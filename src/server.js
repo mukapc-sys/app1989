@@ -27,6 +27,30 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // ============================================================
+// PORTEIRO DE SEGURANÇA — bloqueia TOKEN DE CLIENTE fora do app do cliente.
+// O front do cliente (barbearia1989.com.br) e o PRO (app.barbearia1989.com.br)
+// falam com a MESMA API; o token do cliente é assinado com o mesmo JWT_SECRET,
+// então passaria em qualquer rota. Aqui, todo request que NÃO seja /auth ou
+// /publico é barrado se o token for de cliente (tipo:'cliente' ou perfil:'cliente').
+// Sem token: segue e o autenticar de cada rota responde 401.
+// ============================================================
+const jwtGate = require('jsonwebtoken')
+app.use((req, res, next) => {
+  const p = req.path || ''
+  if (p === '/' || p.startsWith('/auth') || p.startsWith('/publico')) return next()
+  const h = req.headers.authorization || ''
+  const t = h.replace('Bearer ', '').trim()
+  if (!t) return next()
+  try {
+    const d = jwtGate.verify(t, process.env.JWT_SECRET)
+    if (d && (d.tipo === 'cliente' || d.perfil === 'cliente')) {
+      return res.status(403).json({ erro: 'Acesso não permitido para este perfil.' })
+    }
+  } catch (e) { /* token inválido/expirado: deixa a rota tratar */ }
+  next()
+})
+
+// ============================================================
 // Rotas
 // ============================================================
 app.use('/auth',         require('./routes/auth'))
