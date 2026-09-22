@@ -924,10 +924,31 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
     const unidade_id = req.usuario.unidade_id || req.body.unidade_id || (cli && cli.unidade_pref) || null
     if (!unidade_id) return res.status(400).json({ erro: 'Não consegui identificar a unidade. Selecione a unidade.' })
     const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
-    function maisUmMes(baseYMD) {
-      const d = new Date(baseYMD + 'T12:00:00-03:00')
-      d.setMonth(d.getMonth() + 1)
-      return d.toISOString().slice(0, 10)
+    // Vencimento SEMPRE no MESMO DIA do mês da contratação (data_inicio).
+    // Não importa quando o cliente pagou/cortou: o dia é fixo. Se a base cair num
+    // mês sem esse dia (ex.: dia 31 em fevereiro), usa o último dia do mês.
+    function _ymdComDia(ano, mes0, dia) {           // mes0: 0-11
+      const ultimo = new Date(Date.UTC(ano, mes0 + 1, 0)).getUTCDate()
+      const d = Math.min(dia, ultimo)
+      return ano + '-' + String(mes0 + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0')
+    }
+    // Próximo vencimento: pega o DIA de data_inicio (âncora), avança a partir do mês
+    // do vencimento atual e some meses até cair NO FUTURO (> hoje). Reancora o dia,
+    // então mesmo quem estava com o dia torto volta pro dia certo na próxima renovação.
+    function proximaRenovacao(atualRenovYMD, dataInicioYMD) {
+      const ancoraSrc = String(dataInicioYMD || atualRenovYMD || hoje).slice(0, 10)
+      const dia = parseInt(ancoraSrc.slice(8, 10), 10) || 1
+      const refBase = String(atualRenovYMD || hoje).slice(0, 10)
+      let ano = parseInt(refBase.slice(0, 4), 10)
+      let mes0 = parseInt(refBase.slice(5, 7), 10) - 1 + 1   // mês do vencimento atual + 1
+      let cand = _ymdComDia(ano + Math.floor(mes0 / 12), ((mes0 % 12) + 12) % 12, dia)
+      let guard = 0
+      while (cand <= hoje && guard < 36) {                    // nunca no passado
+        mes0 += 1
+        cand = _ymdComDia(ano + Math.floor(mes0 / 12), ((mes0 % 12) + 12) % 12, dia)
+        guard++
+      }
+      return cand
     }
     // ===== assinatura: renovar OU criar =====
     let assinatura, criouNova = false, antes = null
@@ -935,9 +956,9 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       const { data: atual } = await supabaseAdmin.from('assinaturas').select('*').eq('id', assinatura_id).single()
       if (!atual) return res.status(404).json({ erro: 'Assinatura não encontrada.' })
       antes = { data_renovacao: atual.data_renovacao, status: atual.status, vendedor_id: atual.vendedor_id, vendedor_id_2: atual.vendedor_id_2, valor_split_1: atual.valor_split_1, forma_pgto: atual.forma_pgto, plano_id: atual.plano_id }
-      const venceAtivo = atual.data_renovacao && String(atual.data_renovacao).slice(0, 10) >= hoje
-      const base = venceAtivo ? String(atual.data_renovacao).slice(0, 10) : hoje
-      const novaData = dataVencManual || maisUmMes(base)   // manual tem prioridade
+      // Dia fixo do contrato (data_inicio). Base de contagem = vencimento atual.
+      const baseRenov = atual.data_renovacao ? String(atual.data_renovacao).slice(0, 10) : hoje
+      const novaData = dataVencManual || proximaRenovacao(baseRenov, atual.data_inicio)   // manual tem prioridade
       const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
         plano_id, status: 'ativa', data_renovacao: novaData,
         vendedor_id, vendedor_id_2, valor_split_1: valSplit1,
@@ -953,7 +974,7 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       }
       const { data: nova, error: eN } = await supabaseAdmin.from('assinaturas').insert({
         cliente_id, plano_id, status: 'ativa',
-        data_inicio: hoje, data_renovacao: dataVencManual || maisUmMes(hoje),
+        data_inicio: hoje, data_renovacao: dataVencManual || proximaRenovacao(hoje, hoje),
         vendedor_id, vendedor_id_2, valor_split_1: valSplit1, forma_pgto
       }).select().single()
       if (eN) throw eN
