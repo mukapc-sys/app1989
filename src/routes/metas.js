@@ -167,6 +167,45 @@ async function realizadoMes(mes, unidade_id) {
   return { geral: geralF, porColab: porColabF }
 }
 
+// ---- conta PLANOS ATIVOS (assinaturas com status 'ativa') ----
+// Monitor (não é meta): quantos planos ativos existem AGORA.
+//  - por barbeiro: conta pros DOIS titulares do plano (vendedor_id e vendedor_id_2);
+//  - por unidade: a assinatura não grava unidade → conta se ALGUM titular for da unidade.
+// unidade_id null = geral (todas as unidades).
+async function contarPlanosAtivos(unidade_id) {
+  // busca paginada (pode passar de 1000 linhas)
+  let assin = [], from = 0
+  while (true) {
+    const { data } = await supabaseAdmin.from('assinaturas')
+      .select('id, vendedor_id, vendedor_id_2').eq('status', 'ativa')
+      .range(from, from + 999)
+    if (!data || !data.length) break
+    assin = assin.concat(data)
+    if (data.length < 1000) break
+    from += 1000
+    if (from > 100000) break
+  }
+  // mapa titular -> unidade
+  const ids = new Set()
+  assin.forEach(a => { if (a.vendedor_id) ids.add(a.vendedor_id); if (a.vendedor_id_2) ids.add(a.vendedor_id_2) })
+  const uniDe = {}
+  const arr = [...ids]
+  for (let i = 0; i < arr.length; i += 300) {
+    const { data: cols } = await supabaseAdmin.from('colaboradores').select('id, unidade_id').in('id', arr.slice(i, i + 300))
+    ;(cols || []).forEach(c => { uniDe[c.id] = c.unidade_id })
+  }
+  const porColab = {}
+  let geral = 0
+  assin.forEach(a => {
+    const b1 = a.vendedor_id, b2 = a.vendedor_id_2
+    if (b1) porColab[b1] = (porColab[b1] || 0) + 1
+    if (b2 && b2 !== b1) porColab[b2] = (porColab[b2] || 0) + 1
+    if (!unidade_id) { geral += 1; return }
+    if ((b1 && uniDe[b1] === unidade_id) || (b2 && uniDe[b2] === unidade_id)) geral += 1
+  })
+  return { geral, porColab }
+}
+
 // ------------------------------------------------------------
 // GET /metas/unidade?mes=AAAA-MM[&unidade_id=..]  -> meta(s) cadastrada(s)
 // ------------------------------------------------------------
@@ -303,21 +342,23 @@ router.get('/progresso', autenticar, async (req, res) => {
       const lista = []
       for (const un of (unidades || [])) {
         const realU = await realizadoMes(mes, un.id)
+        const ativosU = await contarPlanosAtivos(un.id)
         const { data: metaU } = await supabaseAdmin.from('metas_unidade')
           .select('*').eq('unidade_id', un.id).eq('mes', mes).maybeSingle()
-        lista.push({ unidade_id: un.id, nome: un.nome, ...montar(metaU, realU.geral) })
+        lista.push({ unidade_id: un.id, nome: un.nome, ...montar(metaU, realU.geral), planos_ativos: ativosU.geral })
       }
       return res.json({ tipo:'proprietario', unidades: lista })
     }
 
     const real = await realizadoMes(mes, unidade_id)
+    const ativos = await contarPlanosAtivos(unidade_id)
 
     // COLABORADOR: só a própria meta
     if (colaborador_id) {
       const { data: metaCol } = await supabaseAdmin.from('metas_colaborador')
         .select('*').eq('colaborador_id', colaborador_id).eq('mes', mes).maybeSingle()
       const realizado = real.porColab[colaborador_id] || { clientes:0, faturamento:0, produtos:0, planos:0, bar:0 }
-      return res.json({ tipo:'colaborador', colaborador_id, ...montar(metaCol, realizado) })
+      return res.json({ tipo:'colaborador', colaborador_id, ...montar(metaCol, realizado), planos_ativos: ativos.porColab[colaborador_id] || 0 })
     }
 
     // GERENTE: meta PRÓPRIA + meta da UNIDADE (geral) + rank por barbeiro (p/ aba na página de metas)
@@ -339,15 +380,17 @@ router.get('/progresso', autenticar, async (req, res) => {
       const barbeirosG = (metasColG || []).map(mc => ({
         colaborador_id: mc.colaborador_id,
         nome: nomeColG[mc.colaborador_id] || '—',
-        ...montar(mc, real.porColab[mc.colaborador_id] || {})
+        ...montar(mc, real.porColab[mc.colaborador_id] || {}),
+        planos_ativos: ativos.porColab[mc.colaborador_id] || 0
       }))
-      return res.json({ tipo:'gerente', colaborador_id: u.id, mes, dias_uteis_restantes: diasRest, categorias: minha.categorias, unidade: unidadeG.categorias, barbeiros: barbeirosG })
+      return res.json({ tipo:'gerente', colaborador_id: u.id, mes, dias_uteis_restantes: diasRest, categorias: minha.categorias, unidade: unidadeG.categorias, barbeiros: barbeirosG, planos_ativos: ativos.porColab[u.id] || 0, planos_ativos_unidade: ativos.geral })
     }
 
     // UNIDADE (gerente/proprietário): meta da unidade + progresso + lista por barbeiro
     const { data: metaUni } = await supabaseAdmin.from('metas_unidade')
       .select('*').eq('unidade_id', unidade_id).eq('mes', mes).maybeSingle()
     const unidadeProg = montar(metaUni, real.geral)
+    unidadeProg.planos_ativos = ativos.geral
 
     // por barbeiro (nomes buscados à parte — sem embed, que falha no PostgREST)
     const { data: metasCol } = await supabaseAdmin.from('metas_colaborador')
@@ -361,7 +404,8 @@ router.get('/progresso', autenticar, async (req, res) => {
     const barbeiros = (metasCol || []).map(mc => ({
       colaborador_id: mc.colaborador_id,
       nome: nomeColU[mc.colaborador_id] || '—',
-      ...montar(mc, real.porColab[mc.colaborador_id] || {})
+      ...montar(mc, real.porColab[mc.colaborador_id] || {}),
+      planos_ativos: ativos.porColab[mc.colaborador_id] || 0
     }))
 
     return res.json({ tipo:'unidade', unidade_id, unidade: unidadeProg, barbeiros })
