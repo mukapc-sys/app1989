@@ -174,7 +174,17 @@ router.post('/', autenticar, async (req, res) => {
     // 60 min num serviço de 30 tinha o conflito checado só nos primeiros 30 min e
     // podia sobrepor o cliente seguinte sem aviso.
     let dur = parseInt(req.body.duracao || req.body.duracao_min, 10)
-    if (!dur || isNaN(dur) || dur < 5 || dur > 480) dur = servico.duracao_min || 30
+    if (!dur || isNaN(dur) || dur < 5 || dur > 480) {
+      // Sem duração explícita: usa o TEMPO INDIVIDUAL do barbeiro para este serviço
+      // (ex.: iniciante 30 no que é 15); se não tiver, cai na duração padrão do serviço.
+      let durPadrao = servico.duracao_min || 30
+      try {
+        const { data: tb } = await supabaseAdmin.from('colaborador_servico_tempo')
+          .select('duracao_min').eq('colaborador_id', colaborador_id).eq('servico_id', servico_id).maybeSingle()
+        if (tb && parseInt(tb.duracao_min, 10) > 0) durPadrao = parseInt(tb.duracao_min, 10)
+      } catch (_) {}
+      dur = durPadrao
+    }
     const ini = new Date(data_hora_ini)
     const fim = new Date(ini.getTime() + dur * 60000)
     // ENCAIXE é a exceção: sobrepõe qualquer horário (agendamento existente,
