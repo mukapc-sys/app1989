@@ -304,6 +304,14 @@ router.post('/agendar', async (req, res) => {
     const { data: sv } = await supabaseAdmin.from('servicos')
       .select('id,nome,duracao_min,valor').eq('id', servico_id).single()
     if (!sv) return res.status(400).json({ erro: 'Serviço inválido' })
+    // TEMPO INDIVIDUAL do barbeiro para ESTE serviço (ex.: iniciante leva 30 no que
+    // normalmente é 15). Se configurado, manda; senão usa a duração padrão do serviço.
+    let durServ = parseInt(sv.duracao_min, 10) || 30
+    try {
+      const { data: tb } = await supabaseAdmin.from('colaborador_servico_tempo')
+        .select('duracao_min').eq('colaborador_id', colaborador_id).eq('servico_id', servico_id).maybeSingle()
+      if (tb && parseInt(tb.duracao_min, 10) > 0) durServ = parseInt(tb.duracao_min, 10)
+    } catch (_) {}
     const ini = new Date(data_hora)
     if (isNaN(ini.getTime())) return res.status(400).json({ erro: 'Horário inválido' })
     if (ini < new Date()) return res.status(400).json({ erro: 'Esse horário já passou' })
@@ -324,12 +332,12 @@ router.post('/agendar', async (req, res) => {
     } else {
       hfAg = horarioFuncionamento(dataBR, false)
     }
-    const durAg = sv.duracao_min || 30
+    const durAg = durServ
     if (!hfAg || minDia < hfAg.abre || minDia + durAg > hfAg.fecha) {
       return res.status(400).json({ erro: 'Esse horário está fora do funcionamento da barbearia' })
     }
     const fim = new Date(ini)
-    fim.setMinutes(fim.getMinutes() + (sv.duracao_min || 30))
+    fim.setMinutes(fim.getMinutes() + durServ)
     // evita dois clientes no mesmo horário do mesmo barbeiro (inclui bloqueios e importados)
     // 'concluido' incluído: atendimento já finalizado continua ocupando o horário dele.
     const [{ data: conflito }, { data: confImport }] = await Promise.all([
