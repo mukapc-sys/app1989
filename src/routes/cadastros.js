@@ -490,14 +490,14 @@ router.get('/clientes/:id/situacao-plano', autenticar, exigirPerfil('proprietari
 })
 
 // ============================================================
-// DESVINCULAR PLANOS VENCIDOS HÁ +60 DIAS
-// Assinatura vencida (data_renovacao) há mais de 60 dias → status 'cancelada'.
+// DESVINCULAR PLANOS VENCIDOS HÁ +45 DIAS
+// Assinatura vencida (data_renovacao) há mais de 45 dias → status 'cancelada'.
 // O cliente perde a coroa e sai da lista de assinantes (volta a ser cliente normal).
 // Se ele voltar a assinar, entra como assinatura NOVA (conta em "Planos Novos").
 // ============================================================
 async function desvincularVencidos() {
-  // limite = hoje (Brasília) - 60 dias
-  const limite = new Date(Date.now() - 3 * 3600 * 1000 - 60 * 24 * 3600 * 1000).toISOString().slice(0, 10)
+  // limite = hoje (Brasília) - 45 dias
+  const limite = new Date(Date.now() - 3 * 3600 * 1000 - 45 * 24 * 3600 * 1000).toISOString().slice(0, 10)
   const { data } = await supabaseAdmin.from('assinaturas')
     .update({ status: 'cancelada' })
     .in('status', ['ativa', 'vencida', 'suspensa'])
@@ -530,7 +530,7 @@ router.post('/assinaturas/desvincular-vencidos', autenticar, exigirPerfil('propr
 // Retorna também quem está VENCIDO/SUSPENSO (p/ a bolinha vermelha ao lado da coroa).
 router.get('/clientes-assinantes-ids', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
-    limpezaVencidosThrottled()   // auto-limpa vencidos +60d (throttle 1x/h), sem travar a resposta
+    limpezaVencidosThrottled()   // auto-limpa vencidos +45d (throttle 1x/h), sem travar a resposta
     // CORREÇÃO: "vencido" tem que olhar a DATA de renovação, não só o campo status.
     // O status não vira 'vencida' sozinho quando a data passa, então assinaturas
     // com status='ativa' e data_renovacao no passado apareciam como em dia (coroa
@@ -827,11 +827,15 @@ router.post('/planos', autenticar, exigirPerfil('proprietario'), async (req, res
 })
 router.get('/assinaturas', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
   try {
-    limpezaVencidosThrottled()   // auto-limpa vencidos +60d (throttle 1x/h)
-    const { data, error } = await supabaseAdmin
+    limpezaVencidosThrottled()   // auto-limpa vencidos +45d (throttle 1x/h)
+    let q = supabaseAdmin
       .from('assinaturas')
       .select('*, clientes(id, nome, whatsapp, email, unidade_pref), planos(id, nome, valor_mensal), colaboradores!vendedor_id(id, nome)')
       .order('data_renovacao')
+    // Desvinculado (+45d) vira cliente comum e SAI da lista de assinantes.
+    // Passe ?todas=1 para incluir os cancelados (ex.: auditoria/histórico).
+    if (!req.query.todas) q = q.neq('status', 'cancelada')
+    const { data, error } = await q
     if (error) throw error
     return res.json(data)
   } catch (err) {
@@ -950,6 +954,16 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       }
       return cand
     }
+    // IDEMPOTÊNCIA — 1 renovação por ciclo. Se esta assinatura já gerou lote de
+    // fichas nos últimos 20 dias, trata como já renovada: NÃO avança o vencimento
+    // e NÃO gera novo lote (evita vencimento correndo e "4 fichas toda visita").
+    let jaRenovouNoCiclo = false
+    if (assinatura_id) {
+      const limite20 = new Date(Date.now() - 20 * 24 * 3600 * 1000).toISOString()
+      const { data: loteRecente } = await supabaseAdmin.from('fichas_plano')
+        .select('id').eq('assinatura_id', assinatura_id).gte('gerada_em', limite20).limit(1)
+      jaRenovouNoCiclo = !!(loteRecente && loteRecente.length)
+    }
     // ===== assinatura: renovar OU criar =====
     let assinatura, criouNova = false, antes = null
     if (assinatura_id) {
@@ -958,7 +972,7 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       antes = { data_renovacao: atual.data_renovacao, status: atual.status, vendedor_id: atual.vendedor_id, vendedor_id_2: atual.vendedor_id_2, valor_split_1: atual.valor_split_1, forma_pgto: atual.forma_pgto, plano_id: atual.plano_id }
       // Dia fixo do contrato (data_inicio). Base de contagem = vencimento atual.
       const baseRenov = atual.data_renovacao ? String(atual.data_renovacao).slice(0, 10) : hoje
-      const novaData = dataVencManual || proximaRenovacao(baseRenov, atual.data_inicio)   // manual tem prioridade
+      const novaData = dataVencManual || (jaRenovouNoCiclo ? baseRenov : proximaRenovacao(baseRenov, atual.data_inicio))   // manual tem prioridade
       const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
         plano_id, status: 'ativa', data_renovacao: novaData,
         vendedor_id, vendedor_id_2, valor_split_1: valSplit1,
@@ -981,23 +995,26 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       assinatura = nova; criouNova = true
     }
     // ===== ITEM 7: gera lote de fichas de bar (acumulam, validade 90 dias) =====
-    try {
-      const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
-      if (qtdFichas > 0) {
-        const agora = new Date()
-        const expira = new Date(agora.getTime() + 90 * 24 * 3600 * 1000)
-        await supabaseAdmin.from('fichas_plano').insert({
-          cliente_id,
-          assinatura_id: assinatura.id,
-          plano_id,
-          quantidade: qtdFichas,
-          usadas: 0,
-          gerada_em: agora.toISOString(),
-          expira_em: expira.toISOString(),
-          origem: assinatura_id ? 'renovacao' : 'nova_assinatura',
-        })
-      }
-    } catch (e) { console.error('[fichas-plano] gerar:', e.message) }
+    // Só gera se NÃO renovou no ciclo (idempotência — 1 lote por ciclo).
+    if (!jaRenovouNoCiclo) {
+      try {
+        const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
+        if (qtdFichas > 0) {
+          const agora = new Date()
+          const expira = new Date(agora.getTime() + 90 * 24 * 3600 * 1000)
+          await supabaseAdmin.from('fichas_plano').insert({
+            cliente_id,
+            assinatura_id: assinatura.id,
+            plano_id,
+            quantidade: qtdFichas,
+            usadas: 0,
+            gerada_em: agora.toISOString(),
+            expira_em: expira.toISOString(),
+            origem: assinatura_id ? 'renovacao' : 'nova_assinatura',
+          })
+        }
+      } catch (e) { console.error('[fichas-plano] gerar:', e.message) }
+    }
     // ===== comanda da mensalidade (finalizada) =====
     // Se sem_comanda=true, a mensalidade é cobrada noutra comanda (ex: no próprio
     // atendimento). Aqui só ativamos/renovamos a assinatura.
