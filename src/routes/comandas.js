@@ -492,18 +492,43 @@ async function ativarOuRenovarPlano({ cliente_id, plano_id, vendedor_id, forma_p
   const { data: plano } = await supabaseAdmin.from('planos').select('id, nome, valor_mensal, fichas_bar_mes').eq('id', plano_id).single()
   if (!plano) throw new Error('Plano não encontrado.')
   const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
-  function maisUmMes(baseYMD) {
-    const d = new Date(baseYMD + 'T12:00:00-03:00'); d.setMonth(d.getMonth() + 1)
-    return d.toISOString().slice(0, 10)
+  // Vencimento SEMPRE no mesmo DIA do mês da contratação (mesma regra do /assinaturas/cobrar).
+  function _ymdComDia(ano, mes0, dia) {
+    const ultimo = new Date(Date.UTC(ano, mes0 + 1, 0)).getUTCDate()
+    const d = Math.min(dia, ultimo)
+    return ano + '-' + String(mes0 + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0')
+  }
+  function proximaRenovacao(atualRenovYMD, dataInicioYMD) {
+    const ancoraSrc = String(dataInicioYMD || atualRenovYMD || hoje).slice(0, 10)
+    const dia = parseInt(ancoraSrc.slice(8, 10), 10) || 1
+    const refBase = String(atualRenovYMD || hoje).slice(0, 10)
+    let ano = parseInt(refBase.slice(0, 4), 10)
+    let mes0 = parseInt(refBase.slice(5, 7), 10) - 1 + 1
+    let cand = _ymdComDia(ano + Math.floor(mes0 / 12), ((mes0 % 12) + 12) % 12, dia)
+    let guard = 0
+    while (cand <= hoje && guard < 36) {
+      mes0 += 1; cand = _ymdComDia(ano + Math.floor(mes0 / 12), ((mes0 % 12) + 12) % 12, dia); guard++
+    }
+    return cand
+  }
+  // IDEMPOTÊNCIA — 1 renovação por ciclo. Se esta assinatura já gerou um lote de
+  // fichas nos últimos 20 dias, a renovação é tratada como "já feita no ciclo":
+  // NÃO avança o vencimento e NÃO gera novo lote (mata o "volta a ter 4 toda visita"
+  // e o vencimento correndo pra frente). Só garante que fica ativa.
+  let jaRenovouNoCiclo = false
+  if (assinatura_id) {
+    const limite20 = new Date(Date.now() - 20 * 24 * 3600 * 1000).toISOString()
+    const { data: loteRecente } = await supabaseAdmin.from('fichas_plano')
+      .select('id').eq('assinatura_id', assinatura_id).gte('gerada_em', limite20).limit(1)
+    jaRenovouNoCiclo = !!(loteRecente && loteRecente.length)
   }
   let assinatura, criouNova = false
   if (assinatura_id) {
     const { data: atual } = await supabaseAdmin.from('assinaturas').select('*').eq('id', assinatura_id).single()
     if (!atual) throw new Error('Assinatura não encontrada.')
-    // herda a divisão (2 barbeiros) que já estava salva na assinatura
-    const venceAtivo = atual.data_renovacao && String(atual.data_renovacao).slice(0, 10) >= hoje
-    const base = venceAtivo ? String(atual.data_renovacao).slice(0, 10) : hoje
-    const novaData = dataVencManual || maisUmMes(base)
+    const baseRenov = atual.data_renovacao ? String(atual.data_renovacao).slice(0, 10) : hoje
+    // já renovado no ciclo: mantém a data atual; senão avança pro próximo dia-fixo.
+    const novaData = dataVencManual || (jaRenovouNoCiclo ? baseRenov : proximaRenovacao(baseRenov, atual.data_inicio))
     const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
       plano_id, status: 'ativa', data_renovacao: novaData,
       vendedor_id, vendedor_id_2: atual.vendedor_id_2, valor_split_1: atual.valor_split_1,
@@ -517,25 +542,27 @@ async function ativarOuRenovarPlano({ cliente_id, plano_id, vendedor_id, forma_p
     if (jaTem && jaTem.length) { const e = new Error('Cliente já tem assinatura ativa.'); e.code = 'JA_ATIVA'; throw e }
     const { data: nova, error: eN } = await supabaseAdmin.from('assinaturas').insert({
       cliente_id, plano_id, status: 'ativa',
-      data_inicio: hoje, data_renovacao: dataVencManual || maisUmMes(hoje),
+      data_inicio: hoje, data_renovacao: dataVencManual || proximaRenovacao(hoje, hoje),
       vendedor_id, forma_pgto
     }).select().single()
     if (eN) throw eN
     assinatura = nova; criouNova = true
   }
-  // fichas de bar do ciclo (acumulam, validade 90 dias)
-  try {
-    const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
-    if (qtdFichas > 0) {
-      const agora = new Date(); const expira = new Date(agora.getTime() + 90 * 24 * 3600 * 1000)
-      await supabaseAdmin.from('fichas_plano').insert({
-        cliente_id, assinatura_id: assinatura.id, plano_id, quantidade: qtdFichas, usadas: 0,
-        gerada_em: agora.toISOString(), expira_em: expira.toISOString(),
-        origem: assinatura_id ? 'renovacao' : 'nova_assinatura'
-      })
-    }
-  } catch (e) { console.error('[fichas-plano] gerar (finalizar):', e.message) }
-  return { assinatura, criouNova }
+  // fichas de bar do ciclo (acumulam, validade 90 dias) — só se NÃO renovou no ciclo.
+  if (!jaRenovouNoCiclo) {
+    try {
+      const qtdFichas = parseInt(plano.fichas_bar_mes) || 0
+      if (qtdFichas > 0) {
+        const agora = new Date(); const expira = new Date(agora.getTime() + 90 * 24 * 3600 * 1000)
+        await supabaseAdmin.from('fichas_plano').insert({
+          cliente_id, assinatura_id: assinatura.id, plano_id, quantidade: qtdFichas, usadas: 0,
+          gerada_em: agora.toISOString(), expira_em: expira.toISOString(),
+          origem: assinatura_id ? 'renovacao' : 'nova_assinatura'
+        })
+      }
+    } catch (e) { console.error('[fichas-plano] gerar (finalizar):', e.message) }
+  }
+  return { assinatura, criouNova, jaRenovouNoCiclo }
 }
 
 // PUT /comandas/:id/finalizar
@@ -582,19 +609,9 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
       })
     }
 
-    // ITEM 7: consome fichas de bar acumuladas (FIFO, respeita validade 90 dias)
-    try {
-      const { data: cmdInfo } = await supabaseAdmin
-        .from('comandas').select('cliente_id').eq('id', id).single()
-      if (cmdInfo && cmdInfo.cliente_id) {
-        const { data: fichaItens } = await supabaseAdmin
-          .from('itens_comanda').select('quantidade').eq('comanda_id', id).eq('ficha_bar', true)
-        const qtdFichas = (fichaItens || []).reduce((s, i) => s + (parseInt(i.quantidade) || 1), 0)
-        if (qtdFichas > 0) {
-          await supabaseAdmin.rpc('consumir_fichas', { p_cliente: cmdInfo.cliente_id, p_qtd: qtdFichas })
-        }
-      }
-    } catch (e) { console.error('[fichas-plano] consumir:', e.message) }
+    // CONSUMO DE FICHAS: feito pelo GATILHO trg_consumir_fichas (na tabela comandas,
+    // quando status vira 'finalizada'). A chamada manual que existia aqui foi REMOVIDA
+    // porque, somada ao gatilho, debitava a ficha 2× nesta rota. Fonte única = gatilho.
 
     // Se a comanda é de um agendamento, conclui o agendamento junto (status + valor real).
     if (data && data.agendamento_id) {
