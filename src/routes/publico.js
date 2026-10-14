@@ -21,19 +21,34 @@ function normalizarTel(s) {
   return t || null
 }
 // Retorna o cliente que casa pelo telefone, ou null. Tenta 11 dígitos e cai pra 10.
+// Se o número cair num cadastro que foi MESCLADO (duplicado juntado em outro),
+// devolve o cadastro principal — senão o cliente entraria num cadastro vazio,
+// sem histórico/pontos/plano, e ele seria "reativado" por engano.
 async function acharClientePorTel(whatsapp, campos) {
   const tel = normalizarTel(whatsapp)
   if (!tel || tel.length < 10) return null
   const sel = campos || 'id,nome,whatsapp,senha_hash,ativo'
-  // 1) tenta pelos últimos 11 dígitos (celular com 9)
-  if (tel.length >= 11) {
-    const { data } = await supabaseAdmin.from('clientes').select(sel).ilike('whatsapp', '%' + tel.slice(-11) + '%').limit(1)
-    if (data && data.length) return data[0]
+  const selBusca = sel.indexOf('arquivado_motivo') === -1 ? sel + ',arquivado_motivo' : sel
+  async function buscar(sufixo) {
+    const { data } = await supabaseAdmin.from('clientes').select(selBusca)
+      .ilike('whatsapp', '%' + sufixo + '%').order('ativo', { ascending: false }).limit(5)
+    if (!data || !data.length) return null
+    // prefere um cadastro que NÃO foi mesclado
+    return data.find(c => !/^mesclado no cliente /.test(c.arquivado_motivo || '')) || data[0]
   }
+  let c = null
+  // 1) tenta pelos últimos 11 dígitos (celular com 9)
+  if (tel.length >= 11) c = await buscar(tel.slice(-11))
   // 2) cai pros últimos 10 (fixo ou celular antigo sem 9)
-  const { data: d2 } = await supabaseAdmin.from('clientes').select(sel).ilike('whatsapp', '%' + tel.slice(-10) + '%').limit(1)
-  if (d2 && d2.length) return d2[0]
-  return null
+  if (!c) c = await buscar(tel.slice(-10))
+  if (!c) return null
+  const m = /^mesclado no cliente ([0-9a-f-]{36})/.exec(c.arquivado_motivo || '')
+  if (m) {
+    const { data: princ } = await supabaseAdmin.from('clientes').select(selBusca).eq('id', m[1]).maybeSingle()
+    if (princ) c = princ
+  }
+  if (sel.indexOf('arquivado_motivo') === -1) delete c.arquivado_motivo
+  return c
 }
 // ============================================================
 // "Cliente voltou" — reativa o cadastro.
