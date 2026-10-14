@@ -159,11 +159,14 @@ router.get('/dashboard/metricas', autenticar, async (req, res) => {
     } else if (perfil === 'colaborador') {
       try {
         const { ini, fim } = limitesMes()
-        const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: colab.unidade_id || null })
+        // (#10) mês e dia em PARALELO
+        const [fx, fxDia] = await Promise.all([
+          calcularComissaoFaixa({ ini, fim, unidade_id: colab.unidade_id || null }),
+          calcularComissaoFaixa({ ini: inicioDia, fim: fimDia, unidade_id: colab.unidade_id || null }),
+        ])
         const minha = (fx.linhas || []).find(l => l.colaborador_id === colab.id) ||
           { comissao_total: 0, servico_pct: 40, produto_pct: 10, servico_total: 0, produto_total: 0, produto_unidades: 0 }
         // comissão do DIA SELECIONADO: receita do dia × a faixa do mês
-        const fxDia = await calcularComissaoFaixa({ ini: inicioDia, fim: fimDia, unidade_id: colab.unidade_id || null })
         const h = (fxDia.linhas || []).find(l => l.colaborador_id === colab.id) || { servico_total: 0, produto_total: 0 }
         const diaVal = h.servico_total * minha.servico_pct / 100 + h.produto_total * minha.produto_pct / 100
         result.comissoes = {

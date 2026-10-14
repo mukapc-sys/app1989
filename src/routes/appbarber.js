@@ -3,6 +3,7 @@ const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { sincronizarUnidade, processarAgendamentos, carregarDeParas } = require('./appbarber-sync')
+const { sincronizarBaixaComanda } = require('./estoque-sync')
 
 const ADM = ['proprietario', 'gerente']
 
@@ -327,6 +328,29 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
     const { data: ab, error: e0 } = await supabaseAdmin
       .from('agenda_appbarber').select('*').eq('id', req.params.id).single()
     if (e0 || !ab) return res.status(404).json({ erro: 'Agendamento importado não encontrado' })
+
+    // RE-FINALIZAR após REABRIR (bug #9): o importado já está finalizado, mas a comanda
+    // dele foi reaberta e corrigida. Antes respondia 400 "já foi finalizado" e a tela
+    // tratava como sucesso -> a correção nunca era gravada (ficava o 1º salvamento).
+    // Agora regrava a MESMA comanda com os itens atuais e sincroniza o estoque.
+    if (ab.finalizado && ab.comanda_id) {
+      const { data: cmdR } = await supabaseAdmin.from('comandas').select('*').eq('id', ab.comanda_id).maybeSingle()
+      if (cmdR && cmdR.status === 'aberta') {
+        const { data: itsR } = await supabaseAdmin.from('itens_comanda')
+          .select('valor_unit, quantidade').eq('comanda_id', cmdR.id)
+        const subR = (itsR || []).reduce((s, i) => s + Number(i.valor_unit || 0) * (parseInt(i.quantidade) || 1), 0)
+        const pagsR = montarPagamentos(req.body && req.body.pagamentos, subR)
+        const { error: eR } = await supabaseAdmin.from('comandas').update({
+          status: 'finalizada', forma_pgto: formaPrincipalDe(pagsR, forma_pgto), pagamentos: pagsR,
+          subtotal: subR, desconto: 0, total: subR, finalizada_em: new Date().toISOString(),
+        }).eq('id', cmdR.id)
+        if (eR) throw eR
+        const agRef = cmdR.agendamento_id || ab.agendamento_id
+        if (agRef) await supabaseAdmin.from('agendamentos').update({ status: 'concluido', valor: subR }).eq('id', agRef)
+        await sincronizarBaixaComanda(cmdR.id, { unidade_id: cmdR.unidade_id || ab.unidade_id, responsavel_id: cmdR.colaborador_id || ab.colaborador_id })
+        return res.json({ ok: true, refinalizado: true, comanda_id: cmdR.id, agendamento_id: agRef, total: subR })
+      }
+    }
     if (ab.finalizado) return res.status(400).json({ erro: 'Este atendimento já foi finalizado' })
 
     const valorFinal = (valor !== undefined && valor !== null && valor !== '') ? Number(valor) : Number(ab.valor || 0)
@@ -466,22 +490,8 @@ router.post('/finalizar/:id', autenticar, exigirPerfil('proprietario', 'gerente'
     // a finalização se falhar.
     if (comandaId) {
       try {
-        const { data: prodItens } = await supabaseAdmin
-          .from('itens_comanda')
-          .select('produto_id, quantidade')
-          .eq('comanda_id', comandaId)
-          .eq('tipo', 'produto')
-          .not('produto_id', 'is', null)
-        for (const item of (prodItens || [])) {
-          await supabaseAdmin.from('movimentacoes_estoque').insert({
-            produto_id:     item.produto_id,
-            unidade_id:     ab.unidade_id,
-            tipo:           'saida_venda',
-            quantidade:     parseInt(item.quantidade) || 1,
-            responsavel_id: ab.colaborador_id,
-            referencia_id:  comandaId
-          })
-        }
+        // fonte única e idempotente (baixa só a diferença)
+        await sincronizarBaixaComanda(comandaId, { unidade_id: ab.unidade_id, responsavel_id: ab.colaborador_id })
       } catch (eEstoque) {
         console.error('[appbarber/finalizar estoque]', eEstoque.message)
       }
@@ -582,6 +592,9 @@ router.post('/abrir/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'c
 router.post('/mover/:id', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
   try {
     const { inicio, fim, colaborador_id } = req.body || {}
+    // #11: importado já FINALIZADO fica travado na grade
+    const { data: abAtual } = await supabaseAdmin.from('agenda_appbarber').select('finalizado').eq('id', req.params.id).maybeSingle()
+    if (abAtual && abAtual.finalizado) return res.status(409).json({ erro: 'Atendimento finalizado não pode ser movido.' })
     const updates = { editado_local: true }
     if (inicio) updates.inicio = inicio
     if (fim) updates.fim = fim

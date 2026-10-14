@@ -5,6 +5,7 @@ const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 const { enviarPushParaColaborador } = require('./push-pro')
+const { sincronizarBaixaComanda } = require('./estoque-sync')
 
 const ADMIN    = exigirPerfil('proprietario')
 const ADM_GER  = exigirPerfil('proprietario','gerente')
@@ -52,7 +53,9 @@ async function estornarComandasDoAgendamento(agendamentoId) {
           pontosDevolvidos += c.pontos_resgatados
         }
       }
-      // 2) apaga a comanda (tira do caixa e do faturamento)
+      // 2) devolve ao estoque o que esta comanda tinha baixado (venda desfeita)
+      await sincronizarBaixaComanda(c.id, { zerar: true })
+      // 3) apaga a comanda (tira do caixa e do faturamento)
       const { error: eDel } = await supabaseAdmin.from('comandas').delete().eq('id', c.id)
       if (!eDel) estornadas++
     }
@@ -244,14 +247,67 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
         observacao:     'Vale funcionário — ' + (colab.nome || ''),
       }))
     if (movs.length) {
-      try { await supabaseAdmin.from('movimentacoes_estoque').insert(movs) }
-      catch (e) { console.error('[vales] estoque:', e.message) }
+      const { error: eVale } = await supabaseAdmin.from('movimentacoes_estoque').insert(movs)
+      if (eVale) console.error('[vales] baixa estoque:', vale && vale.id, eVale.message)
     }
 
     return res.status(201).json({ ok: true, vale, baixou_estoque: movs.length })
   } catch (err) {
     console.error('[vales]', err.message)
     return res.status(500).json({ erro: 'Erro ao registrar vale: ' + err.message })
+  }
+})
+
+// ============================================================
+// GET /vales/meus — consumo do PRÓPRIO colaborador logado (tela de consumo do bar)
+// Qualquer colaborador autenticado vê só o que é dele. Retorna total gasto,
+// total do mês, saldo e a lista de vales (com os itens).
+// ============================================================
+router.get('/vales/meus', autenticar, async (req, res) => {
+  try {
+    const meuId = req.usuario && req.usuario.id
+    if (!meuId) return res.status(400).json({ erro: 'Usuário sem identificação.' })
+    const { data: vales } = await supabaseAdmin.from('vales')
+      .select('id, valor, itens, status, criado_em, unidade_id, fechamento_id')
+      .eq('colaborador_id', meuId)
+      .order('criado_em', { ascending: false })
+      .limit(500)
+    const lista = vales || []
+    const round2 = n => Math.round((parseFloat(n) || 0) * 100) / 100
+    const total = lista.reduce((s, v) => s + (parseFloat(v.valor) || 0), 0)
+    const ymNow = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 7)
+    const totalMes = lista
+      .filter(v => String(v.criado_em || '').slice(0, 7) === ymNow)
+      .reduce((s, v) => s + (parseFloat(v.valor) || 0), 0)
+    const [rColab, rPix] = await Promise.all([
+      supabaseAdmin.from('colaboradores').select('nome, saldo_vales_pix').eq('id', meuId).single(),
+      // #6: vales em dinheiro/PIX (adiantamentos) também aparecem pro colaborador
+      supabaseAdmin.from('vales_pix').select('id, valor, descricao, status, criado_em, fechamento_id')
+        .eq('colaborador_id', meuId).order('criado_em', { ascending: false }).limit(300),
+    ])
+    const colab = rColab.data
+    const pix = (rPix && rPix.data) || []
+    const doMes = v => String(v.criado_em || '').slice(0, 7) === ymNow
+    const pendente = v => !v.fechamento_id && v.status !== 'quitado'
+    const soma = arr => arr.reduce((s, v) => s + (parseFloat(v.valor) || 0), 0)
+    const adiantMes = soma(pix.filter(doMes))
+    // "a descontar no próximo fechamento" = mesma regra da tela de comissões
+    const aDescontar = soma(lista.filter(pendente)) + soma(pix.filter(pendente))
+    return res.json({
+      colaborador: (colab && colab.nome) || null,
+      saldo_vales_pix: round2(colab && colab.saldo_vales_pix),
+      total_consumo: round2(total),
+      total_mes: round2(totalMes),              // consumo de produtos (bar/comanda) no mês
+      adiantamentos_mes: round2(adiantMes),     // vales PIX/dinheiro no mês
+      consumo_total_mes: round2(totalMes + adiantMes),
+      a_descontar: round2(aDescontar),
+      quantidade: lista.length,
+      vales: lista,
+      adiantamentos: pix
+    })
+  } catch (e) {
+    console.error('[vales/meus]', e.message)
+    return res.status(500).json({ erro: 'Erro ao carregar seu consumo' })
   }
 })
 
@@ -1048,29 +1104,24 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
         .select('id, status').eq('agendamento_id', ag.id).order('aberta_em', { ascending: false }).limit(1)
       if (jaTemComanda && jaTemComanda.length) {
         comanda_id = jaTemComanda[0].id
-        // Comanda criada ao ABRIR o agendamento: finaliza usando os itens já salvos.
-        if (jaTemComanda[0].status === 'aberta') {
-          const { data: its } = await supabaseAdmin.from('itens_comanda')
-            .select('valor_unit, quantidade, produto_id, tipo').eq('comanda_id', comanda_id)
-          const sub = (its || []).reduce((s, i) => s + (parseFloat(i.valor_unit) || 0) * (parseInt(i.quantidade) || 1), 0)
-          const tot = Math.max(0, sub - parseFloat(desconto || 0))
-          const pags = (Array.isArray(req.body.pagamentos) && req.body.pagamentos.length) ? req.body.pagamentos : null
-          await supabaseAdmin.from('comandas').update({
-            status: 'finalizada', forma_pgto: normalizarForma(forma_pgto), pagamentos: pags,
-            subtotal: sub, desconto, total: tot, finalizada_em: new Date().toISOString()
-          }).eq('id', comanda_id)
-          // alinha o valor do agendamento ao total real dos itens (respeita zerados do plano)
-          await supabaseAdmin.from('agendamentos').update({ valor: tot }).eq('id', ag.id)
-          // baixa de estoque dos produtos da comanda (best-effort)
-          for (const pi of (its || [])) {
-            if (pi.tipo === 'produto' && pi.produto_id) {
-              await supabaseAdmin.from('movimentacoes_estoque').insert({
-                produto_id: pi.produto_id, unidade_id: ag.unidade_id, tipo: 'saida_venda',
-                quantidade: parseInt(pi.quantidade) || 1, responsavel_id: ag.colaborador_id, referencia_id: comanda_id
-              }).then(() => {}).catch(() => {})
-            }
-          }
-        }
+        // Comanda já existe (aberta, OU reaberta/corrigida, OU finalizada antes):
+        // SEMPRE regrava com os itens atuais do banco. Antes só regravava se estivesse
+        // 'aberta' — se o reabrir não tivesse voltado a comanda, a correção era ignorada
+        // e ficavam os valores do 1º salvamento (bug #9).
+        const { data: its } = await supabaseAdmin.from('itens_comanda')
+          .select('valor_unit, quantidade').eq('comanda_id', comanda_id)
+        const sub = (its || []).reduce((s, i) => s + (parseFloat(i.valor_unit) || 0) * (parseInt(i.quantidade) || 1), 0)
+        const tot = Math.max(0, sub - parseFloat(desconto || 0))
+        const pags = (Array.isArray(req.body.pagamentos) && req.body.pagamentos.length) ? req.body.pagamentos : null
+        const { error: eUpd } = await supabaseAdmin.from('comandas').update({
+          status: 'finalizada', forma_pgto: normalizarForma(forma_pgto), pagamentos: pags,
+          subtotal: sub, desconto, total: tot, finalizada_em: new Date().toISOString()
+        }).eq('id', comanda_id)
+        if (eUpd) throw eUpd
+        // alinha o valor do agendamento ao total real dos itens (respeita zerados do plano)
+        await supabaseAdmin.from('agendamentos').update({ valor: tot }).eq('id', ag.id)
+        // baixa só a diferença (não baixa 2x ao re-finalizar; devolve o que saiu da comanda)
+        await sincronizarBaixaComanda(comanda_id, { unidade_id: ag.unidade_id, responsavel_id: ag.colaborador_id })
       } else if (lista.length) {
         const { data: cm } = await supabaseAdmin.from('comandas').insert({
           agendamento_id: ag.id, cliente_id: ag.cliente_id || null,
@@ -1089,18 +1140,15 @@ router.post('/agendamentos/:id/finalizar', autenticar, async (req, res) => {
             const tipo = _tl.indexOf('produto') !== -1 ? 'produto' : (_tl.indexOf('plano') !== -1 ? 'plano' : 'servico')
             const qtd = parseInt(it.quantidade) || 1
             const valor_unit = parseFloat(it.valor != null ? it.valor : it.valor_unit) || 0
-            await supabaseAdmin.from('itens_comanda').insert({
+            const { error: eIt } = await supabaseAdmin.from('itens_comanda').insert({
               comanda_id: cm.id, tipo, servico_id: it.servico_id || null, produto_id: it.produto_id || null,
               descricao: it.nome || it.descricao || (tipo === 'produto' ? 'Produto' : 'Serviço'),
-              quantidade: qtd, valor_unit
+              quantidade: qtd, valor_unit, colaborador_id: it.colaborador_id || null
             })
-            if (tipo === 'produto' && it.produto_id) {
-              await supabaseAdmin.from('movimentacoes_estoque').insert({
-                produto_id: it.produto_id, unidade_id: ag.unidade_id, tipo: 'saida_venda',
-                quantidade: qtd, responsavel_id: ag.colaborador_id, referencia_id: cm.id
-              }).then(() => {}).catch(() => {})
-            }
+            if (eIt) console.error('[finalizar item]', cm.id, eIt.message)
           }
+          // baixa pelos itens efetivamente gravados (fonte única)
+          await sincronizarBaixaComanda(cm.id, { unidade_id: ag.unidade_id, responsavel_id: ag.colaborador_id })
         }
       }
     } catch (eItens) { console.error('[finalizar itens]', eItens.message) }
@@ -1521,11 +1569,15 @@ router.put('/agendamentos/mover', autenticar, exigirPerfil('proprietario', 'gere
   try {
     const { agendamento_id, novo_horario, novo_colaborador_id, nova_unidade_id } = req.body
     const updates = {}
+    const { data: atual } = await supabaseAdmin.from('agendamentos')
+      .select('data_hora_ini,data_hora_fim,status').eq('id', agendamento_id).single()
+    // #11: atendimento FINALIZADO fica travado na grade (reabrir antes de mover)
+    if (atual && atual.status === 'concluido') {
+      return res.status(409).json({ erro: 'Atendimento finalizado não pode ser movido. Reabra a comanda se precisar.' })
+    }
     if (novo_horario) {
       updates.data_hora_ini = novo_horario
       // preserva a duração: desloca o fim junto com o início
-      const { data: atual } = await supabaseAdmin.from('agendamentos')
-        .select('data_hora_ini,data_hora_fim').eq('id', agendamento_id).single()
       if (atual && atual.data_hora_ini && atual.data_hora_fim) {
         const dur = new Date(atual.data_hora_fim).getTime() - new Date(atual.data_hora_ini).getTime()
         if (dur > 0) updates.data_hora_fim = new Date(new Date(novo_horario).getTime() + dur).toISOString()

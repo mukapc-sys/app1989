@@ -9,6 +9,7 @@ const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 
 const { exigirTela, exigirFuncao } = require('./permissoes')
+const { sincronizarBaixaComanda } = require('./estoque-sync')
 const CONTADOR = exigirPerfil('proprietario', 'gerente', 'caixa') // quem conta/envia
 const PROP     = exigirPerfil('proprietario')                     // quem aprova
 const TELA_BAL = exigirTela('balanco')
@@ -46,6 +47,48 @@ function unidadeDoUsuario(req) {
 }
 
 // ------------------------------------------------------------
+// CONCILIAÇÃO DE BAIXAS PERDIDAS (auto-heal) — rede de segurança.
+// Acha produto vendido em comanda FINALIZADA (janela recente) cuja baixa de
+// estoque não foi gravada (falha de conexão, ou o antigo gatilho recusando a
+// saída) e cria a saída que faltou. Idempotente: só insere o que falta.
+// ------------------------------------------------------------
+async function conciliarBaixasPerdidas(unidade_id, janelaHoras = 48) {
+  if (!unidade_id) return 0
+  let desde = new Date(Date.now() - janelaHoras * 3600 * 1000)
+  // piso de segurança: nunca reparar comandas anteriores ao último balanço
+  // CONCLUÍDO — aquele ajuste já absorveu a diferença; reparar agora contaria 2x.
+  const { data: ultBal } = await supabaseAdmin.from('balancos')
+    .select('concluido_em').eq('unidade_id', unidade_id).eq('status', 'concluido')
+    .not('concluido_em', 'is', null).order('concluido_em', { ascending: false }).limit(1)
+  if (ultBal && ultBal[0] && ultBal[0].concluido_em) {
+    const pisoBal = new Date(ultBal[0].concluido_em)
+    if (pisoBal > desde) desde = pisoBal
+  }
+  const { data: cmds } = await supabaseAdmin.from('comandas')
+    .select('id, colaborador_id')
+    .eq('status', 'finalizada').eq('unidade_id', unidade_id)
+    .gte('finalizada_em', desde.toISOString())
+  let criadas = 0
+  for (const c of (cmds || [])) {
+    // mesma regra das rotas de finalização: baixa só a diferença (idempotente)
+    const r = await sincronizarBaixaComanda(c.id, {
+      unidade_id, responsavel_id: c.colaborador_id, observacao: 'Conciliação de baixa (auto-heal)'
+    })
+    criadas += (r.baixas || 0)
+  }
+  return criadas
+}
+// throttle por processo: no máximo 1x a cada 30 min (evita rodar a cada clique)
+// (por unidade: rodar numa unidade não segura a outra)
+const _ultimaConciliacao = {}
+async function conciliarThrottled(unidade_id) {
+  const agora = Date.now()
+  if (agora - (_ultimaConciliacao[unidade_id] || 0) < 30 * 60 * 1000) return
+  _ultimaConciliacao[unidade_id] = agora
+  try { await conciliarBaixasPerdidas(unidade_id, 48) } catch (e) { console.error('[balanco/conciliar]', e.message) }
+}
+
+// ------------------------------------------------------------
 // GET /balanco/produtos?unidade_id=..
 // Lista todos os produtos ativos + saldo do sistema (para a contagem).
 // ------------------------------------------------------------
@@ -53,6 +96,9 @@ router.get('/produtos', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
   try {
     const unidade_id = unidadeDoUsuario(req)
     if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade.' })
+    // rede de segurança: antes de contar, repara baixas perdidas recentes
+    // (throttle interno de 30min) para o saldo do sistema sair fiel.
+    await conciliarThrottled(unidade_id)
     const { data: prods } = await supabaseAdmin.from('produtos')
       .select('id, nome, categorias_produto(nome)')
       .eq('ativo', true).order('nome')
@@ -67,6 +113,25 @@ router.get('/produtos', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
   } catch (err) {
     console.error('[balanco/produtos]', err.message)
     return res.status(500).json({ erro: 'Erro ao listar produtos' })
+  }
+})
+
+// ------------------------------------------------------------
+// POST /balanco/conciliar  { unidade_id, horas? }
+// Dispara manualmente a conciliação de baixas perdidas (rede de segurança).
+// Só repara comandas finalizadas após o último balanço concluído. Idempotente.
+// ------------------------------------------------------------
+router.post('/conciliar', autenticar, CONTADOR, TELA_BAL, async (req, res) => {
+  try {
+    const unidade_id = unidadeDoUsuario(req)
+    if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade.' })
+    const horas = Math.min(parseInt(req.body.horas) || 48, 168) // teto 7 dias
+    const criadas = await conciliarBaixasPerdidas(unidade_id, horas)
+    _ultimaConciliacao[unidade_id] = Date.now() // segura o auto-run por 30min
+    return res.json({ ok: true, baixas_criadas: criadas, janela_horas: horas })
+  } catch (err) {
+    console.error('[balanco/conciliar-manual]', err.message)
+    return res.status(500).json({ erro: 'Erro ao conciliar baixas' })
   }
 })
 

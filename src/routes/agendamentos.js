@@ -247,6 +247,100 @@ router.post('/', autenticar, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao criar agendamento' })
   }
 })
+// ------------------------------------------------------------
+// POST /agendamentos/recorrente — #3 AGENDAMENTO RECORRENTE
+// Cliente que vem sempre no mesmo dia da semana (ex.: toda sexta 18h).
+// Cria UM agendamento por data (cada um fica independente na agenda: dá pra
+// mover/cancelar/finalizar um sem mexer nos outros).
+// Quem pode: caixa, barbeiro, gerente (e proprietário). Cliente não.
+// body: { cliente_id?, cliente_nome, servico_id, colaborador_id, unidade_id,
+//         hora:'HH:MM', duracao?, dias_semana:[0..6] (0=domingo),
+//         data_ini:'YYYY-MM-DD', data_fim?:'YYYY-MM-DD', ocorrencias?:N, observacao? }
+// Termina em data_fim OU após N ocorrências (o que vier primeiro). Teto: 60 datas / 1 ano.
+// Horário já ocupado naquela data é PULADO (não sobrepõe) e volta na lista "pulados".
+// ------------------------------------------------------------
+router.post('/recorrente', autenticar, exigirPerfil('proprietario', 'gerente', 'caixa', 'colaborador'), async (req, res) => {
+  try {
+    const { cliente_id, cliente_nome, servico_id, colaborador_id, unidade_id, hora, data_ini, data_fim, observacao } = req.body || {}
+    const dias = (Array.isArray(req.body.dias_semana) ? req.body.dias_semana : []).map(Number).filter(d => d >= 0 && d <= 6)
+    const maxOc = Math.min(parseInt(req.body.ocorrencias, 10) || 60, 60)
+    if (!colaborador_id || !servico_id || !unidade_id) return res.status(400).json({ erro: 'Informe barbeiro, serviço e unidade.' })
+    if (!cliente_id && !String(cliente_nome || '').trim()) return res.status(400).json({ erro: 'Informe o cliente.' })
+    if (!/^\d{2}:\d{2}$/.test(String(hora || ''))) return res.status(400).json({ erro: 'Informe o horário.' })
+    if (!dias.length) return res.status(400).json({ erro: 'Escolha ao menos um dia da semana.' })
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data_ini || ''))) return res.status(400).json({ erro: 'Informe a data de início.' })
+    if (!data_fim && !req.body.ocorrencias) return res.status(400).json({ erro: 'Informe até quando (data final ou nº de vezes).' })
+    if (data_fim && data_fim < data_ini) return res.status(400).json({ erro: 'A data final deve ser depois da inicial.' })
+    // barbeiro só marca recorrente na PRÓPRIA agenda
+    if (req.usuario.perfil === 'colaborador' && String(req.usuario.id) !== String(colaborador_id)) {
+      return res.status(403).json({ erro: 'Você só pode marcar recorrente na sua agenda.' })
+    }
+
+    const { data: servico } = await supabaseAdmin.from('servicos').select('duracao_min, valor, nome').eq('id', servico_id).single()
+    if (!servico) return res.status(404).json({ erro: 'Serviço não encontrado' })
+    let dur = parseInt(req.body.duracao || req.body.duracao_min, 10)
+    if (!dur || isNaN(dur) || dur < 5 || dur > 480) {
+      let durPadrao = servico.duracao_min || 30
+      try {
+        const { data: tb } = await supabaseAdmin.from('colaborador_servico_tempo')
+          .select('duracao_min').eq('colaborador_id', colaborador_id).eq('servico_id', servico_id).maybeSingle()
+        if (tb && parseInt(tb.duracao_min, 10) > 0) durPadrao = parseInt(tb.duracao_min, 10)
+      } catch (_) {}
+      dur = durPadrao
+    }
+
+    // datas da série (fuso de Montenegro -03:00)
+    const limiteAno = new Date(new Date(data_ini + 'T12:00:00-03:00').getTime() + 366 * 86400000)
+    const fimSerie = data_fim ? new Date(data_fim + 'T12:00:00-03:00') : limiteAno
+    const datas = []
+    for (let d = new Date(data_ini + 'T12:00:00-03:00'); d <= fimSerie && d <= limiteAno && datas.length < maxOc; d = new Date(d.getTime() + 86400000)) {
+      const ymd = new Date(d.getTime() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+      const dow = new Date(ymd + 'T12:00:00Z').getUTCDay()
+      if (dias.indexOf(dow) !== -1) datas.push(ymd)
+    }
+    if (!datas.length) return res.status(400).json({ erro: 'Nenhuma data cai nesses dias da semana dentro do período.' })
+
+    // agendamentos já existentes do barbeiro no período (para pular conflitos)
+    const iniJan = new Date(datas[0] + 'T00:00:00-03:00')
+    const fimJan = new Date(datas[datas.length - 1] + 'T23:59:59-03:00')
+    const { data: existentes } = await supabaseAdmin.from('agendamentos')
+      .select('data_hora_ini, data_hora_fim')
+      .eq('colaborador_id', colaborador_id).in('status', STATUS_OCUPA_HORARIO)
+      .lt('data_hora_ini', fimJan.toISOString()).gt('data_hora_fim', iniJan.toISOString())
+
+    const agoraMs = Date.now()
+    const grupo = 'REC-' + Date.now().toString(36)
+    const linhas = [], pulados = []
+    for (const ymd of datas) {
+      const ini = new Date(ymd + 'T' + hora + ':00-03:00')
+      const fim = new Date(ini.getTime() + dur * 60000)
+      if (ini.getTime() < agoraMs) { pulados.push({ data: ymd, motivo: 'já passou' }); continue }
+      const choca = (existentes || []).some(a => new Date(a.data_hora_ini) < fim && new Date(a.data_hora_fim) > ini)
+      if (choca) { pulados.push({ data: ymd, motivo: 'horário ocupado' }); continue }
+      linhas.push({
+        colaborador_id, cliente_id: cliente_id || null, cliente_nome: cliente_nome || null,
+        servico_id, unidade_id,
+        data_hora_ini: ini.toISOString(), data_hora_fim: fim.toISOString(),
+        valor: servico.valor, encaixe: false, status: 'agendado',
+        observacao: ((observacao ? String(observacao).trim() + ' · ' : '') + 'Recorrente ' + grupo).slice(0, 500),
+        canal_origem: 'sistema', criado_por: req.usuario.id,
+      })
+    }
+    let criados = []
+    if (linhas.length) {
+      const { data, error } = await supabaseAdmin.from('agendamentos').insert(linhas).select('id, data_hora_ini')
+      if (error) throw error
+      criados = data || []
+    }
+    pingAgenda(unidade_id)
+    console.log(`[recorrente] ${req.usuario.nome} criou ${criados.length} (pulou ${pulados.length}) ${grupo}`)
+    return res.status(201).json({ ok: true, grupo, criados: criados.length, datas_criadas: criados.map(c => c.data_hora_ini), pulados })
+  } catch (err) {
+    console.error('[agendamentos/recorrente]', err.message)
+    return res.status(500).json({ erro: 'Erro ao criar agendamento recorrente' })
+  }
+})
+
 // PUT /agendamentos/:id/status
 // GET /agendamentos/transferidos-presos — agendamentos FUTUROS que ficaram numa unidade,
 // mas cujo barbeiro HOJE está em outra (foi transferido). Detecção dinâmica; não resolvidos.

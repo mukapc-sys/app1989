@@ -339,19 +339,19 @@ router.get('/progresso', autenticar, async (req, res) => {
     if (u.perfil === 'proprietario' && !colaborador_id && !unidade_id) {
       const { data: unidades } = await supabaseAdmin.from('unidades')
         .select('id, nome').eq('ativa', true).order('nome')
-      const lista = []
-      for (const un of (unidades || [])) {
-        const realU = await realizadoMes(mes, un.id)
-        const ativosU = await contarPlanosAtivos(un.id)
-        const { data: metaU } = await supabaseAdmin.from('metas_unidade')
-          .select('*').eq('unidade_id', un.id).eq('mes', mes).maybeSingle()
-        lista.push({ unidade_id: un.id, nome: un.nome, ...montar(metaU, realU.geral), planos_ativos: ativosU.geral })
-      }
+      // (#10) unidades calculadas EM PARALELO (antes: uma depois da outra, 3x o tempo)
+      const lista = await Promise.all((unidades || []).map(async (un) => {
+        const [realU, ativosU, rMeta] = await Promise.all([
+          realizadoMes(mes, un.id),
+          contarPlanosAtivos(un.id),
+          supabaseAdmin.from('metas_unidade').select('*').eq('unidade_id', un.id).eq('mes', mes).maybeSingle(),
+        ])
+        return { unidade_id: un.id, nome: un.nome, ...montar(rMeta.data, realU.geral), planos_ativos: ativosU.geral }
+      }))
       return res.json({ tipo:'proprietario', unidades: lista })
     }
 
-    const real = await realizadoMes(mes, unidade_id)
-    const ativos = await contarPlanosAtivos(unidade_id)
+    const [real, ativos] = await Promise.all([realizadoMes(mes, unidade_id), contarPlanosAtivos(unidade_id)])
 
     // COLABORADOR: só a própria meta
     if (colaborador_id) {

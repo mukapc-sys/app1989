@@ -73,10 +73,18 @@ async function valesDoPeriodo(colaborador_id, iniStr, fimStr) {
 async function premioGestao(colab, ini, fim, mes) {
   if (colab.perfil !== 'gerente' || !colab.unidade_id) return null
   // faturamento total da unidade no período (comandas finalizadas — inclui tudo)
-  const { data: cmds } = await supabaseAdmin.from('comandas')
-    .select('total').eq('status', 'finalizada').eq('unidade_id', colab.unidade_id)
-    .gte('finalizada_em', ini).lte('finalizada_em', fim)
-  const unitFat = (cmds || []).reduce((s, c) => s + (parseFloat(c.total) || 0), 0)
+  // PAGINADO: o banco devolve no máx. 1000 linhas por consulta — antes, unidade com
+  // +1000 comandas no mês tinha o faturamento (e o prêmio) calculado a menor.
+  let unitFat = 0
+  for (let from = 0; from <= 200000; from += 1000) {
+    const { data: cmds, error } = await supabaseAdmin.from('comandas')
+      .select('total').eq('status', 'finalizada').eq('unidade_id', colab.unidade_id)
+      .gte('finalizada_em', ini).lte('finalizada_em', fim)
+      .order('id').range(from, from + 999)
+    if (error || !cmds || !cmds.length) break
+    unitFat += cmds.reduce((s, c) => s + (parseFloat(c.total) || 0), 0)
+    if (cmds.length < 1000) break
+  }
   // meta de faturamento da unidade no mês
   const { data: metaU } = await supabaseAdmin.from('metas_unidade')
     .select('faturamento').eq('unidade_id', colab.unidade_id).eq('mes', mes).maybeSingle()
@@ -117,7 +125,12 @@ async function montarFechamento(colaborador_id, iniStr, fimStr) {
   const ehFuncionario = (colab.perfil === 'funcionario')
 
   const { ini, fim } = intervalo(iniStr, fimStr)
-  const vales = await valesDoPeriodo(colaborador_id, iniStr, fimStr)
+  // (#10) vales, comissão e prêmio são independentes -> EM PARALELO
+  const [vales, comCalc, premio] = await Promise.all([
+    valesDoPeriodo(colaborador_id, iniStr, fimStr),
+    ehFuncionario ? Promise.resolve(null) : comissaoColaborador(colaborador_id, ini, fim, colab.unidade_id),
+    ehFuncionario ? Promise.resolve(null) : premioGestao(colab, ini, fim, String(iniStr).slice(0, 7)),
+  ])
 
   // Funcionário não comissionado: bruto = salário. Barbeiro: bruto = comissão.
   let com, comissao_bruta, salario
@@ -126,14 +139,13 @@ async function montarFechamento(colaborador_id, iniStr, fimStr) {
     comissao_bruta = salario  // "bruto" do contracheque é o salário
     com = { servico_total:0, servico_pct:0, servico_comissao:0, produto_total:0, produto_pct:0, produto_comissao:0, atendimentos:0 }
   } else {
-    com = await comissaoColaborador(colaborador_id, ini, fim, colab.unidade_id)
+    com = comCalc
     salario = 0
     comissao_bruta = round(com.servico_comissao + com.produto_comissao)
   }
 
   const total_descontos  = round(vales.total_adiantamento + vales.total_produtos)
   // prêmio de gestão (só gerente/subgerente) — soma ao líquido
-  const premio = ehFuncionario ? null : await premioGestao(colab, ini, fim, String(iniStr).slice(0, 7))
   const premio_gestao = premio ? premio.valor : 0
   const liquido          = round(comissao_bruta + premio_gestao - total_descontos)
 

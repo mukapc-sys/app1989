@@ -4,6 +4,7 @@ const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { validarSenhaAutorizacao } = require('../middleware/autorizacao')
 const { exigirFuncao, podeFuncao } = require('./permissoes')
+const { sincronizarBaixaComanda } = require('./estoque-sync')
 
 // TRAVA DE CAIXA: nenhum movimento (finalizar, vender, lançar item) pode ocorrer com
 // o caixa da unidade FECHADO. Checa se existe sessão 'aberto' para a unidade.
@@ -133,6 +134,51 @@ router.get('/resumo-do-agendamento/:agendamento_id', autenticar, async (req, res
   }
 })
 
+// GET /comandas/detalhe/:id            -> comanda pelo id
+// GET /comandas/detalhe/:id?agendamento=1 -> comanda FINALIZADA do agendamento
+// #8: visualizar comanda finalizada (itens, valores, pagamento, barbeiro, cliente)
+// pela agenda ou pela lista de comandas do caixa. Somente leitura.
+router.get('/detalhe/:id', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    let q = supabaseAdmin.from('comandas')
+      .select('id, status, agendamento_id, cliente_id, cliente_nome, colaborador_id, unidade_id, subtotal, desconto, total, forma_pgto, pagamentos, aberta_em, finalizada_em, observacao, pontos_resgatados, itens_comanda(id, tipo, descricao, quantidade, valor_unit, colaborador_id, produto_id, servico_id, ficha_bar)')
+    if (req.query.agendamento) {
+      q = q.eq('agendamento_id', req.params.id).order('finalizada_em', { ascending: false, nullsFirst: false }).limit(1)
+    } else {
+      q = q.eq('id', req.params.id).limit(1)
+    }
+    const { data: rows, error } = await q
+    if (error) throw error
+    const c = rows && rows[0]
+    if (!c) return res.status(404).json({ erro: 'Comanda não encontrada para este atendimento.' })
+    // barbeiro só vê comanda em que ele atendeu (da comanda ou de algum item)
+    if (req.usuario.perfil === 'colaborador') {
+      const meu = String(req.usuario.id)
+      const participa = String(c.colaborador_id) === meu || (c.itens_comanda || []).some(i => String(i.colaborador_id) === meu)
+      if (!participa) return res.status(403).json({ erro: 'Você só pode ver comandas dos seus atendimentos.' })
+    }
+    // nomes de barbeiros, unidade e cliente
+    const colabIds = [...new Set([c.colaborador_id, ...(c.itens_comanda || []).map(i => i.colaborador_id)].filter(Boolean))]
+    const [rCols, rUni, rCli] = await Promise.all([
+      colabIds.length ? supabaseAdmin.from('colaboradores').select('id, nome').in('id', colabIds) : Promise.resolve({ data: [] }),
+      c.unidade_id ? supabaseAdmin.from('unidades').select('nome').eq('id', c.unidade_id).maybeSingle() : Promise.resolve({ data: null }),
+      c.cliente_id ? supabaseAdmin.from('clientes').select('id, nome, whatsapp').eq('id', c.cliente_id).maybeSingle() : Promise.resolve({ data: null }),
+    ])
+    const nome = {}; (rCols.data || []).forEach(x => { nome[x.id] = x.nome })
+    return res.json({
+      ...c,
+      barbeiro: nome[c.colaborador_id] || null,
+      unidade: (rUni.data && rUni.data.nome) || null,
+      cliente: rCli.data || (c.cliente_nome ? { id: null, nome: c.cliente_nome } : null),
+      itens: (c.itens_comanda || []).map(i => ({ ...i, barbeiro: nome[i.colaborador_id] || null })),
+      itens_comanda: undefined,
+    })
+  } catch (err) {
+    console.error('[comandas/detalhe]', err.message)
+    return res.status(500).json({ erro: 'Erro ao carregar a comanda' })
+  }
+})
+
 // GET /comandas/aberta-do-agendamento/:agendamento_id
 // Recupera a comanda ABERTA de um agendamento (já com os itens salvos), se existir.
 // Base da "comanda aberta": ao clicar no agendamento, carrega o que já foi salvo.
@@ -254,6 +300,9 @@ router.post('/:id/estornar', autenticar, exigirPerfil('proprietario','gerente','
       }
     }
 
+    // Devolve ao estoque o que esta comanda tinha baixado (venda desfeita).
+    await sincronizarBaixaComanda(req.params.id, { zerar: true })
+
     const { error: e2 } = await supabaseAdmin.from('comandas').delete().eq('id', req.params.id)
     if (e2) throw e2
 
@@ -312,12 +361,13 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     }
 
     // #1 — cada produto comissionado (barbearia) precisa do barbeiro NO ITEM.
-    const prodIds = itens.filter(i => i && i.tipo === 'produto' && i.id).map(i => i.id)
+    const _ehProd = i => String((i && i.tipo) || '').toLowerCase().indexOf('produto') !== -1
+    const prodIds = itens.filter(i => _ehProd(i) && i.id).map(i => i.id)
     if (prodIds.length) {
       const { data: prods } = await supabaseAdmin
         .from('produtos').select('id, categorias_produto(paga_comissao)').in('id', prodIds)
       const comissSet = new Set((prods || []).filter(p => p.categorias_produto && p.categorias_produto.paga_comissao).map(p => p.id))
-      const faltando = itens.some(i => i && i.tipo === 'produto' && comissSet.has(i.id) && !i.colaborador_id)
+      const faltando = itens.some(i => _ehProd(i) && comissSet.has(i.id) && !i.colaborador_id)
       if (faltando) return res.status(400).json({ erro: 'Informe o barbeiro de cada produto de barbearia.' })
     }
 
@@ -343,7 +393,9 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
     let subtotal = 0
     const produtosVendidos = []
     for (const it of itens) {
-      const tipo = it.tipo === 'produto' ? 'produto' : (it.tipo === 'plano' ? 'plano' : 'servico')
+      // aceita 'produto'/'Produto' (tela antiga manda maiúsculo e o produto virava serviço sem baixa)
+      const _tl  = String(it.tipo || '').toLowerCase()
+      const tipo = _tl.indexOf('produto') !== -1 ? 'produto' : (_tl.indexOf('plano') !== -1 ? 'plano' : 'servico')
       const qtd  = parseInt(it.quantidade) || 1
       // valor editado no widget (cobrar mais/menos/zerar); se não veio, usa o de tabela
       const valorCustom = (it.valor !== undefined && it.valor !== null && !isNaN(parseFloat(it.valor))) ? parseFloat(it.valor) : null
@@ -373,8 +425,9 @@ router.post('/avulsa', autenticar, exigirPerfil('proprietario','gerente','colabo
       .eq('id', comanda.id).select().single()
     if (errF) throw errF
 
-    for (const pv of produtosVendidos) {
-      await supabaseAdmin.from('movimentacoes_estoque').insert({ produto_id: pv.produto_id, unidade_id: fin.unidade_id, tipo: 'saida_venda', quantidade: pv.quantidade, responsavel_id: fin.colaborador_id, referencia_id: comanda.id })
+    // baixa de estoque pelos itens gravados (fonte única, idempotente)
+    if (produtosVendidos.length) {
+      await sincronizarBaixaComanda(comanda.id, { unidade_id: fin.unidade_id, responsavel_id: fin.colaborador_id })
     }
     return res.status(201).json(fin)
   } catch (err) {
@@ -594,20 +647,9 @@ router.put('/:id/finalizar', autenticar, async (req, res) => {
 
     if (error) throw error
 
-    // Registra saída de estoque para produtos
-    const { data: prodItens } = await supabaseAdmin
-      .from('itens_comanda').select('produto_id, quantidade').eq('comanda_id', id).eq('tipo', 'produto').not('produto_id', 'is', null)
-
-    for (const item of (prodItens || [])) {
-      await supabaseAdmin.from('movimentacoes_estoque').insert({
-        produto_id:     item.produto_id,
-        unidade_id:     data.unidade_id,
-        tipo:           'saida_venda',
-        quantidade:     item.quantidade,
-        responsavel_id: data.colaborador_id,
-        referencia_id:  id
-      })
-    }
+    // Baixa de estoque: só a DIFERENÇA (idempotente — re-finalizar após reabrir não baixa 2x;
+    // item removido na correção volta ao estoque; produto zerado também baixa).
+    await sincronizarBaixaComanda(id, { unidade_id: data.unidade_id, responsavel_id: data.colaborador_id })
 
     // CONSUMO DE FICHAS: feito pelo GATILHO trg_consumir_fichas (na tabela comandas,
     // quando status vira 'finalizada'). A chamada manual que existia aqui foi REMOVIDA

@@ -335,36 +335,35 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, exigirFuncao('ver_comi
     const u = req.usuario
     const { ini, fim } = getPeriodo(periodo)
     const uid = u.perfil === 'proprietario' ? unidade_id : u.unidade_id
-    const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: uid })
+    // (#10) tudo que esta tela precisa é independente -> busca EM PARALELO
+    const pFx = calcularComissaoFaixa({ ini, fim, unidade_id: uid })
     // nº de atendimentos (comandas finalizadas) e unidade por barbeiro — PAGINADO
-    const cmds = await fetchAll(() => {
+    const pCmds = fetchAll(() => {
       let q = supabaseAdmin.from('comandas').select('colaborador_id, unidade_id')
         .eq('status', 'finalizada').gte('finalizada_em', ini).lte('finalizada_em', fim)
       if (uid) q = q.eq('unidade_id', uid)
       return q
     })
+    const pUnid = supabaseAdmin.from('unidades').select('id, nome')
+    const pVProd = supabaseAdmin.from('vales').select('colaborador_id, valor')
+      .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
+    const pVPix = supabaseAdmin.from('vales_pix').select('colaborador_id, valor')
+      .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
+    const [fx, cmds, rUnid, rVProd, rVPix] = await Promise.all([pFx, pCmds, pUnid, pVProd, pVPix])
     const cont = {}, unidDe = {}
     ;(cmds || []).forEach(c => {
       cont[c.colaborador_id] = (cont[c.colaborador_id] || 0) + 1
       if (!unidDe[c.colaborador_id]) unidDe[c.colaborador_id] = c.unidade_id
     })
-    const { data: unidades } = await supabaseAdmin.from('unidades').select('id, nome')
+    const unidades = rUnid && rUnid.data
     const unome = (id) => { const un = (unidades || []).find(x => x.id === id); return un ? un.nome.replace('Unidade ', '') : '' }
     // DESCONTOS do período por colaborador = vales (consumo de produto) + vales_pix (adiantamentos)
     const descPorColab = {}
     const somaVales = (rows) => (rows || []).forEach(v => {
       descPorColab[v.colaborador_id] = (descPorColab[v.colaborador_id] || 0) + (parseFloat(v.valor) || 0)
     })
-    try {
-      const { data: vProd } = await supabaseAdmin.from('vales').select('colaborador_id, valor')
-        .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
-      somaVales(vProd)
-    } catch (e) { console.error('[comissoes-barbeiro vales]', e.message) }
-    try {
-      const { data: vPix } = await supabaseAdmin.from('vales_pix').select('colaborador_id, valor')
-        .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
-      somaVales(vPix)
-    } catch (e) { console.error('[comissoes-barbeiro vales_pix]', e.message) }
+    if (rVProd && rVProd.error) console.error('[comissoes-barbeiro vales]', rVProd.error.message); else somaVales(rVProd && rVProd.data)
+    if (rVPix && rVPix.error) console.error('[comissoes-barbeiro vales_pix]', rVPix.error.message); else somaVales(rVPix && rVPix.data)
     const lista = (fx.linhas || []).map(l => {
       const descontos = round(descPorColab[l.colaborador_id] || 0)
       return {

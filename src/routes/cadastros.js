@@ -245,14 +245,19 @@ router.post('/colaboradores/:id/transferir', autenticar, exigirPerfil('proprieta
   }
 })
 // ============ CLIENTES ============
-router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa'), async (req, res) => {
+// #2: barbeiro (colaborador) também busca cliente — antes recebia 403 e não achava ninguém
+// no modal de agendamento. Para o barbeiro, CPF não é exposto.
+router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
   try {
     const { busca, q, unidade_id } = req.query
     const termo = String(busca || q || '').trim()
     const lim = Math.min(parseInt(req.query.limit, 10) || 100, 100)
+    const ehBarbeiro = req.usuario.perfil === 'colaborador'
     let query = supabaseAdmin
       .from('clientes')
-      .select('id, nome, email, whatsapp, cpf, ativo, criado_em, colaborador_pref, unidade_pref')
+      .select(ehBarbeiro
+        ? 'id, nome, email, whatsapp, ativo, criado_em, colaborador_pref, unidade_pref'
+        : 'id, nome, email, whatsapp, cpf, ativo, criado_em, colaborador_pref, unidade_pref')
       .order('nome').limit(lim)
     if (termo) {
       // Buscando por nome/telefone/cpf -> acha TODOS (inclusive inativos),
@@ -269,6 +274,62 @@ router.get('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa
     return res.status(500).json({ erro: 'Erro ao buscar clientes' })
   }
 })
+// ------------------------------------------------------------
+// POST /clientes — CADASTRO MANUAL de cliente pela equipe (#2).
+// Liberado para TODOS os perfis do PRO (proprietário, gerente, caixa, barbeiro).
+// Cria só o registro do cliente (sem login). Se ele baixar o app depois, usa
+// "Criar conta"/"Esqueci a senha"; o gerente também pode definir a senha.
+// Evita duplicata: se já existe cliente com o mesmo WhatsApp (ou CPF), devolve 409
+// com o cadastro existente para a tela selecionar em vez de criar outro.
+// body: { nome, whatsapp, email?, cpf?, data_nasc? }
+// ------------------------------------------------------------
+router.post('/clientes', autenticar, exigirPerfil('proprietario','gerente','caixa','colaborador'), async (req, res) => {
+  try {
+    const nome = String(req.body.nome || '').trim()
+    const whatsapp = String(req.body.whatsapp || '').replace(/\D/g, '')
+    const email = String(req.body.email || '').trim().toLowerCase() || null
+    const cpf = String(req.body.cpf || '').replace(/\D/g, '') || null
+    const data_nasc = req.body.data_nasc || null
+    if (nome.length < 2) return res.status(400).json({ erro: 'Informe o nome do cliente.' })
+    if (whatsapp.length < 10) return res.status(400).json({ erro: 'Informe o WhatsApp com DDD.' })
+
+    // duplicata por WhatsApp (últimos 9 dígitos — ignora 55/DDD/9 extra) ou CPF
+    const fim9 = whatsapp.slice(-9)
+    let dup = null
+    const { data: porZap } = await supabaseAdmin.from('clientes')
+      .select('id, nome, whatsapp, email, ativo').ilike('whatsapp', `%${fim9}`).limit(1)
+    if (porZap && porZap.length) dup = porZap[0]
+    if (!dup && cpf && cpf.length === 11) {
+      const { data: porCpf } = await supabaseAdmin.from('clientes')
+        .select('id, nome, whatsapp, email, ativo').eq('cpf', cpf).limit(1)
+      if (porCpf && porCpf.length) dup = porCpf[0]
+    }
+    if (dup) {
+      // reativa se estava inativo (cliente voltou)
+      if (dup.ativo === false) await supabaseAdmin.from('clientes').update({ ativo: true }).eq('id', dup.id)
+      return res.status(409).json({ erro: 'Já existe um cliente com esse WhatsApp/CPF: ' + dup.nome, cliente: dup })
+    }
+
+    const registro = { nome, whatsapp, email, cpf, data_nasc, ativo: true, origem: 'sistema' }
+    if (req.usuario.unidade_id) registro.unidade_pref = req.usuario.unidade_id
+    let { data, error } = await supabaseAdmin.from('clientes').insert(registro).select('id, nome, whatsapp, email').single()
+    if (error && /origem|unidade_pref/i.test(error.message || '')) {
+      // banco sem essas colunas opcionais -> grava o essencial
+      delete registro.origem; delete registro.unidade_pref
+      ;({ data, error } = await supabaseAdmin.from('clientes').insert(registro).select('id, nome, whatsapp, email').single())
+    }
+    if (error) {
+      if (/duplicate|unique/i.test(error.message || '')) return res.status(409).json({ erro: 'E-mail ou CPF já cadastrado em outro cliente.' })
+      throw error
+    }
+    console.log(`[clientes/novo] ${req.usuario.nome} (${req.usuario.perfil}) cadastrou ${data.nome}`)
+    return res.status(201).json(data)
+  } catch (err) {
+    console.error('[clientes/novo]', err.message)
+    return res.status(500).json({ erro: 'Erro ao cadastrar cliente' })
+  }
+})
+
 router.get('/clientes/meu', autenticar, exigirPerfil('cliente'), async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
