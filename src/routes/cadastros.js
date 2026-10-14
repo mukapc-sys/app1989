@@ -305,6 +305,13 @@ router.post('/clientes', autenticar, exigirPerfil('proprietario','gerente','caix
       if (porCpf && porCpf.length) dup = porCpf[0]
     }
     if (dup) {
+      // cadastro que foi JUNTADO em outro -> usa o principal (não reativa o vazio)
+      const { data: dm } = await supabaseAdmin.from('clientes').select('arquivado_motivo').eq('id', dup.id).maybeSingle()
+      const mm = /^mesclado no cliente ([0-9a-f-]{36})/.exec((dm && dm.arquivado_motivo) || '')
+      if (mm) {
+        const { data: pr } = await supabaseAdmin.from('clientes').select('id, nome, whatsapp, email, ativo').eq('id', mm[1]).maybeSingle()
+        if (pr) dup = pr
+      }
       // reativa se estava inativo (cliente voltou)
       if (dup.ativo === false) await supabaseAdmin.from('clientes').update({ ativo: true }).eq('id', dup.id)
       return res.status(409).json({ erro: 'Já existe um cliente com esse WhatsApp/CPF: ' + dup.nome, cliente: dup })
