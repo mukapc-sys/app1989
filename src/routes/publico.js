@@ -42,13 +42,20 @@ async function acharClientePorTel(whatsapp, campos) {
   // 2) cai pros últimos 10 (fixo ou celular antigo sem 9)
   if (!c) c = await buscar(tel.slice(-10))
   if (!c) return null
-  const m = /^mesclado no cliente ([0-9a-f-]{36})/.exec(c.arquivado_motivo || '')
-  if (m) {
-    const { data: princ } = await supabaseAdmin.from('clientes').select(selBusca).eq('id', m[1]).maybeSingle()
-    if (princ) c = princ
-  }
+  c = await resolverMesclado(c, selBusca)
   if (sel.indexOf('arquivado_motivo') === -1) delete c.arquivado_motivo
   return c
+}
+// Cadastro duplicado que foi juntado em outro -> devolve o PRINCIPAL.
+// Guarda a senha do cadastro antigo em _senha_alt: quem só lembra a senha
+// antiga continua conseguindo entrar (o login aceita as duas).
+async function resolverMesclado(c, sel) {
+  const m = /^mesclado no cliente ([0-9a-f-]{36})/.exec((c && c.arquivado_motivo) || '')
+  if (!m) return c
+  const { data: princ } = await supabaseAdmin.from('clientes').select(sel).eq('id', m[1]).maybeSingle()
+  if (!princ) return c
+  if (c.senha_hash) princ._senha_alt = c.senha_hash
+  return princ
 }
 // ============================================================
 // "Cliente voltou" — reativa o cadastro.
@@ -643,17 +650,22 @@ router.post('/login', async (req, res) => {
       const email = bruto.toLowerCase()
       // busca pelo e-mail principal OU nos e-mails extras
       const { data: porEmail } = await supabaseAdmin.from('clientes')
-        .select('id,nome,whatsapp,senha_hash,ativo')
+        .select('id,nome,whatsapp,senha_hash,ativo,arquivado_motivo')
         .or(`email.ilike.${email},emails_extras.cs.{${email}}`)
+        .order('ativo', { ascending: false })
         .limit(1)
       cli = (porEmail && porEmail[0]) || null
+      if (cli) cli = await resolverMesclado(cli, 'id,nome,whatsapp,senha_hash,ativo,arquivado_motivo')
     } else {
       const tel = bruto.replace(/\D/g, '')
       if (tel.length < 8) return res.status(400).json({ erro: 'WhatsApp inválido' })
       cli = await acharClientePorTel(bruto, 'id,nome,whatsapp,senha_hash,ativo')
     }
-    if (!cli || !cli.senha_hash) return res.status(401).json({ erro: 'Conta não encontrada. Crie uma conta.' })
-    if (!bcrypt.compareSync(String(senha), cli.senha_hash)) return res.status(401).json({ erro: 'E-mail/WhatsApp ou senha incorretos' })
+    if (!cli || !(cli.senha_hash || cli._senha_alt)) return res.status(401).json({ erro: 'Conta não encontrada. Crie uma conta.' })
+    // aceita a senha do cadastro principal OU a do cadastro antigo que foi juntado nele
+    const senhaOk = (cli.senha_hash && bcrypt.compareSync(String(senha), cli.senha_hash)) ||
+                    (cli._senha_alt && bcrypt.compareSync(String(senha), cli._senha_alt))
+    if (!senhaOk) return res.status(401).json({ erro: 'E-mail/WhatsApp ou senha incorretos' })
     // ⚠️ NÃO barrar por `ativo`.
     // `ativo = false` é só a ETIQUETA de "cliente ausente da barbearia" — controle interno.
     // Antes, esta rota devolvia "Conta inativa. Fale com a barbearia." e o cliente ficava
