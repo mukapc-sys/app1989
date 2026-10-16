@@ -148,6 +148,15 @@ router.post('/vales-pix', autenticar, exigirPerfil('proprietario', 'gerente', 'c
     const { data: colab } = await supabaseAdmin.from('colaboradores').select('id,unidade_id,saldo_vales_pix,nome').eq('id', colaborador_id).single()
     if (!colab) return res.status(404).json({ erro: 'Colaborador não encontrado' })
 
+    // ANTI-DUPLICADO: mesmo barbeiro + mesmo valor + mesma descrição nos últimos 60s = clique repetido
+    {
+      const desde = new Date(Date.now() - 60 * 1000).toISOString()
+      const { data: recentes } = await supabaseAdmin.from('vales_pix')
+        .select('id, valor, descricao, criado_em').eq('colaborador_id', colaborador_id).gte('criado_em', desde)
+      const igual = (recentes || []).find(r => Math.abs((parseFloat(r.valor) || 0) - (parseFloat(valor) || 0)) < 0.005 && String(r.descricao || '') === String(descricao || ''))
+      if (igual) return res.status(201).json(igual)
+    }
+
     const { data, error } = await supabaseAdmin.from('vales_pix').insert({
       colaborador_id, valor, descricao,
       unidade_id: colab.unidade_id,
@@ -211,6 +220,18 @@ router.post('/vales', autenticar, exigirPerfil('proprietario','gerente','caixa')
     // barbeiro transferido: o consumo acontece na unidade antiga, não na nova dele).
     // Proprietário (sem unidade fixa) cai na unidade do colaborador.
     const unidade_estoque = req.usuario.unidade_id || colab.unidade_id
+
+    // ANTI-DUPLICADO: clique repetido no "Registrar vale" (internet lenta) mandava o mesmo
+    // vale 2-3 vezes. Se já existe um vale IGUAL (mesmo barbeiro, mesmo valor, mesmos itens)
+    // lançado nos últimos 60s, devolve o que já existe e não grava outro.
+    {
+      const desde = new Date(Date.now() - 60 * 1000).toISOString()
+      const { data: recentes } = await supabaseAdmin.from('vales')
+        .select('id, valor, itens').eq('colaborador_id', colaborador_id).gte('criado_em', desde)
+      const assin = v => JSON.stringify((Array.isArray(v) ? v : []).map(it => [it.produto_id || it.nome || '', parseInt(it.qtd) || 1, parseFloat(it.valor) || 0]))
+      const igual = (recentes || []).find(r => Math.abs((parseFloat(r.valor) || 0) - valor) < 0.005 && assin(r.itens) === assin(lista))
+      if (igual) return res.status(200).json({ ok: true, vale: igual, duplicado_ignorado: true })
+    }
 
     // 1) registra o vale
     const { data: vale, error: eVale } = await supabaseAdmin.from('vales').insert({
