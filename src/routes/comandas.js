@@ -581,7 +581,8 @@ async function ativarOuRenovarPlano({ cliente_id, plano_id, vendedor_id, forma_p
     if (!atual) throw new Error('Assinatura não encontrada.')
     const baseRenov = atual.data_renovacao ? String(atual.data_renovacao).slice(0, 10) : hoje
     // já renovado no ciclo: mantém a data atual; senão avança pro próximo dia-fixo.
-    const novaData = dataVencManual || (jaRenovouNoCiclo ? baseRenov : proximaRenovacao(baseRenov, atual.data_inicio))
+    // pagou com o vencimento já no passado: SEMPRE avança (senão o plano seguia 'vencido' mesmo pago)
+    const novaData = dataVencManual || ((jaRenovouNoCiclo && baseRenov >= hoje) ? baseRenov : proximaRenovacao(baseRenov, atual.data_inicio))
     const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
       plano_id, status: 'ativa', data_renovacao: novaData,
       vendedor_id, vendedor_id_2: atual.vendedor_id_2, valor_split_1: atual.valor_split_1,

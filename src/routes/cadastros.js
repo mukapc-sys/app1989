@@ -1040,7 +1040,8 @@ router.post('/assinaturas/cobrar', autenticar, exigirPerfil('proprietario', 'ger
       antes = { data_renovacao: atual.data_renovacao, status: atual.status, vendedor_id: atual.vendedor_id, vendedor_id_2: atual.vendedor_id_2, valor_split_1: atual.valor_split_1, forma_pgto: atual.forma_pgto, plano_id: atual.plano_id }
       // Dia fixo do contrato (data_inicio). Base de contagem = vencimento atual.
       const baseRenov = atual.data_renovacao ? String(atual.data_renovacao).slice(0, 10) : hoje
-      const novaData = dataVencManual || (jaRenovouNoCiclo ? baseRenov : proximaRenovacao(baseRenov, atual.data_inicio))   // manual tem prioridade
+      // pagou com o vencimento já no passado: SEMPRE avança (senão o plano seguia 'vencido' mesmo pago)
+      const novaData = dataVencManual || ((jaRenovouNoCiclo && baseRenov >= hoje) ? baseRenov : proximaRenovacao(baseRenov, atual.data_inicio))   // manual tem prioridade
       const { data: upd, error: eU } = await supabaseAdmin.from('assinaturas').update({
         plano_id, status: 'ativa', data_renovacao: novaData,
         vendedor_id, vendedor_id_2, valor_split_1: valSplit1,
