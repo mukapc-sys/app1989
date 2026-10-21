@@ -1038,4 +1038,124 @@ router.get('/frequencia-clientes', autenticar, SEM_ACESSO, async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao calcular frequência' })
   }
 })
+// ============================================================================
+// GET /financeiro/clientes-ausentes?dias=60&ate=730[&unidade_id=][&barbeiro_id=][&com_agendamento=1]
+// Clientes cuja ÚLTIMA visita (comanda finalizada OU AppBarber realizado) foi há
+// MAIS de "dias" dias (e no máximo "ate" dias). Unidade e barbeiro = os da última visita.
+// Por padrão esconde quem já tem horário marcado para frente (já vai voltar).
+// Inclui os arquivados como "ausente" (é exatamente quem se quer chamar de volta);
+// não inclui cadastros juntados em outro nem contas excluídas pelo cliente.
+// ============================================================================
+async function _fetchPar(build, max = 120000) {
+  const pg = 1000
+  const first = await build(true).range(0, pg - 1)
+  if (first.error) throw first.error
+  let all = first.data || []
+  if (all.length < pg) return all
+  const total = typeof first.count === 'number' ? Math.min(first.count, max) : null
+  if (total == null) {           // sem contagem: sequencial
+    for (let from = pg; from < max; from += pg) {
+      const { data, error } = await build(false).range(from, from + pg - 1)
+      if (error) throw error
+      if (!data || !data.length) break
+      all = all.concat(data)
+      if (data.length < pg) break
+    }
+    return all
+  }
+  const offs = []
+  for (let from = pg; from < total; from += pg) offs.push(from)
+  for (let i = 0; i < offs.length; i += 6) {       // 6 páginas por vez (não sobrecarrega o banco)
+    const res = await Promise.all(offs.slice(i, i + 6).map(f => build(false).range(f, f + pg - 1)))
+    for (const r of res) { if (r.error) throw r.error; all = all.concat(r.data || []) }
+  }
+  return all
+}
+router.get('/clientes-ausentes', autenticar, SEM_ACESSO, async (req, res) => {
+  try {
+    const u = req.usuario
+    const uid = u.perfil === 'gerente' ? u.unidade_id : (req.query.unidade_id || null)
+    const barbeiroId = req.query.barbeiro_id || null
+    const dias = Math.max(1, Math.min(3650, parseInt(req.query.dias) || 60))
+    const ate = Math.max(dias + 1, Math.min(3650, parseInt(req.query.ate) || 730))
+    const comAgendamento = req.query.com_agendamento === '1'
+    const dia = 86400000, agora = Date.now()
+    const iniISO = new Date(agora - ate * dia).toISOString()
+    const cnt = c => (c ? { count: 'exact' } : undefined)
+
+    // TODAS as unidades: a última visita pode ter sido em outra loja
+    const [cmds, abs] = await Promise.all([
+      _fetchPar(c => supabaseAdmin.from('comandas')
+        .select('cliente_id, finalizada_em, unidade_id, colaborador_id', cnt(c))
+        .eq('status', 'finalizada').gte('finalizada_em', iniISO).not('cliente_id', 'is', null).order('id')),
+      _fetchPar(c => supabaseAdmin.from('agenda_appbarber')
+        .select('cliente_id, inicio, unidade_id, colaborador_id', cnt(c))
+        .eq('tipo', 'agendamento').is('agendamento_id', null).eq('status', 'realizado')
+        .gte('inicio', iniISO).not('cliente_id', 'is', null).order('id')),
+    ])
+    const ult = {}   // cliente_id -> { t, unidade_id, colaborador_id, visitas }
+    const add = (cid, quando, un, col) => {
+      if (!cid || !quando) return
+      const t = Date.parse(quando)
+      const r = ult[cid] || (ult[cid] = { t: 0, unidade_id: null, colaborador_id: null, visitas: 0 })
+      r.visitas++
+      if (t > r.t) { r.t = t; r.unidade_id = un || null; r.colaborador_id = col || null }
+    }
+    cmds.forEach(c => add(c.cliente_id, c.finalizada_em, c.unidade_id, c.colaborador_id))
+    abs.forEach(a => add(a.cliente_id, a.inicio, a.unidade_id, a.colaborador_id))
+
+    let ids = Object.keys(ult).filter(id => {
+      const r = ult[id]
+      const d = Math.floor((agora - r.t) / dia)
+      if (d < dias) return false
+      if (uid && r.unidade_id !== uid) return false
+      if (barbeiroId && r.colaborador_id !== barbeiroId) return false
+      return true
+    })
+
+    // quem já tem horário marcado para frente
+    const futuro = new Set()
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data } = await supabaseAdmin.from('agendamentos').select('cliente_id')
+        .in('cliente_id', ids.slice(i, i + 300)).gt('data_hora_ini', new Date(agora).toISOString())
+        .not('status', 'in', '(cancelado,nao_compareceu,bloqueado)')
+      ;(data || []).forEach(a => futuro.add(a.cliente_id))
+    }
+    if (!comAgendamento) ids = ids.filter(id => !futuro.has(id))
+
+    // dados do cliente
+    const cli = {}
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data } = await supabaseAdmin.from('clientes').select('id, nome, whatsapp, ativo, arquivado_motivo')
+        .in('id', ids.slice(i, i + 300))
+      ;(data || []).forEach(c => { cli[c.id] = c })
+    }
+    const [{ data: unidades }, { data: cols }] = await Promise.all([
+      supabaseAdmin.from('unidades').select('id, nome'),
+      supabaseAdmin.from('colaboradores').select('id, nome'),
+    ])
+    const nomeU = {}; (unidades || []).forEach(x => { nomeU[x.id] = String(x.nome || '').replace(/^Unidade\s+/i, '') })
+    const nomeC = {}; (cols || []).forEach(x => { nomeC[x.id] = x.nome })
+
+    const lista = []
+    ids.forEach(id => {
+      const c = cli[id]
+      if (!c) return
+      const mot = c.arquivado_motivo || ''
+      if (/^mesclado no cliente /.test(mot) || /^exclu[ií]do pelo cliente/.test(mot)) return
+      const r = ult[id]
+      lista.push({
+        cliente_id: id, nome: c.nome || 'Cliente', whatsapp: c.whatsapp || null,
+        ultima: new Date(r.t).toISOString(), dias_sem_vir: Math.floor((agora - r.t) / dia),
+        visitas: r.visitas, unidade: nomeU[r.unidade_id] || '—', barbeiro: nomeC[r.colaborador_id] || '—',
+        arquivado: c.ativo === false, agendado: futuro.has(id),
+      })
+    })
+    lista.sort((a, b) => a.dias_sem_vir - b.dias_sem_vir)
+    return res.json({ dias, ate, total: lista.length, clientes: lista.slice(0, 5000) })
+  } catch (err) {
+    console.error('[clientes-ausentes]', err.message)
+    return res.status(500).json({ erro: 'Erro ao gerar a lista de ausentes' })
+  }
+})
 module.exports = router
