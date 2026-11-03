@@ -59,6 +59,50 @@ async function fetchAll(buildQuery) {
 }
 const _CNT = (c) => (c ? { count: 'exact' } : undefined)
 
+// ============================================================================
+// RESUMO DIÁRIO (tabela resumo_diario, mantida pelo próprio banco)
+// Em vez de baixar milhares de comandas/itens e somar aqui, pede ao banco os
+// totais já prontos do período (1 consulta, poucos KB). Corta egress e logs.
+// ============================================================================
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000'
+// 'AAAA-MM-DD' do dia em São Paulo de um instante (ISO ou Date)
+function diaSP(t) {
+  const d = new Date(new Date(t).getTime() - 3 * 3600 * 1000)
+  return d.toISOString().slice(0, 10)
+}
+// ini inclusivo; fim pode ser exclusivo (00:00 do dia seguinte) ou inclusivo (23:59:59)
+function diasDoIntervalo(ini, fim) {
+  return { d1: diaSP(ini), d2: diaSP(new Date(new Date(fim).getTime() - 1)) }
+}
+const _cacheResumo = new Map()
+const CACHE_RESUMO_MS = 60 * 1000
+async function lerResumo(ini, fim, unidade_id = null) {
+  const { d1, d2 } = diasDoIntervalo(ini, fim)
+  const k = [d1, d2, unidade_id || '*'].join('|')
+  const hit = _cacheResumo.get(k)
+  if (hit && Date.now() - hit.t < CACHE_RESUMO_MS) return hit.p
+  const p = (async () => {
+    const { data, error } = await supabaseAdmin.rpc('resumo_periodo', { p_ini: d1, p_fim: d2, p_unidade: unidade_id || null })
+    if (error) throw error
+    return (data || []).map(r => {
+      const o = { ...r }
+      for (const key of Object.keys(o)) if (key !== 'unidade_id' && key !== 'colaborador_id') o[key] = Number(o[key]) || 0
+      if (o.colaborador_id === ZERO_UUID) o.colaborador_id = null
+      return o
+    })
+  })()
+  _cacheResumo.set(k, { t: Date.now(), p })
+  p.catch(() => _cacheResumo.delete(k))
+  if (_cacheResumo.size > 300) { for (const kk of _cacheResumo.keys()) { _cacheResumo.delete(kk); if (_cacheResumo.size <= 150) break } }
+  return p
+}
+async function lerClientesDistintos(ini, fim, unidade_id = null) {
+  const { d1, d2 } = diasDoIntervalo(ini, fim)
+  const { data, error } = await supabaseAdmin.rpc('clientes_distintos_periodo', { p_ini: d1, p_fim: d2, p_unidade: unidade_id || null })
+  if (error) throw error
+  return (data || []).map(r => ({ ...r, clientes: Number(r.clientes) || 0 }))
+}
+
 // CACHE CURTO (#10): caixa, dashboard, resumo, comissão e metas chamam este mesmo
 // cálculo várias vezes na mesma abertura de tela. Guarda o resultado por 60s e
 // junta chamadas simultâneas iguais numa só (não repete a varredura).
@@ -76,6 +120,38 @@ function _chave({ ini, fim, unidade_id }) {
  * @returns {Promise<{linhas:Array, total_comissao:number, total_servico:number, total_produto:number}>}
  */
 async function _calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
+  try {
+    return await _calcularComissaoFaixaResumo({ ini, fim, unidade_id })
+  } catch (e) {
+    console.error('[comissao-faixa] resumo indisponível, usando cálculo direto:', e.message)
+    return _calcularComissaoFaixaDireto({ ini, fim, unidade_id })
+  }
+}
+
+// Mesma regra do cálculo direto, lendo os totais prontos do resumo_diario.
+async function _calcularComissaoFaixaResumo({ ini, fim, unidade_id = null }) {
+  const rows = await lerResumo(ini, fim, unidade_id)
+  const acc = {}
+  const novo = () => ({ servico_total: 0, produto_total: 0, produto_unid: 0, plano_total: 0, servico_qtd: 0 })
+  for (const r of rows) {
+    const cid = r.colaborador_id
+    if (!cid) continue
+    const s = r.com_servico + r.ab_valor
+    const q = r.com_servico_qtd + r.ab_atend
+    const pt = r.com_produto + r.ab_prod_barb_total_com
+    const pu = r.com_produto_unid + r.ab_prod_barb_unid_com
+    if (!s && !q && !pt && !pu && !r.com_plano) continue
+    if (!acc[cid]) acc[cid] = novo()
+    acc[cid].servico_total += s
+    acc[cid].servico_qtd   += q
+    acc[cid].plano_total   += r.com_plano
+    acc[cid].produto_total += pt
+    acc[cid].produto_unid  += pu
+  }
+  return _montarLinhas(acc)
+}
+
+async function _calcularComissaoFaixaDireto({ ini, fim, unidade_id = null }) {
   // (#10) as leituras abaixo são independentes -> disparam TODAS juntas (paralelo)
   // e só depois são somadas. Antes eram 5 idas ao banco em fila.
   const pItens = fetchAll((c) => {
@@ -173,6 +249,10 @@ async function _calcularComissaoFaixa({ ini, fim, unidade_id = null }) {
     acc[cid].produto_unid  += qtd
   }
 
+  return _montarLinhas(acc)
+}
+
+async function _montarLinhas(acc) {
   // Nomes dos barbeiros
   const ids = Object.keys(acc)
   const nomes = {}, unidadeNome = {}
@@ -227,15 +307,19 @@ async function calcularComissaoFaixa(opts) {
 
 // Limites ISO do mês de uma data (default: hoje). Retorna { ini, fim } com fim exclusivo.
 function limitesMes(ref) {
-  const d = ref ? new Date(ref) : new Date()
-  const y = d.getFullYear(), m = d.getMonth() // 0-11
-  const ini = new Date(Date.UTC(y, m, 1)).toISOString()
-  const fimMes = new Date(Date.UTC(m === 11 ? y + 1 : y, m === 11 ? 0 : m + 1, 1))
+  // Mês em horário de São Paulo (antes usava meia-noite UTC = 21h do dia anterior em SP).
+  const m = /^(\d{4})-(\d{2})/.exec(String(ref || ''))
+  const base = m ? null : diaSP(ref ? new Date(ref) : new Date())
+  const y = m ? Number(m[1]) : Number(base.slice(0, 4))
+  const mo = m ? Number(m[2]) : Number(base.slice(5, 7))
+  const pad = n => String(n).padStart(2, '0')
+  const ini = `${y}-${pad(mo)}-01T00:00:00-03:00`
+  const prox = mo === 12 ? `${y + 1}-01` : `${y}-${pad(mo + 1)}`
+  const fimMes = new Date(`${prox}-01T00:00:00-03:00`)
   // Não conta o FUTURO: o fim é o menor entre "fim do mês" e "agora".
-  // (mês passado -> fim do mês; mês atual -> agora). Mantém admin e barbeiro iguais.
   const agora = new Date()
   const fim = (agora < fimMes ? agora : fimMes).toISOString()
   return { ini, fim }
 }
 
-module.exports = { calcularComissaoFaixa, pctServico, pctProduto, limitesMes }
+module.exports = { calcularComissaoFaixa, pctServico, pctProduto, limitesMes, lerResumo, lerClientesDistintos, diaSP, diasDoIntervalo, _calcularComissaoFaixaDireto }

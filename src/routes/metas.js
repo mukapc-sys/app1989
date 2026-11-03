@@ -7,7 +7,7 @@
 const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
-const { calcularComissaoFaixa } = require('./comissao-faixa')
+const { calcularComissaoFaixa, lerResumo, lerClientesDistintos } = require('./comissao-faixa')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
 const { exigirTela } = require('./permissoes')
 
@@ -47,6 +47,42 @@ function diasUteisRestantes(mes) {
 
 // ---- calcula o REALIZADO do mês (por unidade e por colaborador) ----
 async function realizadoMes(mes, unidade_id) {
+  try {
+    return await realizadoMesResumo(mes, unidade_id)
+  } catch (e) {
+    console.error('[metas] resumo indisponível, usando cálculo direto:', e.message)
+    return realizadoMesDireto(mes, unidade_id)
+  }
+}
+
+// Mesma regra do cálculo direto, lendo os totais prontos (resumo_diario) — sem baixar comandas.
+async function realizadoMesResumo(mes, unidade_id) {
+  const { ini, fim } = rangeMes(mes)
+  function novo() { return { clientes:0, faturamento:0, produtos:0, planos:0, bar:0, _clientesSet:new Set() } }
+  const geral = novo()
+  const porColab = {}
+  const [rows, cli] = await Promise.all([lerResumo(ini, fim, unidade_id), lerClientesDistintos(ini, fim, unidade_id)])
+  ;(rows || []).forEach(r => {
+    geral.bar += r.fin_bar
+    geral.produtos += r.meta_prod_unid
+    const cid = r.colaborador_id
+    if (cid && r.comandas > 0) {
+      if (!porColab[cid]) porColab[cid] = novo()
+      porColab[cid].bar += r.fin_bar
+      porColab[cid].produtos += r.meta_prod_unid
+    }
+  })
+  let clientesGeral = 0
+  const clientesColab = {}
+  ;(cli || []).forEach(c => {
+    if (c.nivel === (unidade_id ? 'unidade' : 'geral')) clientesGeral = c.clientes
+    if (c.nivel === 'barbeiro' && c.colaborador_id) clientesColab[c.colaborador_id] = (clientesColab[c.colaborador_id] || 0) + c.clientes
+  })
+  Object.keys(clientesColab).forEach(cid => { if (!porColab[cid]) porColab[cid] = novo() })
+  return _completarRealizado({ mes, unidade_id, ini, fim, geral, porColab, clientesGeral, clientesColab, novo })
+}
+
+async function realizadoMesDireto(mes, unidade_id) {
   const { ini, fim } = rangeMes(mes)
 
   // produtos de BAR = categorias que não pagam comissão
@@ -119,6 +155,11 @@ async function realizadoMes(mes, unidade_id) {
     // (calcularComissaoFaixa.servico_total), aplicado logo abaixo.
   })
 
+  return _completarRealizado({ mes, unidade_id, ini, fim, geral, porColab, clientesGeral: null, clientesColab: null, novo })
+}
+
+// Parte comum: faturamento (motor de comissão), planos novos e fechamento dos números.
+async function _completarRealizado({ mes, unidade_id, ini, fim, geral, porColab, clientesGeral, clientesColab, novo }) {
   // FATURAMENTO SERVIÇOS = servico_total da comissão (mesma fonte do "Serv R$"):
   // serviços + planos (itens de comanda, por barbeiro do item) + AppBarber realizado
   // não-importado. Garante que o acompanhamento de metas bate com o card de comissão.
@@ -158,12 +199,14 @@ async function realizadoMes(mes, unidade_id) {
   }
 
   // finaliza clientes (tamanho do set)
-  function fechar(o) {
-    return { clientes:o._clientesSet.size, faturamento:round(o.faturamento), produtos:o.produtos, planos:o.planos, bar:round(o.bar) }
+  function fechar(o, cid) {
+    const nCli = cid == null ? (clientesGeral != null ? clientesGeral : o._clientesSet.size)
+                             : (clientesColab != null ? (clientesColab[cid] || 0) : o._clientesSet.size)
+    return { clientes:nCli, faturamento:round(o.faturamento), produtos:o.produtos, planos:o.planos, bar:round(o.bar) }
   }
-  const geralF = fechar(geral)
+  const geralF = fechar(geral, null)
   const porColabF = {}
-  Object.keys(porColab).forEach(k => porColabF[k] = fechar(porColab[k]))
+  Object.keys(porColab).forEach(k => porColabF[k] = fechar(porColab[k], k))
   return { geral: geralF, porColab: porColabF }
 }
 
@@ -172,7 +215,18 @@ async function realizadoMes(mes, unidade_id) {
 //  - por barbeiro: conta pros DOIS titulares do plano (vendedor_id e vendedor_id_2);
 //  - por unidade: a assinatura não grava unidade → conta se ALGUM titular for da unidade.
 // unidade_id null = geral (todas as unidades).
+// cache de 5 min: a lista de planos ativos muda pouco e era baixada a cada atualização da tela
+const _cachePlanos = new Map()
 async function contarPlanosAtivos(unidade_id) {
+  const k = unidade_id || '*'
+  const hit = _cachePlanos.get(k)
+  if (hit && Date.now() - hit.t < 5 * 60 * 1000) return hit.p
+  const p = _contarPlanosAtivos(unidade_id)
+  _cachePlanos.set(k, { t: Date.now(), p })
+  p.catch(() => _cachePlanos.delete(k))
+  return p
+}
+async function _contarPlanosAtivos(unidade_id) {
   // busca paginada (pode passar de 1000 linhas)
   let assin = [], from = 0
   while (true) {

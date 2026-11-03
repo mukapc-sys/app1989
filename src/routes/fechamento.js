@@ -8,7 +8,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
-const { calcularComissaoFaixa } = require('./comissao-faixa')
+const { calcularComissaoFaixa, lerResumo } = require('./comissao-faixa')
 
 const GESTOR = exigirPerfil('proprietario', 'gerente')
 
@@ -76,7 +76,13 @@ async function premioGestao(colab, ini, fim, mes) {
   // PAGINADO: o banco devolve no máx. 1000 linhas por consulta — antes, unidade com
   // +1000 comandas no mês tinha o faturamento (e o prêmio) calculado a menor.
   let unitFat = 0
-  for (let from = 0; from <= 200000; from += 1000) {
+  let doResumo = false
+  try {   // totais prontos (resumo_diario): soma do total cobrado das comandas da unidade
+    const rows = await lerResumo(ini, fim, colab.unidade_id)
+    unitFat = rows.reduce((s, r) => s + r.fat_cobrado, 0)
+    doResumo = true
+  } catch (e) { console.error('[premio] resumo indisponível, cálculo direto:', e.message) }
+  if (!doResumo) for (let from = 0; from <= 200000; from += 1000) {
     const { data: cmds, error } = await supabaseAdmin.from('comandas')
       .select('total').eq('status', 'finalizada').eq('unidade_id', colab.unidade_id)
       .gte('finalizada_em', ini).lte('finalizada_em', fim)

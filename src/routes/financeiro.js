@@ -2,7 +2,7 @@ const express = require('express')
 const router = express.Router()
 const { supabaseAdmin } = require('../config/supabase')
 const { autenticar, exigirPerfil } = require('../middleware/auth')
-const { calcularComissaoFaixa, limitesMes } = require('./comissao-faixa')
+const { calcularComissaoFaixa, limitesMes, lerResumo, diaSP } = require('./comissao-faixa')
 const SEM_ACESSO = exigirPerfil('proprietario', 'gerente')
 const { exigirTela, exigirFuncao } = require('./permissoes')
 const TELA_FIN = exigirTela('financeiro')
@@ -44,6 +44,17 @@ async function fetchAll(buildQuery, max = 200000) {
 // Atendimento = comanda finalizada OU agendamento concluído OU AppBarber realizado.
 // O período é filtrado por unidade; o "nunca foi antes" é GLOBAL (primeiro de sempre).
 async function contarNovosClientes(ini, fim, uid) {
+  // calculado dentro do banco (função novos_clientes_periodo): devolve só o número
+  try {
+    const { data, error } = await supabaseAdmin.rpc('novos_clientes_periodo', { p_ini: ini, p_fim: fim, p_unidade: uid || null })
+    if (error) throw error
+    return Number(data) || 0
+  } catch (e) {
+    console.error('[novos-clientes] função do banco indisponível, cálculo direto:', e.message)
+    return contarNovosClientesDireto(ini, fim, uid)
+  }
+}
+async function contarNovosClientesDireto(ini, fim, uid) {
   const setPeriodo = new Set()
   {
     let qc = supabaseAdmin.from('comandas').select('cliente_id')
@@ -76,12 +87,8 @@ async function contarNovosClientes(ini, fim, uid) {
   return n
 }
 
-router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
-  try {
-    const { unidade_id, periodo = 'mes' } = req.query
-    const u = req.usuario
-    const { ini, fim } = getPeriodo(periodo)
-    const uid = u.perfil === 'proprietario' ? unidade_id : u.unidade_id
+// Cálculo direto (antigo) do resumo — só usado se o resumo_diario falhar.
+async function resumoDireto(ini, fim, uid) {
     // PAGINADO: sem isto, o proprietário (todas as unidades) perdia comandas no corte de 1000.
     const comandas = await fetchAll(() => {
       let q = supabaseAdmin
@@ -105,12 +112,6 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
     const total_debito  = porForma('debito')
     const total_pix     = porForma('pix')
     const total_dinheiro= porForma('dinheiro')
-    // Comissão por FAIXA (serviço progressivo + produto por unidade) — mesmo motor do Caixa/Dashboard
-    let comissoes = 0
-    try {
-      const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: uid })
-      comissoes = fx.total_comissao
-    } catch (e) { console.error('[resumo comissoes-faixa]', e.message) }
     // AppBarber finalizado FORA do sistema (faturamento — observação)
     const ab = await appbarberRealizados(ini, fim, uid)
     const abFaturamento = somar(ab, 'valor')
@@ -165,9 +166,44 @@ router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
       if ((parseFloat(p.comissao) || 0) > 0) fatBarbearia += v
       else fatBar += v
     })
+    return { fatServicos, fatBarbearia, fatBar, abFaturamento, atendimentos: comServicoResumo.size + ab.length,
+             total_credito, total_debito, total_pix, total_dinheiro }
+}
+router.get('/resumo', autenticar, SEM_ACESSO, TELA_FIN, async (req, res) => {
+  try {
+    const { unidade_id, periodo = 'mes' } = req.query
+    const u = req.usuario
+    const { ini, fim } = getPeriodo(periodo)
+    const uid = u.perfil === 'proprietario' ? unidade_id : u.unidade_id
+    // Totais prontos do banco (resumo_diario). Se o resumo falhar, cai no cálculo direto.
+    let T = null
+    try {
+      const rows = await lerResumo(ini, fim, uid)
+      T = { fs:0, fb:0, fbar:0, ab:0, abpb:0, abpbar:0, cr:0, de:0, pi:0, di:0, atend:0 }
+      rows.forEach(r => {
+        T.fs += r.fin_servicos; T.fb += r.fin_prod_barbearia; T.fbar += r.fin_bar
+        T.ab += r.ab_valor; T.abpb += r.ab_prod_barb_total; T.abpbar += r.ab_prod_bar_total
+        T.cr += r.pg_credito; T.de += r.pg_debito; T.pi += r.pg_pix; T.di += r.pg_dinheiro
+        T.atend += r.comandas_com_servico + r.ab_atend
+      })
+    } catch (e) { console.error('[resumo] resumo_diario indisponível, cálculo direto:', e.message); T = null }
+    let comissoes = 0
+    try {
+      const fx = await calcularComissaoFaixa({ ini, fim, unidade_id: uid })
+      comissoes = fx.total_comissao
+    } catch (e) { console.error('[resumo comissoes-faixa]', e.message) }
+    let fatServicos, fatBarbearia, fatBar, abFaturamento, atendimentos, total_credito, total_debito, total_pix, total_dinheiro
+    const abComissao = 0
+    if (T) {
+      fatServicos = T.fs + T.ab; fatBarbearia = T.fb + T.abpb; fatBar = T.fbar + T.abpbar
+      abFaturamento = T.ab; atendimentos = T.atend
+      total_credito = T.cr; total_debito = T.de; total_pix = T.pi; total_dinheiro = T.di
+    } else {
+      const d = await resumoDireto(ini, fim, uid)
+      ;({ fatServicos, fatBarbearia, fatBar, abFaturamento, atendimentos, total_credito, total_debito, total_pix, total_dinheiro } = d)
+    }
     const faturamentoTotal = fatServicos + fatBarbearia + fatBar
     const comissoesTotal   = comissoes + abComissao
-    const atendimentos     = comServicoResumo.size + ab.length
 
     // Novos clientes (primeiro atendimento de sempre) no período + no período anterior (mesma duração)
     let novosAtual = 0, novosAnterior = 0
@@ -338,12 +374,17 @@ router.get('/comissoes-barbeiro', autenticar, SEM_ACESSO, exigirFuncao('ver_comi
     // (#10) tudo que esta tela precisa é independente -> busca EM PARALELO
     const pFx = calcularComissaoFaixa({ ini, fim, unidade_id: uid })
     // nº de atendimentos (comandas finalizadas) e unidade por barbeiro — PAGINADO
-    const pCmds = fetchAll(() => {
+    // nº de comandas por barbeiro: totais prontos (resumo_diario); se falhar, busca direta
+    const pCmds = lerResumo(ini, fim, uid).then(rows => {
+      const out = []
+      rows.forEach(r => { for (let i = 0; i < r.comandas; i++) out.push({ colaborador_id: r.colaborador_id, unidade_id: r.unidade_id }) })
+      return out
+    }).catch(() => fetchAll(() => {
       let q = supabaseAdmin.from('comandas').select('colaborador_id, unidade_id')
         .eq('status', 'finalizada').gte('finalizada_em', ini).lte('finalizada_em', fim)
       if (uid) q = q.eq('unidade_id', uid)
       return q
-    })
+    }))
     const pUnid = supabaseAdmin.from('unidades').select('id, nome')
     const pVProd = supabaseAdmin.from('vales').select('colaborador_id, valor')
       .gte('criado_em', ini).lte('criado_em', fim).is('fechamento_id', null).neq('status', 'quitado')
@@ -393,47 +434,62 @@ router.get('/por-unidade', autenticar, SEM_ACESSO, TELA_COMP, async (req, res) =
     const u = req.usuario
     const { ini, fim } = getPeriodo(periodo)
     // PAGINADO: o proprietário puxa as 3 unidades de uma vez — passava de 1000 e truncava.
-    const comandas = await fetchAll(() => {
-      let q = supabaseAdmin
-        .from('comandas').select('id, total, unidade_id, colaborador_id')
-        .eq('status', 'finalizada').gte('finalizada_em', ini).lte('finalizada_em', fim)
-      if (u.perfil !== 'proprietario' && u.unidade_id) q = q.eq('unidade_id', u.unidade_id)
-      return q
-    })
-    // ATENDIMENTO = comanda com pelo menos 1 item de SERVIÇO (tipo != 'produto').
-    // Venda só de bar não conta como atendimento (nem o caixa/quem operou vira "barbeiro").
-    const comServicoU = await fetchAll(() => {
-      let q = supabaseAdmin.from('itens_comanda')
-        .select('comanda_id, comandas!inner(status, finalizada_em, unidade_id)')
-        .neq('tipo', 'produto')
-        .eq('comandas.status', 'finalizada')
-        .gte('comandas.finalizada_em', ini).lte('comandas.finalizada_em', fim)
-      if (u.perfil !== 'proprietario' && u.unidade_id) q = q.eq('comandas.unidade_id', u.unidade_id)
-      return q
-    })
-    const setServicoU = new Set((comServicoU || []).map(i => i.comanda_id))
+    const uFiltro = (u.perfil !== 'proprietario' && u.unidade_id) ? u.unidade_id : null
     const { data: unidades } = await supabaseAdmin.from('unidades').select('id, nome')
     const mapa = {}
-    ;(comandas || []).forEach(c => {
-      if (!c.unidade_id) return
-      if (!mapa[c.unidade_id]) mapa[c.unidade_id] = { atendimentos: 0, faturado: 0, ab_faturado: 0, barbeiros: new Set() }
-      mapa[c.unidade_id].faturado += parseFloat(c.total || 0)
-      if (setServicoU.has(c.id)) {
-        mapa[c.unidade_id].atendimentos += 1
-        if (c.colaborador_id) mapa[c.unidade_id].barbeiros.add(c.colaborador_id)
-      }
-    })
-    // AppBarber finalizado fora do sistema
-    const abUid = u.perfil === 'proprietario' ? null : u.unidade_id
-    const ab = await appbarberRealizados(ini, fim, abUid)
-    ;(ab || []).forEach(a => {
-      if (!a.unidade_id) return
-      if (!mapa[a.unidade_id]) mapa[a.unidade_id] = { atendimentos: 0, faturado: 0, ab_faturado: 0, barbeiros: new Set() }
-      mapa[a.unidade_id].atendimentos += 1
-      mapa[a.unidade_id].faturado += parseFloat(a.valor || 0)
-      mapa[a.unidade_id].ab_faturado += parseFloat(a.valor || 0)
-      if (a.colaborador_id) mapa[a.unidade_id].barbeiros.add(a.colaborador_id)
-    })
+    let rowsR = null
+    try { rowsR = await lerResumo(ini, fim, uFiltro) } catch (e) { console.error('[por-unidade] resumo:', e.message) }
+    if (rowsR) {
+      rowsR.forEach(r => {
+        if (!r.unidade_id) return
+        if (!mapa[r.unidade_id]) mapa[r.unidade_id] = { atendimentos: 0, faturado: 0, ab_faturado: 0, barbeiros: new Set() }
+        const m = mapa[r.unidade_id]
+        m.faturado += r.fat_cobrado + r.ab_valor
+        m.ab_faturado += r.ab_valor
+        m.atendimentos += r.comandas_com_servico + r.ab_atend
+        if (r.colaborador_id && (r.comandas_com_servico > 0 || r.ab_atend > 0)) m.barbeiros.add(r.colaborador_id)
+      })
+    } else {
+      const comandas = await fetchAll(() => {
+        let q = supabaseAdmin
+          .from('comandas').select('id, total, unidade_id, colaborador_id')
+          .eq('status', 'finalizada').gte('finalizada_em', ini).lte('finalizada_em', fim)
+        if (u.perfil !== 'proprietario' && u.unidade_id) q = q.eq('unidade_id', u.unidade_id)
+        return q
+      })
+      // ATENDIMENTO = comanda com pelo menos 1 item de SERVIÇO (tipo != 'produto').
+      // Venda só de bar não conta como atendimento (nem o caixa/quem operou vira "barbeiro").
+      const comServicoU = await fetchAll(() => {
+        let q = supabaseAdmin.from('itens_comanda')
+          .select('comanda_id, comandas!inner(status, finalizada_em, unidade_id)')
+          .neq('tipo', 'produto')
+          .eq('comandas.status', 'finalizada')
+          .gte('comandas.finalizada_em', ini).lte('comandas.finalizada_em', fim)
+        if (u.perfil !== 'proprietario' && u.unidade_id) q = q.eq('comandas.unidade_id', u.unidade_id)
+        return q
+      })
+      const setServicoU = new Set((comServicoU || []).map(i => i.comanda_id))
+      ;(comandas || []).forEach(c => {
+        if (!c.unidade_id) return
+        if (!mapa[c.unidade_id]) mapa[c.unidade_id] = { atendimentos: 0, faturado: 0, ab_faturado: 0, barbeiros: new Set() }
+        mapa[c.unidade_id].faturado += parseFloat(c.total || 0)
+        if (setServicoU.has(c.id)) {
+          mapa[c.unidade_id].atendimentos += 1
+          if (c.colaborador_id) mapa[c.unidade_id].barbeiros.add(c.colaborador_id)
+        }
+      })
+      // AppBarber finalizado fora do sistema
+      const abUid = u.perfil === 'proprietario' ? null : u.unidade_id
+      const ab = await appbarberRealizados(ini, fim, abUid)
+      ;(ab || []).forEach(a => {
+        if (!a.unidade_id) return
+        if (!mapa[a.unidade_id]) mapa[a.unidade_id] = { atendimentos: 0, faturado: 0, ab_faturado: 0, barbeiros: new Set() }
+        mapa[a.unidade_id].atendimentos += 1
+        mapa[a.unidade_id].faturado += parseFloat(a.valor || 0)
+        mapa[a.unidade_id].ab_faturado += parseFloat(a.valor || 0)
+        if (a.colaborador_id) mapa[a.unidade_id].barbeiros.add(a.colaborador_id)
+      })
+    }
     const lista = Object.keys(mapa).map(uid => {
       const un = (unidades || []).find(x => x.id === uid)
       return {
@@ -519,32 +575,26 @@ function getPeriodo(periodo) {
     if (d2 < d1) { const t = d1; d1 = d2; d2 = t }   // inverteu? corrige
     return { ini: d1 + 'T00:00:00-03:00', fim: d2 + 'T23:59:59.999-03:00' }
   }
-  const agora = new Date()
-  let ini, fim
+  // Períodos relativos em horário de SÃO PAULO (o servidor roda em UTC: antes "hoje"
+  // e "este mês" começavam às 21h do dia anterior).
+  const hoje = diaSP(new Date())                       // AAAA-MM-DD em SP
+  const [Y, M, D] = hoje.split('-').map(Number)
+  const pad = n => String(n).padStart(2, '0')
+  const fimAgora = new Date().toISOString()
+  let iniDia
   if (periodo === 'hoje') {
-    ini = new Date(agora.setHours(0,0,0,0)).toISOString()
-    fim = new Date(agora.setHours(23,59,59,999)).toISOString()
+    return { ini: hoje + 'T00:00:00-03:00', fim: hoje + 'T23:59:59.999-03:00' }
   } else if (periodo === 'semana') {
-    const dom = new Date(agora)
-    dom.setDate(agora.getDate() - agora.getDay())
-    dom.setHours(0,0,0,0)
-    ini = dom.toISOString()
-    fim = new Date().toISOString()
-  } else if (periodo === 'mes') {
-    ini = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
-    fim = new Date().toISOString()
+    const dow = new Date(Date.UTC(Y, M - 1, D)).getUTCDay()   // 0 = domingo
+    iniDia = new Date(Date.UTC(Y, M - 1, D - dow)).toISOString().slice(0, 10)
   } else if (periodo === 'trim') {
-    const m = Math.floor(agora.getMonth() / 3) * 3
-    ini = new Date(agora.getFullYear(), m, 1).toISOString()
-    fim = new Date().toISOString()
+    iniDia = `${Y}-${pad(Math.floor((M - 1) / 3) * 3 + 1)}-01`
   } else if (periodo === 'ano') {
-    ini = new Date(agora.getFullYear(), 0, 1).toISOString()
-    fim = new Date().toISOString()
-  } else {
-    ini = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
-    fim = new Date().toISOString()
+    iniDia = `${Y}-01-01`
+  } else {                                             // 'mes' e padrão
+    iniDia = `${Y}-${pad(M)}-01`
   }
-  return { ini, fim }
+  return { ini: iniDia + 'T00:00:00-03:00', fim: fimAgora }
 }
 function somar(arr, campo) {
   return (arr || []).reduce((s, r) => s + parseFloat(r[campo] || 0), 0)
