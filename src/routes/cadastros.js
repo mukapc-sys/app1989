@@ -842,6 +842,91 @@ router.get('/estoque/movimentacoes', autenticar, exigirPerfil('proprietario','ge
     return res.status(500).json({ erro: 'Erro ao buscar movimentações' })
   }
 })
+// GET /estoque/saidas?unidade_id=&ini=YYYY-MM-DD&fim=YYYY-MM-DD&tipo=venda|vale
+// Uma linha por SAÍDA de estoque (venda em comanda ou vale de funcionário), com
+// comanda, cliente, barbeiro, quem lançou e o valor cobrado no item. Máx. 31 dias.
+router.get('/estoque/saidas', autenticar, exigirPerfil('proprietario','gerente','caixa'), TELA_ESTOQUE, async (req, res) => {
+  try {
+    const unidade_id = req.usuario.perfil === 'proprietario' ? (req.query.unidade_id || null) : req.usuario.unidade_id
+    if (!unidade_id) return res.status(400).json({ erro: 'Informe a unidade' })
+    const hojeSP = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10)
+    const re = /^\d{4}-\d{2}-\d{2}$/
+    const ini = re.test(req.query.ini || '') ? req.query.ini : hojeSP
+    let fim = re.test(req.query.fim || '') ? req.query.fim : ini
+    if (fim < ini) fim = ini
+    const dIni = new Date(ini + 'T00:00:00-03:00')
+    const dFim = new Date(new Date(fim + 'T00:00:00-03:00').getTime() + 24 * 3600 * 1000)
+    if ((dFim - dIni) > 31 * 24 * 3600 * 1000) return res.status(400).json({ erro: 'Escolha no máximo 31 dias' })
+    const tipos = req.query.tipo === 'venda' ? ['saida_venda'] : req.query.tipo === 'vale' ? ['saida_consumo'] : ['saida_venda', 'saida_consumo']
+
+    let movs = []
+    { let from = 0
+      while (true) {
+        const { data, error } = await supabaseAdmin.from('movimentacoes_estoque')
+          .select('id, produto_id, tipo, quantidade, referencia_id, responsavel_id, observacao, criado_em')
+          .eq('unidade_id', unidade_id).in('tipo', tipos)
+          .gte('criado_em', dIni.toISOString()).lt('criado_em', dFim.toISOString())
+          .order('criado_em', { ascending: false }).range(from, from + 999)
+        if (error) throw error
+        if (!data || !data.length) break
+        movs = movs.concat(data)
+        if (data.length < 1000 || movs.length >= 20000) break
+        from += 1000
+      }
+    }
+    const uniq = a => [...new Set(a.filter(Boolean))]
+    const emLotes = async (ids, fn) => { let out = []; for (let i = 0; i < ids.length; i += 200) out = out.concat(await fn(ids.slice(i, i + 200)) || []); return out }
+
+    const prod = {}
+    ;(await emLotes(uniq(movs.map(m => m.produto_id)), async ids =>
+      (await supabaseAdmin.from('produtos').select('id, nome, valor_venda').in('id', ids)).data)).forEach(p => { prod[p.id] = p })
+
+    const cmdIds = uniq(movs.filter(m => m.tipo === 'saida_venda').map(m => m.referencia_id))
+    const cmd = {}
+    ;(await emLotes(cmdIds, async ids =>
+      (await supabaseAdmin.from('comandas').select('id, cliente_id, colaborador_id, status, finalizada_em').in('id', ids)).data)).forEach(c => { cmd[c.id] = c })
+    const itemDe = {}   // comanda|produto -> { valor, ficha }
+    ;(await emLotes(cmdIds, async ids =>
+      (await supabaseAdmin.from('itens_comanda').select('comanda_id, produto_id, valor_unit, ficha_bar').in('comanda_id', ids).not('produto_id', 'is', null)).data)).forEach(i => {
+        const k = i.comanda_id + '|' + i.produto_id
+        const v = parseFloat(i.valor_unit) || 0
+        if (!itemDe[k]) itemDe[k] = { min: v, max: v, ficha: !!i.ficha_bar }
+        else { itemDe[k].min = Math.min(itemDe[k].min, v); itemDe[k].max = Math.max(itemDe[k].max, v); itemDe[k].ficha = itemDe[k].ficha || !!i.ficha_bar }
+      })
+
+    const cli = {}
+    ;(await emLotes(uniq(Object.values(cmd).map(c => c.cliente_id)), async ids =>
+      (await supabaseAdmin.from('clientes').select('id, nome').in('id', ids)).data)).forEach(c => { cli[c.id] = c.nome })
+    const pes = {}
+    ;(await emLotes(uniq(movs.map(m => m.responsavel_id).concat(Object.values(cmd).map(c => c.colaborador_id))), async ids =>
+      (await supabaseAdmin.from('colaboradores').select('id, nome').in('id', ids)).data)).forEach(c => { pes[c.id] = c.nome })
+
+    const linhas = movs.map(m => {
+      const p = prod[m.produto_id] || {}
+      const venda = m.tipo === 'saida_venda'
+      const c = venda ? cmd[m.referencia_id] : null
+      const it = c ? itemDe[c.id + '|' + m.produto_id] : null
+      return {
+        id: m.id, data: m.criado_em,
+        tipo: venda ? 'venda' : 'vale',
+        produto: p.nome || '—', quantidade: parseInt(m.quantidade) || 0,
+        preco_tabela: parseFloat(p.valor_venda) || 0,
+        valor_cobrado: it ? (it.min === it.max ? it.min : null) : null,
+        ficha: it ? it.ficha : false,
+        comanda_id: c ? c.id : (venda ? m.referencia_id : null),
+        comanda_status: c ? c.status : null,
+        cliente: c ? (cli[c.cliente_id] || null) : null,
+        barbeiro: c ? (pes[c.colaborador_id] || null) : null,
+        lancado_por: pes[m.responsavel_id] || '—',
+        observacao: m.observacao || ''
+      }
+    })
+    return res.json({ unidade_id, pode_escolher: req.usuario.perfil === 'proprietario', ini, fim, saidas: linhas })
+  } catch (err) {
+    console.error('[estoque/saidas]', err.message)
+    return res.status(500).json({ erro: 'Erro ao buscar saídas de estoque' })
+  }
+})
 // POST /estoque/acerto — digita a CONTAGEM real e o sistema ajusta o saldo (só Proprietário)
 router.post('/estoque/acerto', autenticar, exigirPerfil('proprietario'), async (req, res) => {
   try {
