@@ -842,8 +842,8 @@ router.get('/estoque/movimentacoes', autenticar, exigirPerfil('proprietario','ge
     return res.status(500).json({ erro: 'Erro ao buscar movimentações' })
   }
 })
-// GET /estoque/saidas?unidade_id=&ini=YYYY-MM-DD&fim=YYYY-MM-DD&tipo=venda|vale
-// Uma linha por SAÍDA de estoque (venda em comanda ou vale de funcionário), com
+// GET /estoque/saidas?unidade_id=&ini=YYYY-MM-DD&fim=YYYY-MM-DD&tipo=entrada|venda|vale|ajuste
+// Uma linha por MOVIMENTAÇÃO de estoque (entrada, venda, vale, ajuste), com
 // comanda, cliente, barbeiro, quem lançou e o valor cobrado no item. Máx. 31 dias.
 router.get('/estoque/saidas', autenticar, exigirPerfil('proprietario','gerente','caixa'), TELA_ESTOQUE, async (req, res) => {
   try {
@@ -857,13 +857,14 @@ router.get('/estoque/saidas', autenticar, exigirPerfil('proprietario','gerente',
     const dIni = new Date(ini + 'T00:00:00-03:00')
     const dFim = new Date(new Date(fim + 'T00:00:00-03:00').getTime() + 24 * 3600 * 1000)
     if ((dFim - dIni) > 31 * 24 * 3600 * 1000) return res.status(400).json({ erro: 'Escolha no máximo 31 dias' })
-    const tipos = req.query.tipo === 'venda' ? ['saida_venda'] : req.query.tipo === 'vale' ? ['saida_consumo'] : ['saida_venda', 'saida_consumo']
+    const MAPA = { entrada: ['entrada'], venda: ['saida_venda'], vale: ['saida_consumo'], ajuste: ['ajuste'], saidas: ['saida_venda', 'saida_consumo'] }
+    const tipos = MAPA[req.query.tipo] || ['entrada', 'saida_venda', 'saida_consumo', 'ajuste']
 
     let movs = []
     { let from = 0
       while (true) {
         const { data, error } = await supabaseAdmin.from('movimentacoes_estoque')
-          .select('id, produto_id, tipo, quantidade, referencia_id, responsavel_id, observacao, criado_em')
+          .select('id, produto_id, tipo, quantidade, valor_unitario, referencia_id, responsavel_id, observacao, criado_em')
           .eq('unidade_id', unidade_id).in('tipo', tipos)
           .gte('criado_em', dIni.toISOString()).lt('criado_em', dFim.toISOString())
           .order('criado_em', { ascending: false }).range(from, from + 999)
@@ -881,7 +882,7 @@ router.get('/estoque/saidas', autenticar, exigirPerfil('proprietario','gerente',
     ;(await emLotes(uniq(movs.map(m => m.produto_id)), async ids =>
       (await supabaseAdmin.from('produtos').select('id, nome, valor_venda').in('id', ids)).data)).forEach(p => { prod[p.id] = p })
 
-    const cmdIds = uniq(movs.filter(m => m.tipo === 'saida_venda').map(m => m.referencia_id))
+    const cmdIds = uniq(movs.filter(m => m.tipo === 'saida_venda' || m.tipo === 'ajuste').map(m => m.referencia_id))
     const cmd = {}
     ;(await emLotes(cmdIds, async ids =>
       (await supabaseAdmin.from('comandas').select('id, cliente_id, colaborador_id, status, finalizada_em').in('id', ids)).data)).forEach(c => { cmd[c.id] = c })
@@ -904,12 +905,15 @@ router.get('/estoque/saidas', autenticar, exigirPerfil('proprietario','gerente',
     const linhas = movs.map(m => {
       const p = prod[m.produto_id] || {}
       const venda = m.tipo === 'saida_venda'
-      const c = venda ? cmd[m.referencia_id] : null
-      const it = c ? itemDe[c.id + '|' + m.produto_id] : null
+      const c = (venda || m.tipo === 'ajuste') ? cmd[m.referencia_id] : null
+      const it = (c && venda) ? itemDe[c.id + '|' + m.produto_id] : null
+      const q = parseInt(m.quantidade) || 0
+      const tipo = m.tipo === 'entrada' ? 'entrada' : venda ? 'venda' : m.tipo === 'saida_consumo' ? 'vale' : (c ? 'devolucao' : 'ajuste')
       return {
-        id: m.id, data: m.criado_em,
-        tipo: venda ? 'venda' : 'vale',
-        produto: p.nome || '—', quantidade: parseInt(m.quantidade) || 0,
+        id: m.id, data: m.criado_em, tipo,
+        produto: p.nome || '—', quantidade: Math.abs(q),
+        movimento: String(m.tipo).startsWith('saida') ? -Math.abs(q) : q,
+        custo: m.tipo === 'entrada' && m.valor_unitario != null ? parseFloat(m.valor_unitario) : null,
         preco_tabela: parseFloat(p.valor_venda) || 0,
         valor_cobrado: it ? (it.min === it.max ? it.min : null) : null,
         ficha: it ? it.ficha : false,
